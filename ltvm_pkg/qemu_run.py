@@ -27,6 +27,7 @@ from .vm_state import (
     BRIDGE,
     EXIT_ERROR,
     GATEWAY,
+    PREFIX_LEN,
     VMInfo,
     VMNotFound,
     qemu_binary_for_arch,
@@ -532,6 +533,7 @@ def _start_qemu(vm: VMInfo) -> None:
     extra_nics = vm.extra_nics()
     fc_nics_fragment = ""
     fc_nic_ips_fragment = ""
+    fc_nic_prefixes_fragment = ""
     if extra_nics:
         # Replace the ':' in 'passthrough:0000:00:02.0' with ';' on the
         # cmdline so the CSV separator stays unambiguous.  rc.local
@@ -547,8 +549,17 @@ def _start_qemu(vm: VMInfo) -> None:
         # to eth{N+1}.  Empty IPs (shouldn't happen on a freshly
         # created VM but may on an old .info file) become bare commas
         # so rc.local can count positions.
+        #
+        # fc_nic_ips carries bare dotted quads, never a /prefix: an
+        # image older than fc_nic_prefixes appends its own "/24" and
+        # would silently assign nothing if the address already had one.
+        # The prefix travels in its own parallel array, which such an
+        # image simply ignores -- and 24 is what it assumes anyway.
         if vm.nic_ips:
             fc_nic_ips_fragment = f" fc_nic_ips={','.join(vm.nic_ips)}"
+            fc_nic_prefixes_fragment = " fc_nic_prefixes=" + ",".join(
+                str(PREFIX_LEN) for _ in vm.nic_ips
+            )
     boot_args = (
         f"console={console} reboot=k panic=1 crashkernel={crashkernel} "
         f"net.ifnames=0 biosdevname=0 "
@@ -557,6 +568,7 @@ def _start_qemu(vm: VMInfo) -> None:
         f"fc_name={vm.name}"
         f"{fc_nics_fragment}"
         f"{fc_nic_ips_fragment}"
+        f"{fc_nic_prefixes_fragment}"
     )
     # Last, so that a parameter whose last occurrence wins
     # (crashkernel=, panic=) takes the user's value.
