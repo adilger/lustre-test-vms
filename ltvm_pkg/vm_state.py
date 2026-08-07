@@ -369,8 +369,56 @@ def _read_subnet() -> str:
     return subnet
 
 
+def _read_extra_subnet() -> str:
+    """Return the subnet every extra (--nic) NIC is addressed from.
+
+    Overridable with ``$LTVM_EXTRA_SUBNET`` or ``VM_DIR/extra-subnet``
+    so a host whose real network already uses the default can move it.
+    """
+    env = os.environ.get("LTVM_EXTRA_SUBNET")
+    if env:
+        return env
+    f = VM_DIR / "extra-subnet"
+    if f.is_file():
+        v = f.read_text().strip()
+        if v:
+            return v
+    return "172.16.100"
+
+
 SUBNET = _read_subnet()
 GATEWAY = f"{SUBNET}.1"
+# Extra NICs share ONE network of their own -- the Lustre network --
+# separate from mgmt.  Separate from mgmt because two scope-link routes
+# for the mgmt prefix made the guest send all peer traffic out eth0.
+# Shared between the extras because LNet multi-rail is several NIs on
+# one LNet network; a network per NIC index would instead give one
+# rail each on o2ib0 and o2ib1.  Two NICs on one subnet is ordinary
+# Linux multi-homing, and needs the source-based policy routing that
+# targets/common/rc.local installs.
+EXTRA_SUBNET = _read_extra_subnet()
+# Every network ltvm hands out is a /24.  Guest-side prefix length is
+# carried on the kernel cmdline (fc_nic_prefixes=) rather than being
+# hardcoded in rc.local.
+PREFIX_LEN = 24
+
+
+def subnet_for_nic(idx: int) -> str:
+    """Return the /24 prefix NIC *idx* is addressed from.
+
+    Index 0 is the mgmt NIC (eth0); 1..N are the extras (eth1..ethN),
+    which all share EXTRA_SUBNET.
+    """
+    if idx == 0:
+        return SUBNET
+    if EXTRA_SUBNET == SUBNET:
+        raise ValueError(
+            f"extra-NIC subnet {EXTRA_SUBNET}.0/24 is the mgmt subnet; "
+            f"set LTVM_EXTRA_SUBNET to a different network"
+        )
+    return EXTRA_SUBNET
+
+
 MARKER = "# qemu-vm"
 ROOT_PASSWORD = "initial0"
 # Cross-arch (TCG) boots are 5-20x slower than native; let operators bump

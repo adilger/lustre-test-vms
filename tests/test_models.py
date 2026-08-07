@@ -252,6 +252,114 @@ class TestVMInfoNicsField:
         assert mac1 != mac_for_name(vm.name)
 
 
+class TestSubnetForNic:
+    """The mgmt NIC and the extra NICs are on separate networks; the
+    extras share one network with each other, because LNet multi-rail
+    is several NIs on ONE LNet network."""
+
+    def test_mgmt_nic_uses_the_mgmt_subnet(self) -> None:
+        from ltvm_pkg import vm_state
+
+        with patch("ltvm_pkg.vm_state.SUBNET", "192.168.100"):
+            assert vm_state.subnet_for_nic(0) == "192.168.100"
+
+    def test_every_extra_nic_shares_one_subnet(self) -> None:
+        from ltvm_pkg import vm_state
+
+        with (
+            patch("ltvm_pkg.vm_state.SUBNET", "192.168.100"),
+            patch("ltvm_pkg.vm_state.EXTRA_SUBNET", "172.16.100"),
+        ):
+            nets = [vm_state.subnet_for_nic(i) for i in (1, 2, 3)]
+        assert nets == ["172.16.100"] * 3
+
+    def test_extra_subnet_equal_to_mgmt_rejected(self) -> None:
+        """A mgmt subnet reused as the extra network is a config
+        error, not something to silently allocate over."""
+        from ltvm_pkg import vm_state
+
+        with (
+            patch("ltvm_pkg.vm_state.SUBNET", "172.16.100"),
+            patch("ltvm_pkg.vm_state.EXTRA_SUBNET", "172.16.100"),
+        ):
+            assert vm_state.subnet_for_nic(0) == "172.16.100"
+            with pytest.raises(ValueError):
+                vm_state.subnet_for_nic(1)
+
+
+class TestVMInfoNicIpsField:
+    """NIC_IPS stays a plain list of dotted quads even though extras
+    moved off the mgmt /24 -- the network is derivable from the
+    address, so the .info format did not have to grow."""
+
+    def test_nic_ips_on_their_own_networks_round_trip(
+        self, tmp_sockets: Path
+    ) -> None:
+        vm = VMInfo(
+            name="rails",
+            ip="192.168.100.60",
+            nics=["softroce", "softroce"],
+            nic_ips=["172.16.100.60", "172.16.100.61"],
+        )
+        vm.save()
+        assert (
+            "NIC_IPS=172.16.100.60|172.16.100.61\n" in vm.info_path.read_text()
+        )
+        loaded = VMInfo.load("rails")
+        assert loaded.nic_ips == ["172.16.100.60", "172.16.100.61"]
+
+    def test_legacy_info_file_without_nic_ips_line(
+        self, tmp_sockets: Path
+    ) -> None:
+        """A pre-fix .info: NICS= present, NIC_IPS= absent entirely.
+
+        It must still load, keeping the VM usable across an ltvm
+        upgrade -- the extras simply have no recorded address.
+        """
+        info = tmp_sockets / "old.info"
+        info.write_text(
+            "NAME=old\n"
+            "IP=192.168.100.90\n"
+            "PID=0\n"
+            "TAP=tap-old\n"
+            "MAC=AA:FC:00:00:00:01\n"
+            "VCPUS=2\n"
+            "MEM=2048\n"
+            "MDT_DISKS=0\n"
+            "OST_DISKS=0\n"
+            "IMAGE=\n"
+            "KERNEL=\n"
+            "NICS=tcp\n"
+        )
+        vm = VMInfo.load("old")
+        assert vm.nics == ["tcp"]
+        assert vm.nic_ips == []
+
+    def test_legacy_info_file_with_mgmt_subnet_nic_ips(
+        self, tmp_sockets: Path
+    ) -> None:
+        """A VM created before the fix has its extras on the mgmt /24.
+        Loading must not rewrite or reject them."""
+        info = tmp_sockets / "sameteam.info"
+        info.write_text(
+            "NAME=sameteam\n"
+            "IP=192.168.100.33\n"
+            "PID=0\n"
+            "TAP=tap-sameteam\n"
+            "MAC=AA:FC:00:00:00:02\n"
+            "VCPUS=2\n"
+            "MEM=2048\n"
+            "MDT_DISKS=0\n"
+            "OST_DISKS=0\n"
+            "IMAGE=\n"
+            "KERNEL=\n"
+            "NICS=tcp\n"
+            "NIC_IPS=192.168.100.34\n"
+        )
+        vm = VMInfo.load("sameteam")
+        assert vm.nic_ips == ["192.168.100.34"]
+
+
 class TestVMInfoLoadCorruption:
     """VMInfo.load fails loud on corrupt int fields -- writes are atomic
     (tempfile + rename) so a truncated/garbage int signals real damage."""

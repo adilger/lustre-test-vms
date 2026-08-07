@@ -22,13 +22,12 @@ from .priv import ensure_lock_file as _ensure_lock_file
 from .priv import sudo_ready, sudo_run
 from .qemu_run import die, run
 from .vm_state import (
-    GATEWAY,
     MARKER,
     ROOT_PASSWORD,
-    SUBNET,
     VM_DIR,
     VMInfo,
     VMNotFound,
+    subnet_for_nic,
 )
 
 log = logging.getLogger(__name__)
@@ -285,14 +284,23 @@ def extra_mac_for_name(name: str, idx: int) -> str:
     return f"AA:FC:00:{h[0:2]}:{h[2:4]}:{h[4:6]}"
 
 
-def _used_ips(exclude_name: str) -> set[str]:
-    """Return every IP currently in use by any VM on this host.
+def _net_of(ip: str) -> str:
+    """Return the /24 prefix an address belongs to ('a.b.c.d' -> 'a.b.c')."""
+    return ip.rsplit(".", 1)[0]
+
+
+def _used_ips_by_net(exclude_name: str) -> dict[str, set[str]]:
+    """Return the in-use addresses of every VM, bucketed by their /24.
 
     Scans both the primary mgmt IP (``VMInfo.ip``) and any per-extra-NIC
-    IPs (``VMInfo.nic_ips``) so a multi-NIC VM's addresses don't collide
-    with another VM's mgmt or extras.
+    IPs (``VMInfo.nic_ips``).  Uniqueness is per-network: extras now live
+    on a network of their own, so the same host octet on mgmt and on the
+    extra network is legal and must not read as a collision.  Each
+    address is filed under its own prefix, which also files the extras of
+    a pre-fix VM (allocated from the mgmt /24) under mgmt, where they
+    really are.
     """
-    used: set[str] = set()
+    used: dict[str, set[str]] = {}
     for n in VMInfo.all_names():
         if n == exclude_name:
             continue
@@ -312,10 +320,18 @@ def _used_ips(exclude_name: str) -> set[str]:
                 "skipping corrupt VM state for %r during IP scan: %s", n, e
             )
             continue
-        if vm.ip:
-            used.add(vm.ip)
-        used.update(ip for ip in vm.nic_ips if ip)
+        for ip in [vm.ip, *vm.nic_ips]:
+            if ip:
+                used.setdefault(_net_of(ip), set()).add(ip)
     return used
+
+
+def _used_ips(exclude_name: str) -> set[str]:
+    """Every IP in use by any VM, flattened across all networks."""
+    flat: set[str] = set()
+    for ips in _used_ips_by_net(exclude_name).values():
+        flat |= ips
+    return flat
 
 
 def _validate_explicit_ip(ip: str) -> None:
@@ -332,10 +348,14 @@ def _validate_explicit_ip(ip: str) -> None:
         addr = ipaddress.IPv4Address(ip)
     except ipaddress.AddressValueError:
         die(f"--ip {ip!r} is not a valid IPv4 address")
-    net = ipaddress.IPv4Network(f"{SUBNET}.0/24")
+    # Read the mgmt prefix at call time, not from the import-time
+    # snapshot: --ip pins the mgmt NIC, and subnet_for_nic(0) is the
+    # one place that says which /24 that is.
+    mgmt = subnet_for_nic(0)
+    net = ipaddress.IPv4Network(f"{mgmt}.0/24")
     if addr not in net:
         die(f"--ip {ip} is outside the VM subnet {net}")
-    if ip == GATEWAY:
+    if ip == f"{mgmt}.1":
         die(f"--ip {ip} is the bridge gateway address")
     if addr == net.network_address or addr == net.broadcast_address:
         die(f"--ip {ip} is a network/broadcast address")
@@ -353,6 +373,13 @@ def alloc_ip(
     Returns a list of IPs of length *count*.  Element 0 is the mgmt IP
     (eth0); remaining elements are for extra NICs (eth1, eth2, ...).
 
+    Element *i* comes from ``subnet_for_nic(i)``: mgmt from the mgmt
+    /24, every extra NIC from the shared extra /24.  Uniqueness is
+    checked within a network only, so the mgmt NIC and the first extra
+    normally share a host octet (the scan is seeded from the same
+    per-name hash on both networks), while two extras of one VM -- on
+    one network -- always get different ones.
+
     ``explicit_ip`` (optional) pins the mgmt IP; extras are still
     auto-allocated.  Pass None to auto-allocate all IPs.
 
@@ -365,41 +392,38 @@ def alloc_ip(
     if count < 1:
         raise ValueError(f"alloc_ip count must be >= 1, got {count}")
     with _ip_alloc_lock():
-        used = _used_ips(name)
+        used = _used_ips_by_net(name)
         ips: list[str] = []
         if explicit_ip:
             _validate_explicit_ip(explicit_ip)
-            if explicit_ip in used:
+            if explicit_ip in used.get(_net_of(explicit_ip), set()):
                 die(f"IP {explicit_ip} already used by another VM")
             ips.append(explicit_ip)
-            used.add(explicit_ip)
+            used.setdefault(_net_of(explicit_ip), set()).add(explicit_ip)
 
         # Deterministic starting octet so ltvm create returns a stable
         # IP for the same name across re-creates (matches pre-multi-IP
-        # behaviour).  Scan forward until we have `count` free octets.
+        # behaviour).  Scan forward until we find a free octet on this
+        # NIC's network.
         base_octet = (
             int(hashlib.md5(name.encode()).hexdigest()[:4], 16) % 244
         ) + 10
-        need = count - len(ips)
-        if need > 0:
+        for idx in range(len(ips), count):
+            subnet = subnet_for_nic(idx)
+            taken = used.setdefault(subnet, set())
             # Wider scan window than 244 deltas is pointless -- the /24
             # only has 244 usable host addresses -- but we walk the full
             # range so a heavily-populated host still finds free slots
             # (including wrap-around past the hash seed).
-            delta = 0
-            while need > 0 and delta < 244:
+            for delta in range(244):
                 octet = ((base_octet - 10 + delta) % 244) + 10
-                ip = f"{SUBNET}.{octet}"
-                if ip not in used:
+                ip = f"{subnet}.{octet}"
+                if ip not in taken:
                     ips.append(ip)
-                    used.add(ip)
-                    need -= 1
-                delta += 1
-            if need > 0:
-                die(
-                    f"No free IP addresses available in {SUBNET}.0/24 "
-                    f"(need {count}, short by {need})"
-                )
+                    taken.add(ip)
+                    break
+            else:
+                die(f"No free IP addresses available in {subnet}.0/24")
         yield ips
 
 
