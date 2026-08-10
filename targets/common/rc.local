@@ -17,6 +17,10 @@ FC_NICS=$(cat /proc/cmdline | tr ' ' '\n' | grep ^fc_nics= | cut -d= -f2)
 FC_NIC_IPS=$(cat /proc/cmdline | tr ' ' '\n' | grep ^fc_nic_ips= | cut -d= -f2)
 FC_NIC_PREFIXES=$(cat /proc/cmdline | tr ' ' '\n' | grep ^fc_nic_prefixes= \
     | cut -d= -f2)
+FC_NIC_IP6S=$(cat /proc/cmdline | tr ' ' '\n' | grep ^fc_nic_ip6s= \
+    | cut -d= -f2)
+FC_NIC_IP6_PREFIXES=$(cat /proc/cmdline | tr ' ' '\n' \
+    | grep ^fc_nic_ip6_prefixes= | cut -d= -f2)
 
 if [ -n "${FC_IP}" ]; then
     ip addr add ${FC_IP}/24 dev eth0 2>/dev/null
@@ -26,6 +30,12 @@ if [ -n "${FC_IP}" ]; then
     # public resolver.  Use FC_GW so a non-default --subnet works.
     echo "nameserver ${FC_GW:-192.168.100.1}" > /etc/resolv.conf
     echo "nameserver 8.8.8.8" >> /etc/resolv.conf
+    # Mgmt is IPv4 only, by design.  Suppress router advertisements so
+    # an IPv6-capable host bridge cannot give eth0 a global address --
+    # test-framework.sh's h2name_or_ip() reads `hostname -I` and would
+    # then offer it as a NID candidate.
+    sysctl -qw net.ipv6.conf.eth0.accept_ra=0 2>/dev/null || true
+    sysctl -qw net.ipv6.conf.eth0.autoconf=0 2>/dev/null || true
 fi
 
 if [ -n "${FC_NAME}" ]; then
@@ -81,6 +91,26 @@ setup_nic_policy_route() {
     ip rule add from "${addr}" lookup "${table}" 2>/dev/null || true
 }
 
+# setup_nic_policy_route6 <ifname> <addr> <prefixlen> <idx>
+#
+# Same problem as the IPv4 twin: the extra NICs share one prefix on one
+# L2 domain, so the main table holds one connected route per interface
+# and the kernel uses whichever came first.  A per-interface table
+# selected by source address keeps an NI's traffic on its own rail.
+#
+# There is no IPv6 rp_filter; the receive side needs nothing.
+setup_nic_policy_route6() {
+    local ifname=$1 addr=$2 plen=$3 idx=$4
+    local table=$(( 100 + idx ))
+
+    while ip -6 rule del table "${table}" 2>/dev/null; do :; done
+    ip -6 route flush table "${table}" 2>/dev/null || true
+
+    ip -6 route add "${addr}/${plen}" dev "${ifname}" \
+        src "${addr}" table "${table}" 2>/dev/null || true
+    ip -6 rule add from "${addr}" lookup "${table}" 2>/dev/null || true
+}
+
 # fc_nics is a comma-separated list of NIC *types* in the order they
 # were added on the ltvm command line.  The first entry maps to eth1,
 # the second to eth2, etc. -- the mgmt NIC (eth0) is not represented
@@ -116,6 +146,11 @@ if [ -n "${FC_NICS}" ]; then
     # rather than being assumed here.  Absent (older ltvm) -> 24, which
     # is what this script used to hardcode.
     IFS=',' read -ra _nic_prefixes <<< "${FC_NIC_PREFIXES:-}"
+    # The IPv6 pair of the same two arrays (fc_nic_ip6s=,
+    # fc_nic_ip6_prefixes=).  Absent on an older ltvm -> empty ->
+    # IPv4-only extras, exactly as before.
+    IFS=',' read -ra _nic_ip6s <<< "${FC_NIC_IP6S:-}"
+    IFS=',' read -ra _nic_ip6_prefixes <<< "${FC_NIC_IP6_PREFIXES:-}"
     for entry in "${_nic_entries[@]}"; do
         # Split type[;arg] -- ';' is the cmdline-safe arg separator.
         nic_type="${entry%%;*}"
@@ -129,6 +164,8 @@ if [ -n "${FC_NICS}" ]; then
         ifname="eth${idx}"
         nic_ip="${_nic_ips[$((idx - 1))]:-}"
         nic_prefix="${_nic_prefixes[$((idx - 1))]:-24}"
+        nic_ip6="${_nic_ip6s[$((idx - 1))]:-}"
+        nic_ip6_prefix="${_nic_ip6_prefixes[$((idx - 1))]:-64}"
         if ip link show "${ifname}" >/dev/null 2>&1; then
             ip link set "${ifname}" up 2>/dev/null || true
             if [ -n "${nic_ip}" ]; then
@@ -140,6 +177,23 @@ if [ -n "${FC_NICS}" ]; then
                     2>/dev/null || true
                 setup_nic_policy_route "${ifname}" "${nic_ip}" \
                     "${nic_prefix}" "${idx}"
+            fi
+            if [ -n "${nic_ip6}" ]; then
+                # Static addressing only: RAs and SLAAC would add
+                # addresses LNet might pick instead, and the NID has to
+                # be the same on every boot.  DAD leaves a fresh address
+                # tentative for about a second, and LNet starting inside
+                # that window binds nothing.
+                sysctl -qw "net.ipv6.conf.${ifname}.accept_ra=0" \
+                    2>/dev/null || true
+                sysctl -qw "net.ipv6.conf.${ifname}.autoconf=0" \
+                    2>/dev/null || true
+                sysctl -qw "net.ipv6.conf.${ifname}.accept_dad=0" \
+                    2>/dev/null || true
+                ip -6 addr add "${nic_ip6}/${nic_ip6_prefix}" \
+                    dev "${ifname}" nodad 2>/dev/null || true
+                setup_nic_policy_route6 "${ifname}" "${nic_ip6}" \
+                    "${nic_ip6_prefix}" "${idx}"
             fi
         else
             echo "rc.local: warning: ${ifname} not present for" \

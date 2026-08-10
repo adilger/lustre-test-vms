@@ -34,23 +34,23 @@ GOLDEN = [
     ("rocky9", "image", None, None, "9e7c7895ccd25eb6"),
     ("rocky9-64k", "container", None, None, "2b44594e1b246688"),
     ("rocky9-64k", "kernel", None, None, "3650a25517ffed13"),
-    ("rocky9-64k", "image", None, None, "a624cf01c806dbec"),
+    ("rocky9-64k", "image", None, None, "2c624b692d936820"),
     ("rocky10", "container", None, None, "a8b1c88bcad5e635"),
     ("rocky10", "kernel", None, None, "d12f8b2e1233413a"),
     ("rocky10", "image", None, None, "b82d23e06807921b"),
     ("mainline", "container", None, None, "3e5f339a82347536"),
     ("mainline", "kernel", None, None, "8a48d68aa12f941b"),
-    ("mainline", "image", None, None, "587bf9e01c1d80b9"),
+    ("mainline", "image", None, None, "f89e1a9ac9858958"),
     ("ubuntu2404", "container", None, None, "eebd5c4d9d582ce5"),
     ("ubuntu2404", "kernel", None, None, "955f58eda24d55d4"),
     ("ubuntu2404", "image", None, None, "e0897611d216c1bf"),
     # A variant must not perturb the base hashes above, and must differ
     # from them.
     ("rocky9", "container", None, "mofed-24", "388eb197f85522fe"),
-    ("rocky9", "image", None, "mofed-24", "4ea140c2fd1dcbf5"),
+    ("rocky9", "image", None, "mofed-24", "11cb1721a72a011e"),
     # An explicitly named kernel.
     ("rocky9", "kernel", "5.14-rhel9.5", None, "da5d0ef496a45b25"),
-    ("rocky9", "image", "5.14-rhel9.5", None, "b557a896a00e0b0f"),
+    ("rocky9", "image", "5.14-rhel9.5", None, "56c8af98f8233be4"),
 ]
 
 
