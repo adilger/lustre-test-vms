@@ -386,6 +386,57 @@ def _read_extra_subnet() -> str:
     return "172.16.100"
 
 
+def _validate_subnet6(prefix: str, source: str) -> str:
+    """Check a /64 prefix keeps every address at its full width.
+
+    Exactly four hextets, each parsing as hex and each >= 0x1000.  A
+    hextet at or above 0x1000 always prints four digits and is never
+    zero, so no address built on the prefix can lose a leading zero or
+    gain a '::'.
+    """
+    hextets = prefix.split(":")
+    if len(hextets) != 4:
+        raise ValueError(
+            f"{source} must be exactly four colon-separated hextets "
+            f"(a /64 prefix with no trailing '::'), got {prefix!r}"
+        )
+    for h in hextets:
+        try:
+            value = int(h, 16)
+        except ValueError:
+            raise ValueError(
+                f"{source} hextet {h!r} is not hexadecimal: {prefix!r}"
+            ) from None
+        if value < 0x1000:
+            raise ValueError(
+                f"{source} hextet {h!r} is below 0x1000: every hextet must "
+                f"be 0x1000 or more so the address always renders at full "
+                f"width (eight four-digit groups, no '::').  Short "
+                f"addresses are exactly what the IPv6 test coverage exists "
+                f"to avoid."
+            )
+    return prefix
+
+
+def _read_extra_subnet6() -> str:
+    """Return the /64 prefix every extra (--nic) NIC is addressed from.
+
+    Overridable with ``$LTVM_EXTRA_SUBNET6`` or ``VM_DIR/extra-subnet6``,
+    mirroring ``_read_extra_subnet()``.  The override is validated: a
+    prefix with a hextet below 0x1000 would silently give the whole
+    cluster short addresses.
+    """
+    env = os.environ.get("LTVM_EXTRA_SUBNET6")
+    if env:
+        return _validate_subnet6(env, "LTVM_EXTRA_SUBNET6")
+    f = VM_DIR / "extra-subnet6"
+    if f.is_file():
+        v = f.read_text().strip()
+        if v:
+            return _validate_subnet6(v, "LTVM_EXTRA_SUBNET6")
+    return "fd17:2016:1000:f100"
+
+
 SUBNET = _read_subnet()
 GATEWAY = f"{SUBNET}.1"
 # Extra NICs share ONE network of their own -- the Lustre network --
@@ -401,6 +452,35 @@ EXTRA_SUBNET = _read_extra_subnet()
 # carried on the kernel cmdline (fc_nic_prefixes=) rather than being
 # hardcoded in rc.local.
 PREFIX_LEN = 24
+# The extra NICs additionally carry one static ULA each, from a single
+# /64 that echoes EXTRA_SUBNET.  Mgmt (eth0) stays IPv4 only.
+EXTRA_SUBNET6 = _read_extra_subnet6()
+PREFIX_LEN6 = 64
+
+
+def nic_ip6(ipv4: str) -> str:
+    """The IPv6 address paired with an extra NIC's IPv4 address.
+
+    The interface ID spells out the four IPv4 octets, each as 'f'
+    followed by the octet zero-padded to three decimal digits, so
+    172.16.100.203 pairs with
+
+        fd17:2016:1000:f100:f172:f016:f100:f203
+
+    The leading 'f' puts every hextet above 0x1000, which is what keeps
+    the address at its full 39-character width: no hextet can lose a
+    leading zero and none can be zero, so inet_ntop can never emit a
+    '::'.  The NID is then 43 characters against LNET_NIDSTR_SIZE of
+    64, versus 19 for the longest IPv4 NID.
+
+    The encoding is injective in the whole IPv4 address, so uniqueness
+    is inherited from the IPv4 allocator -- there is deliberately no
+    second allocator and no second uniqueness rule.
+    """
+    octets = ipv4.split(".")
+    if len(octets) != 4:
+        raise ValueError(f"not an IPv4 address: {ipv4!r}")
+    return ":".join([EXTRA_SUBNET6] + [f"f{int(o):03d}" for o in octets])
 
 
 def subnet_for_nic(idx: int) -> str:

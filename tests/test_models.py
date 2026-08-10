@@ -287,6 +287,102 @@ class TestSubnetForNic:
                 vm_state.subnet_for_nic(1)
 
 
+class TestNicIp6:
+    """Every extra NIC's IPv6 address is derived from its IPv4 one, and
+    must render at full width."""
+
+    def test_maps_an_ipv4_address_to_its_pair(self) -> None:
+        from ltvm_pkg import vm_state
+
+        with patch("ltvm_pkg.vm_state.EXTRA_SUBNET6", "fd17:2016:1000:f100"):
+            assert (
+                vm_state.nic_ip6("172.16.100.203")
+                == "fd17:2016:1000:f100:f172:f016:f100:f203"
+            )
+
+    def test_different_octets_give_different_addresses(self) -> None:
+        from ltvm_pkg import vm_state
+
+        with patch("ltvm_pkg.vm_state.EXTRA_SUBNET6", "fd17:2016:1000:f100"):
+            a = vm_state.nic_ip6("172.16.100.203")
+            b = vm_state.nic_ip6("172.16.100.204")
+        assert a != b
+
+    def test_not_an_ipv4_address_rejected(self) -> None:
+        from ltvm_pkg import vm_state
+
+        with pytest.raises(ValueError):
+            vm_state.nic_ip6("172.16.100")
+
+    def test_addresses_always_render_at_full_width(self) -> None:
+        """The property the whole scheme exists to hold: 39 characters,
+        eight four-digit hextets, never compressed.  A short address is
+        shorter than the IPv4 one it replaces, so it exercises nothing.
+        """
+        import ipaddress
+
+        from ltvm_pkg import vm_state
+
+        with patch("ltvm_pkg.vm_state.EXTRA_SUBNET6", "fd17:2016:1000:f100"):
+            for octet in range(10, 254):
+                a = vm_state.nic_ip6(f"172.16.100.{octet}")
+                assert len(a) == 39, a
+                assert "::" not in a, a
+                assert str(ipaddress.IPv6Address(a)) == a, a
+                assert all(len(h) == 4 for h in a.split(":")), a
+
+
+class TestExtraSubnet6Validation:
+    """An override that breaks the width invariant is refused at read
+    time, because nothing downstream would notice a short address."""
+
+    def test_hextet_below_0x1000_rejected(self) -> None:
+        from ltvm_pkg import vm_state
+
+        with patch.dict("os.environ", {"LTVM_EXTRA_SUBNET6": "fd00:1:2:3"}):
+            with pytest.raises(ValueError) as e:
+                vm_state._read_extra_subnet6()
+        assert "LTVM_EXTRA_SUBNET6" in str(e.value)
+        assert "0x1000" in str(e.value)
+
+    def test_wrong_hextet_count_rejected(self) -> None:
+        from ltvm_pkg import vm_state
+
+        with patch.dict(
+            "os.environ", {"LTVM_EXTRA_SUBNET6": "fd17:2016:1000"}
+        ):
+            with pytest.raises(ValueError) as e:
+                vm_state._read_extra_subnet6()
+        assert "LTVM_EXTRA_SUBNET6" in str(e.value)
+
+    def test_non_hex_hextet_rejected(self) -> None:
+        from ltvm_pkg import vm_state
+
+        with patch.dict(
+            "os.environ", {"LTVM_EXTRA_SUBNET6": "fd17:2016:1000:zzzz"}
+        ):
+            with pytest.raises(ValueError) as e:
+                vm_state._read_extra_subnet6()
+        assert "LTVM_EXTRA_SUBNET6" in str(e.value)
+
+    def test_valid_override_accepted(self) -> None:
+        from ltvm_pkg import vm_state
+
+        with patch.dict(
+            "os.environ", {"LTVM_EXTRA_SUBNET6": "fd99:1234:abcd:f001"}
+        ):
+            assert vm_state._read_extra_subnet6() == "fd99:1234:abcd:f001"
+
+    def test_default_prefix_holds_the_invariant(self) -> None:
+        from ltvm_pkg import vm_state
+
+        with patch.dict("os.environ", {}, clear=True):
+            with patch("ltvm_pkg.vm_state.VM_DIR", Path("/nonexistent")):
+                prefix = vm_state._read_extra_subnet6()
+        assert prefix == "fd17:2016:1000:f100"
+        assert all(int(h, 16) >= 0x1000 for h in prefix.split(":"))
+
+
 class TestVMInfoNicIpsField:
     """NIC_IPS stays a plain list of dotted quads even though extras
     moved off the mgmt /24 -- the network is derivable from the
