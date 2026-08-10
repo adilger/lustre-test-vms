@@ -57,3 +57,7 @@ CONFIG_NF_NAT=m
 CONFIG_NF_TABLES=m
 CONFIG_IP_NF_IPTABLES=m
 CONFIG_IP_NF_NAT=m
+
+# IPv6: lnet_inet6_enumerate() is compiled out without it, so LNet can
+# never form an IPv6 NI however the guest is addressed.
+CONFIG_IPV6=y
