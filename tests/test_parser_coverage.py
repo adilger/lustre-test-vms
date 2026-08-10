@@ -409,7 +409,7 @@ class TestCmdCreateIdempotence:
             patch(
                 "ltvm_pkg.vm_commands.alloc_ip",
                 return_value=contextlib.contextmanager(
-                    lambda *a, **kw: (yield "192.168.100.5")
+                    lambda *a, **kw: (yield ["192.168.100.5"])
                 )(),
             ),
             patch(
@@ -549,7 +549,7 @@ class TestCmdCreateIdempotence:
             patch(
                 "ltvm_pkg.vm_commands.alloc_ip",
                 return_value=contextlib.contextmanager(
-                    lambda *a, **kw: (yield "192.168.100.5")
+                    lambda *a, **kw: (yield ["192.168.100.5"])
                 )(),
             ),
             patch(

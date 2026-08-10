@@ -287,6 +287,49 @@ class TestSubnetForNic:
                 vm_state.subnet_for_nic(1)
 
 
+class TestVMInfoNicIp6sField:
+    """NIC_IP6S is index-parallel to NIC_IPS and absent on older
+    .info files, which must still load."""
+
+    def test_nic_ip6s_round_trip(self, tmp_sockets: Path) -> None:
+        vm = VMInfo(
+            name="rails6",
+            ip="192.168.100.60",
+            nics=["softroce", "softroce"],
+            nic_ips=["172.16.100.60", "172.16.100.61"],
+            nic_ip6s=[
+                "fd17:2016:1000:f100:f172:f016:f100:f060",
+                "fd17:2016:1000:f100:f172:f016:f100:f061",
+            ],
+        )
+        vm.save()
+        assert (
+            "NIC_IP6S=fd17:2016:1000:f100:f172:f016:f100:f060"
+            "|fd17:2016:1000:f100:f172:f016:f100:f061\n"
+            in vm.info_path.read_text()
+        )
+        loaded = VMInfo.load("rails6")
+        assert loaded.nic_ip6s == vm.nic_ip6s
+
+    def test_legacy_info_file_without_nic_ip6s_line(
+        self, tmp_sockets: Path
+    ) -> None:
+        """A .info written before extras carried IPv6 loads with an
+        empty list, keeping the VM usable across an ltvm upgrade."""
+        info = tmp_sockets / "old6.info"
+        info.write_text(
+            "NAME=old6\n"
+            "IP=192.168.100.90\n"
+            "PID=0\n"
+            "TAP=tap-old6\n"
+            "NICS=softroce\n"
+            "NIC_IPS=172.16.100.90\n"
+        )
+        loaded = VMInfo.load("old6")
+        assert loaded.nic_ips == ["172.16.100.90"]
+        assert loaded.nic_ip6s == []
+
+
 class TestNicIp6:
     """Every extra NIC's IPv6 address is derived from its IPv4 one, and
     must render at full width."""

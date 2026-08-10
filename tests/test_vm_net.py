@@ -229,6 +229,21 @@ class TestAllocIp:
             extras = ips[1:]
             assert len(set(extras)) == len(extras)
 
+    def test_extras_get_distinct_ipv6_addresses(
+        self, tmp_vmdir: Path
+    ) -> None:
+        """The IPv6 addresses are derived from the IPv4 ones, so two
+        extras on one VM inherit the IPv4 allocator's uniqueness."""
+        from ltvm_pkg.vm_state import EXTRA_SUBNET6, nic_ip6
+
+        with vm_net.alloc_ip("multinic", count=3) as ips:
+            ip6s = [nic_ip6(ip) for ip in ips[1:]]
+        assert len(set(ip6s)) == 2
+        for a in ip6s:
+            assert a.startswith(EXTRA_SUBNET6 + ":")
+            assert len(a) == 39
+            assert "::" not in a
+
     def test_same_octet_reused_across_networks(self, tmp_vmdir: Path) -> None:
         """An address is only unique within its own network: the mgmt
         NIC and the first extra normally take the same host octet on

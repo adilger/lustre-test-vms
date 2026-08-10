@@ -55,6 +55,7 @@ from .vm_state import (
     VMInfo,
     VMNotFound,
     lustre_libdir,
+    nic_ip6,
     resolve_os_artifacts,
 )
 
@@ -745,6 +746,9 @@ def _allocate_and_persist_vm(
             variant=variant,
             nics=list(extra_nic_types),
             nic_ips=list(nic_ips),
+            # Derived from the IPv4 addresses, so uniqueness is
+            # inherited rather than re-proved by a second allocator.
+            nic_ip6s=[nic_ip6(ip) for ip in nic_ips],
             # passthrough_drivers is filled in below, inside the launch
             # umbrella, after we've actually bound each BDF to vfio-pci.
             passthrough_drivers={},

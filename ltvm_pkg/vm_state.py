@@ -574,6 +574,13 @@ class VMInfo:
     # in `self.ip`.
     nic_ips: list[str] = field(default_factory=list)
 
+    # Per-extra-NIC IPv6 addresses, index-parallel to nics and to
+    # nic_ips.  Recorded at create time so the guest and deploy read
+    # one fact rather than each recomputing it.  Older .info files
+    # without this field load as an empty list, and a VM with none is
+    # addressed exactly as before.  Mgmt (eth0) is IPv4 only.
+    nic_ip6s: list[str] = field(default_factory=list)
+
     # For passthrough NICs: which host driver owned each BDF before we
     # bound it to vfio-pci.  Populated by cmd_create after
     # vfio.bind_to_vfio(); consumed by cmd_destroy to rebind the device
@@ -673,6 +680,9 @@ class VMInfo:
             # Per-extra-NIC IPs, same index order as NICS.  '|' stays
             # unambiguous because IPs don't contain it.
             f"NIC_IPS={'|'.join(self.nic_ips)}\n"
+            # Per-extra-NIC IPv6 addresses, same index order.  '|'
+            # again: an IPv6 address contains ':' but never '|'.
+            f"NIC_IP6S={'|'.join(self.nic_ip6s)}\n"
             # BDF=driver pairs for passthrough NICs so destroy can
             # rebind.  Empty unless the VM has passthrough NICs.
             f"PASSTHROUGH_DRIVERS="
@@ -816,6 +826,10 @@ class VMInfo:
         nic_ips_raw = vals.get("NIC_IPS", "")
         nic_ips_list = [s for s in nic_ips_raw.split("|") if s]
 
+        # Missing on .info files written before extras carried IPv6.
+        nic_ip6s_raw = vals.get("NIC_IP6S", "")
+        nic_ip6s_list = [s for s in nic_ip6s_raw.split("|") if s]
+
         # PASSTHROUGH_DRIVERS is BDF=drv|BDF=drv|... (empty when no
         # passthrough NICs).  Missing on older .info files.
         pt_raw = vals.get("PASSTHROUGH_DRIVERS", "")
@@ -852,6 +866,7 @@ class VMInfo:
             variant=vals.get("VARIANT", "base"),
             nics=nics_list,
             nic_ips=nic_ips_list,
+            nic_ip6s=nic_ip6s_list,
             passthrough_drivers=pt_drivers,
             kernel_args=vals.get("KERNEL_ARGS", ""),
         )
