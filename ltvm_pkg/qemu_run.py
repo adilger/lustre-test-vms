@@ -28,6 +28,7 @@ from .vm_state import (
     EXIT_ERROR,
     GATEWAY,
     PREFIX_LEN,
+    PREFIX_LEN6,
     VMInfo,
     VMNotFound,
     qemu_binary_for_arch,
@@ -534,6 +535,8 @@ def _start_qemu(vm: VMInfo) -> None:
     fc_nics_fragment = ""
     fc_nic_ips_fragment = ""
     fc_nic_prefixes_fragment = ""
+    fc_nic_ip6s_fragment = ""
+    fc_nic_ip6_prefixes_fragment = ""
     if extra_nics:
         # Replace the ':' in 'passthrough:0000:00:02.0' with ';' on the
         # cmdline so the CSV separator stays unambiguous.  rc.local
@@ -560,6 +563,16 @@ def _start_qemu(vm: VMInfo) -> None:
             fc_nic_prefixes_fragment = " fc_nic_prefixes=" + ",".join(
                 str(PREFIX_LEN) for _ in vm.nic_ips
             )
+        # The extras' IPv6 addresses travel in their own pair of
+        # parallel arrays, omitted entirely when there are none: a VM
+        # created before extras carried IPv6 keeps a byte-identical
+        # cmdline, and an image built before them ignores two unknown
+        # parameters.
+        if vm.nic_ip6s:
+            fc_nic_ip6s_fragment = f" fc_nic_ip6s={','.join(vm.nic_ip6s)}"
+            fc_nic_ip6_prefixes_fragment = " fc_nic_ip6_prefixes=" + ",".join(
+                str(PREFIX_LEN6) for _ in vm.nic_ip6s
+            )
     boot_args = (
         f"console={console} reboot=k panic=1 crashkernel={crashkernel} "
         f"net.ifnames=0 biosdevname=0 "
@@ -569,6 +582,8 @@ def _start_qemu(vm: VMInfo) -> None:
         f"{fc_nics_fragment}"
         f"{fc_nic_ips_fragment}"
         f"{fc_nic_prefixes_fragment}"
+        f"{fc_nic_ip6s_fragment}"
+        f"{fc_nic_ip6_prefixes_fragment}"
     )
     # Last, so that a parameter whose last occurrence wins
     # (crashkernel=, panic=) takes the user's value.
