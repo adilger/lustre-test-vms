@@ -433,7 +433,7 @@ def _read_extra_subnet6() -> str:
     if f.is_file():
         v = f.read_text().strip()
         if v:
-            return _validate_subnet6(v, "LTVM_EXTRA_SUBNET6")
+            return _validate_subnet6(v, str(f))
     return "fd17:2016:1000:f100"
 
 
