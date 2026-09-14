@@ -7,6 +7,9 @@ path to more advanced setups.
 
 - Linux host (WSL2 works)
 - podman installed
+- Python 3.10+ -- EL8/EL9 ship an older `python3`, so there:
+  `dnf install -y python3.11 python3.11-pyyaml`, then run ltvm
+  as `python3.11 ./ltvm <args>` until it is installed
 - Root access (for VM lifecycle)
 
 Run the one-time host setup:
@@ -18,6 +21,10 @@ sudo ltvm install
 This installs QEMU (with microvm support), configures the
 network bridge + dnsmasq, sets up SSH keys, and puts `ltvm`
 on your PATH.
+
+The bridge claims `192.168.100.0/24`. If something on the
+machine already uses that range, install refuses rather than
+taking it over -- pick another with `--subnet 192.168.200`.
 
 It also installs tab completion for bash, zsh and fish --
 whichever of them the host has. **Open a new shell** to pick

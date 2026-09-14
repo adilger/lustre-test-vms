@@ -17,6 +17,8 @@ import textwrap
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 _LTVM_PATH = str(Path(__file__).parent.parent / "ltvm")
 
 
@@ -190,3 +192,41 @@ class TestFloorHint:
         hint = src[start : src.index("sys.exit(1)", start)]
         assert "Rocky/RHEL 8 or 9" in hint
         assert "python3.11" in hint
+
+
+class TestMissingDependency:
+    """PyYAML is a separate package from the interpreter on a distro.
+
+    The EL9 user who just installed python3.11 because the floor check
+    said to lands here next, and a traceback out of `import yaml` reads
+    as a broken tool rather than one more package to install.
+    """
+
+    def test_names_the_package_and_how_to_get_it(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit) as e:
+            ltvm._missing_dep("yaml")
+
+        assert e.value.code == 1
+        err = capsys.readouterr().err
+        assert "PyYAML" in err
+        assert "pip install PyYAML" in err
+        assert "-pyyaml" in err  # the dnf package
+        assert "uv sync" in err
+
+    def test_argcomplete_is_named_too(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit):
+            ltvm._missing_dep("argcomplete")
+
+        assert "argcomplete" in capsys.readouterr().err
+
+    def test_the_guard_only_covers_known_deps(self) -> None:
+        """A typo'd import inside ltvm_pkg must still raise, not read as
+        a missing dependency the user is supposed to install."""
+        src = Path(_LTVM_PATH).read_text()
+        guard = src[src.index("except ModuleNotFoundError") :]
+        assert 'e.name not in ("yaml", "argcomplete")' in guard
+        assert "raise" in guard

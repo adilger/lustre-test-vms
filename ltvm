@@ -28,8 +28,8 @@ if sys.version_info < (3, 10):  # noqa: UP036
         "error: ltvm requires Python 3.10+; this is Python %d.%d.%d\n"  # noqa: UP031
         "hint (macOS):             brew install python@3.13  "
         "(or use pyenv)\n"
-        "hint (Rocky/RHEL 8 or 9): dnf install -y python3.11 && "
-        "python3.11 ./ltvm <args>\n" % sys.version_info[:3]
+        "hint (Rocky/RHEL 8 or 9): dnf install -y python3.11 "
+        "python3.11-pyyaml && python3.11 ./ltvm <args>\n" % sys.version_info[:3]
     )
     sys.exit(1)
 
@@ -145,79 +145,109 @@ if __name__ == "__main__" and _VENV_PY.exists():
 # E402 (module level import not at top) is suppressed for that reason.
 import argparse  # noqa: E402
 import logging  # noqa: E402
-from typing import Any  # noqa: E402
+from typing import Any, NoReturn  # noqa: E402
 
 # Ensure repo root is importable
 sys.path.insert(0, str(_REPO_ROOT))
 
+
+# ltvm's only hard third-party dependency is PyYAML (argcomplete is
+# optional), and on a distro Python it is a separate package from the
+# interpreter -- so the EL9 user who just installed python3.11 on the
+# floor check's advice lands here next.  A traceback at that point reads
+# as a broken tool rather than a missing package; say what to install.
+def _missing_dep(name: str) -> NoReturn:
+    py = Path(sys.executable).name
+    pkg = {"yaml": "PyYAML", "argcomplete": "argcomplete"}.get(name, name)
+    dnf = {"yaml": "-pyyaml", "argcomplete": "-argcomplete"}.get(name)
+    sys.stderr.write(f"error: ltvm needs {pkg} for this Python ({py})\n")
+    if dnf:
+        sys.stderr.write(
+            f"hint (Rocky/RHEL):  dnf install -y "
+            f"python{sys.version_info[0]}.{sys.version_info[1]}{dnf}\n"
+        )
+    sys.stderr.write(
+        f"hint (any distro):  {sys.executable} -m pip install {pkg}\n"
+        f"hint (uv):          uv sync   "
+        f"(deps into .venv/, which ltvm then uses on its own)\n"
+    )
+    sys.exit(1)
+
+
 from ltvm_pkg import __version__ as LTVM_VERSION  # noqa: E402
-from ltvm_pkg.cli import (  # noqa: E402
-    EXIT_ERROR,
-    cmd_build_all,
-    cmd_build_container,
-    cmd_build_image,
-    cmd_build_kernel,
-    cmd_build_lustre,
-    cmd_build_mofed_kmods,
-    cmd_build_shell,
-    cmd_build_zfs,
-    cmd_clean,
-    cmd_cluster_create,
-    cmd_cluster_deploy,
-    cmd_cluster_destroy,
-    cmd_cluster_exec,
-    cmd_cluster_list,
-    cmd_cluster_ssh,
-    cmd_cluster_status,
-    cmd_completion,
-    cmd_console_log,
-    cmd_crash_collect,
-    cmd_create,
-    cmd_delete,
-    cmd_deploy,
-    cmd_destroy,
-    cmd_doctor,
-    cmd_fetch,
-    cmd_list,
-    cmd_llmount,
-    cmd_make_install,
-    cmd_make_reinstall,
-    cmd_make_uninstall,
-    cmd_nmi,
-    cmd_prune,
-    cmd_publish,
-    cmd_restore,
-    cmd_setup,
-    cmd_skills,
-    cmd_snapshot,
-    cmd_status,
-    cmd_target_export,
-    cmd_target_show,
-    cmd_targets,
-    cmd_telemetry,
-    cmd_update,
-    cmd_validate,
-    cmd_vm_start,
-    cmd_vm_stop,
-)
-from ltvm_pkg.completion import (  # noqa: E402
-    complete_arches,
-    complete_cluster_members,
-    complete_cluster_specs,
-    complete_clusters,
-    complete_directories,
-    complete_fetch_filter,
-    complete_kernels,
-    complete_mofed_versions,
-    complete_snapshot_tags,
-    complete_targets,
-    complete_variants,
-    complete_vms,
-    complete_zfs_versions,
-)
-from ltvm_pkg.shell_completion import (  # noqa: E402
-    SHELLS as SHELL_COMPLETION_SHELLS,
-)
+
+try:
+    from ltvm_pkg.cli import (  # noqa: E402
+        EXIT_ERROR,
+        cmd_build_all,
+        cmd_build_container,
+        cmd_build_image,
+        cmd_build_kernel,
+        cmd_build_lustre,
+        cmd_build_mofed_kmods,
+        cmd_build_shell,
+        cmd_build_zfs,
+        cmd_clean,
+        cmd_cluster_create,
+        cmd_cluster_deploy,
+        cmd_cluster_destroy,
+        cmd_cluster_exec,
+        cmd_cluster_list,
+        cmd_cluster_ssh,
+        cmd_cluster_status,
+        cmd_completion,
+        cmd_console_log,
+        cmd_crash_collect,
+        cmd_create,
+        cmd_delete,
+        cmd_deploy,
+        cmd_destroy,
+        cmd_doctor,
+        cmd_fetch,
+        cmd_list,
+        cmd_llmount,
+        cmd_make_install,
+        cmd_make_reinstall,
+        cmd_make_uninstall,
+        cmd_nmi,
+        cmd_prune,
+        cmd_publish,
+        cmd_restore,
+        cmd_setup,
+        cmd_skills,
+        cmd_snapshot,
+        cmd_status,
+        cmd_target_export,
+        cmd_target_show,
+        cmd_targets,
+        cmd_telemetry,
+        cmd_update,
+        cmd_validate,
+        cmd_vm_start,
+        cmd_vm_stop,
+    )
+    from ltvm_pkg.completion import (  # noqa: E402
+        complete_arches,
+        complete_cluster_members,
+        complete_cluster_specs,
+        complete_clusters,
+        complete_directories,
+        complete_fetch_filter,
+        complete_kernels,
+        complete_mofed_versions,
+        complete_snapshot_tags,
+        complete_targets,
+        complete_variants,
+        complete_vms,
+        complete_zfs_versions,
+    )
+    from ltvm_pkg.shell_completion import (  # noqa: E402
+        SHELLS as SHELL_COMPLETION_SHELLS,
+    )
+except ModuleNotFoundError as e:  # noqa: E402
+    if e.name not in ("yaml", "argcomplete"):
+        raise
+    _missing_dep(e.name)
 
 log = logging.getLogger("ltvm")
 
