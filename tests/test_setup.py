@@ -1281,3 +1281,88 @@ class TestCheckStaleLtvmLauncher:
         args = mock_log.warning.call_args[0]
         assert "stale" in args[0]
         assert str(dead) in args
+
+
+class TestSubnetCollision:
+    """A machine already on 192.168.100.0/24 must not lose that network.
+
+    setup_network gives fcbr0 the subnet and starts a DHCP server on it.
+    Doing that to a range something else already owns takes that
+    interface out -- including the ssh session the install is running
+    over, which leaves no way back in to undo it.
+    """
+
+    def _ip_addr(self, stdout: str) -> Any:
+        def fake(cmd: list[str], **kw: Any) -> Any:
+            return subprocess.CompletedProcess(cmd, 0, stdout, "")
+
+        return fake
+
+    def test_detects_another_interface_on_the_subnet(self) -> None:
+        from ltvm_pkg.host_setup import _subnet_in_use
+
+        out = (
+            "1: lo    inet 127.0.0.1/8 scope host lo\n"
+            "2: eth0    inet 192.168.100.245/24 scope global eth0\n"
+        )
+        with patch(
+            "ltvm_pkg.host_setup._run_quiet", side_effect=self._ip_addr(out)
+        ):
+            assert _subnet_in_use("192.168.100") == (
+                "eth0",
+                "192.168.100.245/24",
+            )
+
+    def test_our_own_bridge_does_not_count(self) -> None:
+        from ltvm_pkg.host_setup import _subnet_in_use
+
+        out = "5: fcbr0    inet 192.168.100.1/24 scope global fcbr0\n"
+        with patch(
+            "ltvm_pkg.host_setup._run_quiet", side_effect=self._ip_addr(out)
+        ):
+            assert _subnet_in_use("192.168.100") is None
+
+    def test_a_longer_prefix_is_not_a_match(self) -> None:
+        """192.168.10 must not match an address in 192.168.100."""
+        from ltvm_pkg.host_setup import _subnet_in_use
+
+        out = "2: eth0    inet 192.168.100.245/24 scope global eth0\n"
+        with patch(
+            "ltvm_pkg.host_setup._run_quiet", side_effect=self._ip_addr(out)
+        ):
+            assert _subnet_in_use("192.168.10") is None
+
+    def test_setup_network_refuses_and_names_the_way_out(self) -> None:
+        from ltvm_pkg.host_setup import setup_network
+
+        with (
+            patch(
+                "ltvm_pkg.host_setup._subnet_in_use",
+                return_value=("eth0", "192.168.100.245/24"),
+            ),
+            pytest.raises(RuntimeError) as e,
+        ):
+            setup_network(MagicMock(), subnet="192.168.100")
+
+        msg = str(e.value)
+        assert "eth0" in msg
+        assert "--subnet" in msg
+        assert "--force" in msg
+
+    def test_force_proceeds(self) -> None:
+        from ltvm_pkg.host_setup import setup_network
+
+        with (
+            patch(
+                "ltvm_pkg.host_setup._subnet_in_use",
+                return_value=("eth0", "192.168.100.245/24"),
+            ) as in_use,
+            patch(
+                "ltvm_pkg.host_setup._network_already_configured",
+                return_value=True,
+            ),
+            patch("ltvm_pkg.host_setup.VM_DIR", Path("/tmp/ltvm-test-vmdir")),
+        ):
+            setup_network(MagicMock(), subnet="192.168.100", force=True)
+
+        in_use.assert_not_called()

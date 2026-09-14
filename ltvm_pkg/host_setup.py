@@ -1745,8 +1745,42 @@ def _network_already_configured(subnet: str) -> bool:
     return r.returncode == 0
 
 
-def setup_network(host: HostInfo, subnet: str = DEFAULT_SUBNET) -> None:
+def _subnet_in_use(subnet: str) -> tuple[str, str] | None:
+    """(interface, address) already living in ``<subnet>.0/24``, if any.
+
+    fcbr0 does not count: that is our own bridge from an earlier install.
+    """
+    r = _run_quiet(["ip", "-4", "-o", "addr", "show"], check=False)
+    if r.returncode != 0:
+        return None
+    for line in r.stdout.splitlines():
+        parts = line.split()
+        if len(parts) < 4 or parts[2] != "inet":
+            continue
+        ifname, addr = parts[1], parts[3]
+        if ifname == "fcbr0":
+            continue
+        if addr.split("/")[0].startswith(subnet + "."):
+            return ifname, addr
+    return None
+
+
+def setup_network(
+    host: HostInfo, subnet: str = DEFAULT_SUBNET, force: bool = False
+) -> None:
     """Configure fcbr0 bridge, dnsmasq, and NAT."""
+    clash = None if force else _subnet_in_use(subnet)
+    if clash is not None:
+        ifname, addr = clash
+        raise RuntimeError(
+            f"{subnet}.0/24 is already in use by {ifname} ({addr}).\n"
+            f"Installing there gives fcbr0 that network and starts a DHCP "
+            f"server on it, which takes {ifname} out -- including the ssh "
+            f"session you may be running this from.\n"
+            f"Pick another range:  ltvm install --subnet 192.168.200\n"
+            f"Or --force to configure {subnet}.0/24 anyway."
+        )
+
     if _network_already_configured(subnet):
         log.info(
             "fcbr0 bridge on %s.0/24 and dnsmasq already configured -- "
@@ -2599,7 +2633,7 @@ def run_setup(
     if "qemu" in active:
         install_qemu(host, force=force)
     if "network" in active:
-        setup_network(host, subnet=subnet)
+        setup_network(host, subnet=subnet, force=force)
     if "install" in active:
         install_scripts(host)
     if "ssh" in active:
@@ -2633,20 +2667,30 @@ def run_setup(
     # completion directory was read-only.
     from ltvm_pkg import shell_completion
 
-    for result in shell_completion.install():
-        if result.status in ("installed", "unchanged"):
-            log.info("Tab completion (%s): %s", result.shell, result.path)
-        elif result.status == "failed":
-            log.warning(
-                "Tab completion (%s) failed at %s: %s",
-                result.shell,
-                result.path,
-                result.detail,
-            )
-        else:
-            log.debug(
-                "Tab completion (%s) skipped: %s", result.shell, result.detail
-            )
+    advice = shell_completion.argcomplete_missing()
+    if advice:
+        # One line of advice beats one raw ImportError per shell.
+        log.warning(
+            "Tab completion needs argcomplete: %s (then: ltvm doctor --fix)",
+            advice,
+        )
+    else:
+        for result in shell_completion.install():
+            if result.status in ("installed", "unchanged"):
+                log.info("Tab completion (%s): %s", result.shell, result.path)
+            elif result.status == "failed":
+                log.warning(
+                    "Tab completion (%s) failed at %s: %s",
+                    result.shell,
+                    result.path,
+                    result.detail,
+                )
+            else:
+                log.debug(
+                    "Tab completion (%s) skipped: %s",
+                    result.shell,
+                    result.detail,
+                )
 
     if all_steps:
         log.info("")
