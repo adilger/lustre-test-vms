@@ -22,7 +22,9 @@ conftest, so none of this touches the real /etc.
 from __future__ import annotations
 
 import argparse
+import builtins
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -908,3 +910,68 @@ class TestVerifyReporting:
 
         print_verify(_all_ok_result())
         assert "All checks passed." in capsys.readouterr().out
+
+
+class TestArgcompleteMissing:
+    """Completion is the one thing that needs argcomplete.
+
+    On a distro Python it is a separate package, and EL9 has no
+    python3.11-argcomplete at all -- so the advice has to be pip, and
+    that interpreter ships without pip too.  Advice that ends at
+    "python3.11 -m pip install" earns a "No module named pip".
+    """
+
+    def test_none_when_argcomplete_imports(self) -> None:
+        from ltvm_pkg import shell_completion
+
+        assert shell_completion.argcomplete_missing() is None
+
+    def _without_argcomplete(self) -> Any:
+        real = builtins.__import__
+
+        def fake(name: str, *a: Any, **kw: Any) -> Any:
+            if name == "argcomplete":
+                raise ImportError("No module named 'argcomplete'")
+            return real(name, *a, **kw)
+
+        return patch.object(builtins, "__import__", fake)
+
+    def test_plain_pip_when_pip_is_there(self) -> None:
+        from ltvm_pkg import shell_completion
+
+        with (
+            self._without_argcomplete(),
+            patch("importlib.util.find_spec", return_value=object()),
+        ):
+            advice = shell_completion.argcomplete_missing()
+
+        assert advice is not None
+        assert advice.endswith("-m pip install argcomplete")
+        assert "dnf" not in advice
+
+    def test_installs_pip_first_when_it_is_absent(self) -> None:
+        from ltvm_pkg import shell_completion
+
+        with (
+            self._without_argcomplete(),
+            patch("importlib.util.find_spec", return_value=None),
+            patch("shutil.which", return_value="/usr/bin/dnf"),
+        ):
+            advice = shell_completion.argcomplete_missing()
+
+        assert advice is not None
+        assert advice.startswith("dnf install -y python3.")
+        assert advice.endswith("-m pip install argcomplete")
+
+    def test_no_dnf_advice_off_the_el_family(self) -> None:
+        from ltvm_pkg import shell_completion
+
+        with (
+            self._without_argcomplete(),
+            patch("importlib.util.find_spec", return_value=None),
+            patch("shutil.which", return_value=None),
+        ):
+            advice = shell_completion.argcomplete_missing()
+
+        assert advice is not None
+        assert "dnf" not in advice

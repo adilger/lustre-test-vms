@@ -23,9 +23,11 @@ venv's ``bin/``, which ``sudo ltvm install`` does not have).
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 import os
 import shutil
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -68,6 +70,33 @@ _FILENAME: dict[str, str] = {
     "zsh": "_ltvm",
     "fish": "ltvm.fish",
 }
+
+
+def argcomplete_missing() -> str | None:
+    """The command that would install argcomplete, or None if it's here.
+
+    ltvm runs without it -- only tab completion needs it -- and on a
+    distro Python it is a separate package.  EL9 ships no
+    python3.11-argcomplete at all, so pip is the only route there, and
+    that interpreter arrives without pip as well: advice that stops at
+    "python3.11 -m pip install" earns a "No module named pip".
+
+    Callers ask once: reporting the raw ImportError per shell told the
+    user three times that something was "unreadable" and never what to
+    do about it.
+    """
+    try:
+        import argcomplete  # noqa: F401
+    except ImportError:
+        pass
+    else:
+        return None
+
+    cmd = f"{sys.executable} -m pip install argcomplete"
+    if importlib.util.find_spec("pip") is None and shutil.which("dnf"):
+        ver = f"{sys.version_info[0]}.{sys.version_info[1]}"
+        cmd = f"dnf install -y python{ver}-pip && {cmd}"
+    return cmd
 
 
 def shellcode(shell: str) -> str:

@@ -2483,6 +2483,13 @@ def _check_completion(fix: bool) -> tuple[list[str], list[str], int]:
     notes: list[str] = []
     failures = 0
 
+    advice = shell_completion.argcomplete_missing()
+    if advice:
+        # Nothing to fix per shell: without argcomplete there is no
+        # shellcode to write for any of them.  One issue, one command.
+        issues.append(f"tab completion needs argcomplete: {advice}")
+        return issues, notes, failures
+
     broken = [
         r
         for r in shell_completion.status()
