@@ -257,7 +257,12 @@ def resolve_os_artifacts(
             if cand.is_dir():
                 kernel_dirname = kernel_suffix
             elif matching_kernel_dirs(kernels_root, kernel_suffix):
-                kernel_dirname = resolve_kernel_dir(kernels_root, kernel_suffix)
+                # The target's default, not something the user typed:
+                # resolve quietly.  The create banner prints the full
+                # kernel dir it settled on.
+                kernel_dirname = resolve_kernel_dir(
+                    kernels_root, kernel_suffix, warn=False
+                )
         if kernel_dirname is None and kernels_root.is_dir():
             any_built = sorted(
                 d.name for d in kernels_root.iterdir() if d.is_dir()

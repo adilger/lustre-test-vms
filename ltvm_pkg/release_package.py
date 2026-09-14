@@ -350,11 +350,12 @@ def _resolve_kernel(
     """
     kernels_dir = output_dir / "kernels"
 
+    explicit = kernel is not None
     if kernel is None and default_kernel is not None:
         kernel = default_kernel
 
     if kernel is not None:
-        name = resolve_kernel_dir(kernels_dir, kernel)
+        name = resolve_kernel_dir(kernels_dir, kernel, warn=explicit)
         # A miss returns the name unchanged, so the path we hand back
         # names what the caller asked for and the downstream "missing
         # artifacts" error stays legible.

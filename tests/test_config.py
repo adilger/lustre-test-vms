@@ -1304,3 +1304,30 @@ class TestAmbiguousKernelResolution:
         with caplog.at_level("WARNING", logger="ltvm"):
             cfg.resolve_kernel_dir(kernels, "5.14-rhel9.7")
         assert not [r for r in caplog.records if "matches" in r.getMessage()]
+
+    def test_default_kernel_resolution_is_quiet(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Ambiguity is only worth reporting for a name the user typed.
+
+        The warning's advice is "pass --kernel", which is no advice at
+        all when the short name came from the target's own default --
+        and `ltvm create` already prints the kernel dir it resolved.
+        """
+        import ltvm_pkg.target_config as cfg
+
+        kernels = tmp_path / "kernels"
+        for d in (
+            "5.14-rhel9.7-5.14.0-611.13.1.el9_7",
+            "5.14-rhel9.7-5.14.0-611.55.1.el9_7",
+        ):
+            (kernels / d).mkdir(parents=True)
+        cfg._AMBIGUITY_WARNED.clear()
+        with caplog.at_level("WARNING", logger="ltvm"):
+            quiet = cfg.resolve_kernel_dir(kernels, "5.14-rhel9.7", warn=False)
+        assert quiet == "5.14-rhel9.7-5.14.0-611.55.1.el9_7"
+        assert not [r for r in caplog.records if "matches" in r.getMessage()]
+        # The same ambiguity still warns when the caller named it.
+        with caplog.at_level("WARNING", logger="ltvm"):
+            cfg.resolve_kernel_dir(kernels, "5.14-rhel9.7")
+        assert [r for r in caplog.records if "matches 2" in r.getMessage()]

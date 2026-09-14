@@ -273,7 +273,9 @@ def _warn_if_ambiguous(kernels_dir: Path, name: str, chosen: str) -> None:
     )
 
 
-def resolve_kernel_dir(kernels_dir: Path, name: str) -> str:
+def resolve_kernel_dir(
+    kernels_dir: Path, name: str, *, warn: bool = True
+) -> str:
     """Match a kernel name against the built dirs under ``kernels_dir``.
 
     ``name`` may be the short form from targets.yaml ("5.14-rhel9.7")
@@ -281,6 +283,11 @@ def resolve_kernel_dir(kernels_dir: Path, name: str) -> str:
     highest-versioned dir sharing the ``<name>-`` prefix; otherwise
     ``name`` unchanged, so callers naming a not-yet-built kernel get a
     path to create rather than an error.
+
+    Pass ``warn=False`` for a name the caller never typed.  The
+    ambiguity warning tells the user to pass --kernel, which is not
+    advice for a target's own default: `ltvm create` already prints
+    the kernel it resolved.
 
     This is the single implementation of that lookup.  It used to be
     duplicated between TargetConfig.resolve_kernel and
@@ -300,7 +307,8 @@ def resolve_kernel_dir(kernels_dir: Path, name: str) -> str:
         # short name is the only thing that knows which release it
         # means, and this function has no tree.  Say so rather than
         # answer silently.
-        _warn_if_ambiguous(kernels_dir, name, chosen)
+        if warn:
+            _warn_if_ambiguous(kernels_dir, name, chosen)
         return chosen
     return name
 
@@ -883,6 +891,10 @@ class TargetConfig:
              name unchanged.  That function is shared with the release
              packager so both agree on which built kernel is newest.
         """
+        # Whether the caller named a kernel has to be captured before
+        # the pin below substitutes itself for None: a pin is a default
+        # too, and no default should draw a "pass --kernel" warning.
+        explicit = kernel is not None
         # Honor the variant's kernel pin first: if bound to a variant
         # that pins a specific kernel, treat that pin as the default
         # and reject explicit --kernel that disagrees.  resolve_kernel
@@ -902,7 +914,9 @@ class TargetConfig:
                     f"{pin!r}; cannot use {kernel!r}"
                 )
         name = kernel if kernel is not None else self.default_kernel
-        return resolve_kernel_dir(self.output_dir / "kernels", name)
+        return resolve_kernel_dir(
+            self.output_dir / "kernels", name, warn=explicit
+        )
 
     def kernel_output_dir(self, kernel: str | None = None) -> Path:
         """Return the output directory for a kernel.
