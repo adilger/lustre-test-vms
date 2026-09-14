@@ -174,3 +174,19 @@ class TestStaleVenvIntegration:
         assert "older than 3.10" in result.stderr
         assert f"rm -rf {venv}" in result.stderr
         assert "python3.11 -m venv" in result.stderr
+
+
+class TestFloorHint:
+    """The floor message has to name the distros that actually trip it.
+
+    Rocky/RHEL 9 ships Python 3.9 as ``python3``, so it lands here just
+    as often as EL8 does -- and a hint that names only EL8 reads as "not
+    my platform" to an EL9 user, who then has no way forward.
+    """
+
+    def test_hint_covers_el8_and_el9(self) -> None:
+        src = Path(_LTVM_PATH).read_text()
+        start = src.index("error: ltvm requires Python 3.10+")
+        hint = src[start : src.index("sys.exit(1)", start)]
+        assert "Rocky/RHEL 8 or 9" in hint
+        assert "python3.11" in hint
