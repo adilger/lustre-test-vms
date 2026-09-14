@@ -1338,6 +1338,50 @@ def _get_package_manifest(
     return packages
 
 
+# The image's extra bytes -- baked Lustre or MOFED kmods -- are what
+# status cannot reconstruct.  Every other component is fair game.
+_IMAGE_UNCHECKABLE = ("extra-inputs",)
+
+
+def _stale_by_components(
+    target_config: TargetConfig,
+    meta: dict[str, Any],
+    kernel: str | None,
+    variant_name: str,
+) -> bool | None:
+    """Staleness from the per-input digests alone, or None if unknown.
+
+    True when a recomputable input has moved since the image was built,
+    None when they all match (the unanswerable extra bytes could still
+    differ) or when the image predates these digests.
+
+    Without this an image baked with Lustre was never stale in any
+    circumstance: one built before a packages-os.txt change kept being
+    handed to every new VM, with `build status` saying only "built (?)"
+    and nothing pointing at the package the VMs were missing.
+    """
+    stored = meta.get("input_components")
+    if not isinstance(stored, dict) or not stored:
+        return None
+    try:
+        current = target_config.input_components(
+            "image", kernel=kernel, variant=variant_name
+        )
+    except Exception as e:  # noqa: BLE001
+        # Staleness reporting must never be what breaks `build status`.
+        log.debug("cannot recompute image components: %s", e)
+        return None
+    for name, digest in current.items():
+        if name in _IMAGE_UNCHECKABLE:
+            continue
+        if name not in stored or stored[name] != digest:
+            return True
+    for name in stored:
+        if name not in _IMAGE_UNCHECKABLE and name not in current:
+            return True
+    return None
+
+
 def image_status(
     target_config: TargetConfig,
     kernel: str | None = None,
@@ -1381,14 +1425,17 @@ def image_status(
     size_mb = image_path.stat().st_size / (1024 * 1024)
     # build_image folds Lustre staging bytes (and MOFED kmod RPMs) into
     # the persisted input_hash via extra_hash.  Status can't recompute
-    # those without the Lustre tree / kmod context on hand, so for an
-    # image baked with either we can't honestly compute staleness --
-    # recomputing without the extra bytes would report every such image
-    # as permanently stale.  Return the same tristate kernel_status uses
+    # those without the Lustre tree / kmod context on hand, so the hash
+    # as a whole can't answer for such an image -- recomputing without
+    # the extra bytes would report every one of them as permanently
+    # stale.  The per-input digests still answer for every *other*
+    # input, so consult those before giving up: a moved package list or
+    # Dockerfile is a definite "stale" even here.  Only when they all
+    # match do we fall back to the tristate kernel_status uses
     # (built=True, stale=None -> rendered "built (?)").
     stale: bool | None
     if meta.get("with_lustre") or meta.get("mofed_kmods"):
-        stale = None
+        stale = _stale_by_components(target_config, meta, kernel, variant_name)
     else:
         stale = target_config.is_stale(
             "image", kernel=kernel, variant=variant_name
@@ -1402,4 +1449,9 @@ def image_status(
         "path": str(image_path),
         "kernel": kernel_name,
         "variant": variant_name,
+        # Named individually rather than **meta: an image's meta carries
+        # its whole rpm list, which nothing downstream of status wants.
+        # Without this `build status --why` could never explain an image,
+        # reporting every one as built before digests were recorded.
+        "input_components": meta.get("input_components"),
     }

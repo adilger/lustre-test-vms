@@ -273,7 +273,7 @@ def _artifact_label(status_dict: dict[str, Any]) -> str:
 # cannot honestly compare.  `build status` has no Lustre tree on hand,
 # which is the same reason kernel staleness itself shows as "built (?)"
 # there (see kernel_status's extra_hash note).
-_UNCHECKABLE = {"kernel": ("lustre-tree-inputs",)}
+_UNCHECKABLE = {"kernel": ("lustre-tree-inputs",), "image": ("extra-inputs",)}
 
 
 def staleness_reasons(

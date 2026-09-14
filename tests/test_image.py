@@ -905,3 +905,127 @@ class TestBuildImageNotRootGated:
         src_all = inspect.getsource(cli.cmd_build_all)
         assert "_require_root" not in src_image
         assert "_require_root" not in src_all
+
+
+class TestLustreBakedImageStaleness:
+    """An image baked with Lustre still has answerable inputs.
+
+    Its input_hash folds in staging bytes that status cannot recompute,
+    so the hash as a whole is unanswerable -- but the per-input digests
+    still say whether a package list or Dockerfile moved.  Reporting
+    "built (?)" for all of it meant an image built before a
+    packages-os.txt change was handed to every new VM with nothing
+    saying why the package was missing.
+    """
+
+    def _built_image(
+        self, tmp_path: Path, meta: dict[str, object]
+    ) -> MagicMock:
+        tc = _make_target_config(tmp_path)
+        out_dir = tc.image_output_dir()
+        out_dir.mkdir(parents=True)
+        (out_dir / "base.ext4").write_bytes(b"\x00" * 1024)
+        (out_dir / "meta.json").write_text(json.dumps(meta))
+        return tc
+
+    def test_a_moved_input_is_stale_even_with_lustre_baked(
+        self, tmp_path: Path
+    ) -> None:
+        import ltvm_pkg.image_build as image
+
+        tc = self._built_image(
+            tmp_path,
+            {
+                "with_lustre": "/home/u/lustre-release",
+                "input_components": {
+                    "rocky9/packages-os.txt": "aaaa",
+                    "extra-inputs": "1111",
+                },
+            },
+        )
+        tc.input_components.return_value = {
+            "rocky9/packages-os.txt": "bbbb",
+            "extra-inputs": "1111",
+        }
+
+        assert image.image_status(tc)["stale"] is True
+
+    def test_only_the_unanswerable_input_leaves_it_unknown(
+        self, tmp_path: Path
+    ) -> None:
+        import ltvm_pkg.image_build as image
+
+        tc = self._built_image(
+            tmp_path,
+            {
+                "with_lustre": "/home/u/lustre-release",
+                "input_components": {
+                    "rocky9/packages-os.txt": "aaaa",
+                    "extra-inputs": "1111",
+                },
+            },
+        )
+        # Only the Lustre staging bytes differ -- status cannot
+        # recompute those, so it must not claim either answer.
+        tc.input_components.return_value = {
+            "rocky9/packages-os.txt": "aaaa",
+            "extra-inputs": "2222",
+        }
+
+        assert image.image_status(tc)["stale"] is None
+
+    def test_an_image_without_recorded_digests_stays_unknown(
+        self, tmp_path: Path
+    ) -> None:
+        import ltvm_pkg.image_build as image
+
+        tc = self._built_image(
+            tmp_path, {"with_lustre": "/home/u/lustre-release"}
+        )
+
+        assert image.image_status(tc)["stale"] is None
+
+    def test_a_dropped_input_is_stale(self, tmp_path: Path) -> None:
+        import ltvm_pkg.image_build as image
+
+        tc = self._built_image(
+            tmp_path,
+            {
+                "with_lustre": "/home/u/lustre-release",
+                "input_components": {
+                    "rocky9/packages-os.txt": "aaaa",
+                    "common/gone.sh": "cccc",
+                },
+            },
+        )
+        tc.input_components.return_value = {"rocky9/packages-os.txt": "aaaa"}
+
+        assert image.image_status(tc)["stale"] is True
+
+    def test_a_recompute_failure_is_not_fatal(self, tmp_path: Path) -> None:
+        import ltvm_pkg.image_build as image
+
+        tc = self._built_image(
+            tmp_path,
+            {
+                "with_lustre": "/home/u/lustre-release",
+                "input_components": {"rocky9/packages-os.txt": "aaaa"},
+            },
+        )
+        tc.input_components.side_effect = RuntimeError("no targets.yaml")
+
+        assert image.image_status(tc)["stale"] is None
+
+    def test_status_carries_the_digests_for_why(self, tmp_path: Path) -> None:
+        """`build status --why` reads them off the status dict.
+
+        image_status names its keys individually rather than spreading
+        meta, so omitting this one left --why unable to explain any
+        image at all.
+        """
+        import ltvm_pkg.image_build as image
+
+        components = {"rocky9/packages-os.txt": "aaaa"}
+        tc = self._built_image(tmp_path, {"input_components": dict(components)})
+
+        assert image.image_status(tc)["input_components"] == components
