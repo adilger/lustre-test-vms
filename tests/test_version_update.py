@@ -564,3 +564,86 @@ class TestVersionRefreshAfterUpdate:
             elif build_info.exists():
                 build_info.unlink()
             _sys.modules.pop("ltvm_pkg._build_info", None)
+
+
+class TestUpdateKeepsCheckoutOwnership:
+    """`ltvm update` is root-gated, but the checkout belongs to a human.
+
+    A ``git pull`` run as root rewrites every changed file as root, and
+    the owner then cannot edit the tree or pull again -- the working
+    tree and .git both end up half root-owned.  ``_git`` drops to the
+    checkout's owner instead.
+    """
+
+    def test_repo_owner_is_none_when_not_root(self, tmp_path: Path) -> None:
+        from ltvm_pkg.cli.setup import _repo_owner
+
+        (tmp_path / ".git").mkdir()
+        with patch("os.geteuid", return_value=1000):
+            assert _repo_owner(tmp_path) is None
+
+    def test_repo_owner_is_none_for_a_root_owned_checkout(
+        self, tmp_path: Path
+    ) -> None:
+        from ltvm_pkg.cli.setup import _repo_owner
+
+        (tmp_path / ".git").mkdir()
+
+        class FakeStat:
+            st_uid = 0
+            st_gid = 0
+
+        with (
+            patch("os.geteuid", return_value=0),
+            patch.object(Path, "stat", lambda self, *a, **k: FakeStat()),
+        ):
+            assert _repo_owner(tmp_path) is None
+
+    def test_git_runs_as_the_checkout_owner_under_root(
+        self, tmp_path: Path
+    ) -> None:
+        from ltvm_pkg.cli import setup as _setup
+
+        (tmp_path / ".git").mkdir()
+        seen: dict[str, Any] = {}
+
+        def fake_run(cmd: list[str], **kwargs: Any) -> Any:
+            seen["cmd"] = cmd
+            seen.update(kwargs)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        with (
+            patch.object(
+                _setup,
+                "_repo_owner",
+                return_value=(1000, 1000, "/home/someone"),
+            ),
+            patch("subprocess.run", fake_run),
+        ):
+            _setup._git(tmp_path, "status", "--porcelain")
+
+        assert seen["user"] == 1000
+        assert seen["group"] == 1000
+        assert seen["extra_groups"] == []
+        assert seen["env"]["HOME"] == "/home/someone"
+
+    def test_git_runs_as_us_when_there_is_no_better_owner(
+        self, tmp_path: Path
+    ) -> None:
+        from ltvm_pkg.cli import setup as _setup
+
+        (tmp_path / ".git").mkdir()
+        seen: dict[str, Any] = {}
+
+        def fake_run(cmd: list[str], **kwargs: Any) -> Any:
+            seen.update(kwargs)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        with (
+            patch.object(_setup, "_repo_owner", return_value=None),
+            patch("subprocess.run", fake_run),
+        ):
+            _setup._git(tmp_path, "status", "--porcelain")
+
+        assert "user" not in seen
+        assert "group" not in seen
