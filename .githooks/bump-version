@@ -48,4 +48,24 @@ sed "0,/^version = \"$current\"/s//version = \"$new\"/" \
 	"$pyproject" > "$pyproject.tmp"
 mv "$pyproject.tmp" "$pyproject"
 git add "$pyproject"
+
+# uv.lock carries the same version in its own package entry.  Bumping
+# pyproject without it leaves the tree dirty after every commit -- and
+# `ltvm update` refuses to fast-forward a dirty tree, so the last
+# commit's bookkeeping blocks the next update.
+lock="$root/uv.lock"
+if [[ -f "$lock" ]]; then
+	awk -v new="$new" '
+		$0 == "name = \"lustre-test-vms\"" { inpkg = 1 }
+		inpkg && /^version = "/ {
+			print "version = \"" new "\""
+			inpkg = 0
+			next
+		}
+		{ print }
+	' "$lock" > "$lock.tmp"
+	mv "$lock.tmp" "$lock"
+	git diff --quiet -- "$lock" || git add "$lock"
+fi
+
 printf '\033[1;34m[version-bump]\033[0m %s -> %s\n' "$current" "$new" >&2

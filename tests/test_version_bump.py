@@ -117,3 +117,39 @@ def test_the_hook_is_executable_and_wired_in() -> None:
     assert shutil.which(str(BUMP)) or BUMP.stat().st_mode & 0o111
     pre_commit = (REPO_ROOT / ".githooks" / "pre-commit").read_text()
     assert "bump-version" in pre_commit
+
+
+def test_the_lock_follows_the_bump(repo: Path) -> None:
+    """uv.lock names the same version.
+
+    Leaving it behind makes every code commit end with a dirty tree,
+    and `ltvm update` refuses to fast-forward a dirty tree -- so the
+    bookkeeping of one commit blocks the next update.
+    """
+    (repo / "uv.lock").write_text(
+        "version = 1\n\n"
+        '[[package]]\nname = "argcomplete"\nversion = "3.1.0"\n\n'
+        '[[package]]\nname = "lustre-test-vms"\nversion = "0.20.0"\n'
+        'source = { virtual = "." }\n'
+    )
+    git(repo, "add", "uv.lock")
+    git(repo, "commit", "-qm", "add lock")
+
+    (repo / "ltvm_pkg" / "thing.py").write_text("x = 1\n")
+    git(repo, "add", "ltvm_pkg/thing.py")
+
+    assert run_bump(repo).returncode == 0
+
+    lock = (repo / "uv.lock").read_text()
+    assert 'name = "lustre-test-vms"\nversion = "0.20.1"' in lock
+    # The other package's version is not ours to touch.
+    assert 'name = "argcomplete"\nversion = "3.1.0"' in lock
+    assert "uv.lock" in git(repo, "diff", "--cached", "--name-only")
+
+
+def test_no_lock_is_not_an_error(repo: Path) -> None:
+    (repo / "ltvm_pkg" / "thing.py").write_text("x = 1\n")
+    git(repo, "add", "ltvm_pkg/thing.py")
+
+    assert run_bump(repo).returncode == 0
+    assert version(repo) == "0.20.1"

@@ -40,7 +40,8 @@ make hooks        # git config core.hooksPath .githooks
 patch version when the staged commit touches `ltvm`, `ltvm_pkg/` or
 `targets/` -- docs-, test- and hook-only commits do not move it, and a
 version edited by hand in the same commit is left alone. It refuses the
-commit when `BASE_VERSION` and `pyproject.toml` disagree. `post-commit`
+commit when `BASE_VERSION` and `pyproject.toml` disagree, and carries
+the new version into `uv.lock` so the commit does not end dirty. `post-commit`
 bakes the new hash into `ltvm_pkg/_build_info.py`.
 
 ## Agent Skills
