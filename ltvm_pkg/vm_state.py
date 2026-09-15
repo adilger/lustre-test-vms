@@ -123,6 +123,11 @@ def qemu_machine_for_arch(arch: str = "x86_64") -> str:
 
 DISK_SIZE_BYTES = 500 * 1024 * 1024  # 500 MiB default
 
+# Root (OS) disk.  The overlay is grown to this at create time and the
+# guest's rc.local resize2fs's the root filesystem into it on every
+# boot, so raising it is all it takes to give a VM more room.
+ROOT_SIZE_BYTES = 8 * 1024 * 1024 * 1024  # 8 GiB default
+
 # ltvm repo root -- single source of truth in paths.py so target_config
 # (build side) and vm_state (runtime side) cannot drift.  Imported here
 # rather than at the top of the file because vm_state.py is a hub other
@@ -404,6 +409,7 @@ class VMInfo:
     mdt_disks: int = 0
     ost_disks: int = 0
     disk_size: int = DISK_SIZE_BYTES  # per-disk size in bytes
+    root_size: int = ROOT_SIZE_BYTES  # root (OS) disk size in bytes
     image: str = ""  # base image path; empty = default (rocky9)
     kernel: str = ""  # kernel path; empty = default (vmlinux)
     created: int = 0  # epoch seconds when VM was created
@@ -510,6 +516,7 @@ class VMInfo:
             f"MDT_DISKS={self.mdt_disks}\n"
             f"OST_DISKS={self.ost_disks}\n"
             f"DISK_SIZE={self.disk_size}\n"
+            f"ROOT_SIZE={self.root_size}\n"
             f"IMAGE={self.image}\n"
             f"KERNEL={self.kernel}\n"
             f"CREATED={self.created}\n"
@@ -693,6 +700,7 @@ class VMInfo:
             mdt_disks=_int("MDT_DISKS", 0),
             ost_disks=_int("OST_DISKS", 0),
             disk_size=_int("DISK_SIZE", DISK_SIZE_BYTES),
+            root_size=_int("ROOT_SIZE", ROOT_SIZE_BYTES),
             image=vals.get("IMAGE", ""),
             kernel=vals.get("KERNEL", ""),
             created=_int("CREATED", 0),

@@ -393,6 +393,7 @@ excludes `mofed-kmods/`: a fetcher who never passes
 
 ```bash
 ltvm create co1-single --vcpus 2 --mem 4096 --mdt-disks 1 --ost-disks 3
+ltvm create co1-single --root-size 20G   # OS disk (default 8G)
 ltvm create co1-single rocky9 --dry-run  # resolve + validate, write nothing
 ltvm deploy-lustre co1-single --lustre-tree ~/lustre-release --mount
 ssh co1-single 'lctl dl'
@@ -417,6 +418,14 @@ environment; otherwise LTVM uses `pid:<invoking-ltvm-pid>`. Cluster create
 resolves once and applies the same owner to every member. Discover it through
 `ltvm list --json`; legacy VMs report `owner_id: null`. See
 [docs/VM_OWNERSHIP.md](docs/VM_OWNERSHIP.md).
+
+**Disks:** `--disk-size` sizes the MDT/OST scratch disks; `--root-size`
+sizes the VM's own OS disk (default 8G, floor 1G, and never smaller than
+the base image it overlays).  The guest's rc.local grows the root
+filesystem into whatever the overlay is, so the flag is the whole
+mechanism.  Both are fixed at create time -- `ltvm create` against an
+existing VM warns that a differing value was ignored.  `cluster create`
+takes `--root-size` too and applies it to every node.
 
 **Naming:** always include the checkout number: `co<N>-<role>`.
 

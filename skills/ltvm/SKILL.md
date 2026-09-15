@@ -55,6 +55,11 @@ ltvm start|stop|destroy co1-single
 ltvm doctor [--fix]             # host infrastructure health
 ```
 
+`--disk-size` sizes the MDT/OST scratch disks; `--root-size` sizes the
+VM's own OS disk (default 8G). Both are fixed at create time, so a VM
+that needs room for a debug build or a vmcore wants `--root-size 20G`
+when it is created, not after.
+
 `create` is idempotent: it starts a stopped VM and no-ops on a running
 one. Name VMs `co<N>-<role>` after the checkout they serve -- `co1-single`,
 `co2-mds`, `co5-ec-dom`. Never a bare `testvm`: the number is what tells a

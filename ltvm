@@ -1180,8 +1180,18 @@ def build_parser() -> argparse.ArgumentParser:
         dest="disk_size",
         default=None,
         help=(
-            "Per-disk size with suffix M or G (e.g. 500M, 2G); "
-            "default 500M, max 100G"
+            "Per-disk size for the MDT/OST disks, suffix M or G "
+            "(e.g. 500M, 2G); default 500M, max 100G"
+        ),
+    )
+    _vm_create_args.add_argument(
+        "--root-size",
+        dest="root_size",
+        default=None,
+        help=(
+            "Root (OS) disk size, suffix M or G (e.g. 16G); default 8G, "
+            "max 100G.  The guest grows its root filesystem into it on "
+            "boot."
         ),
     )
     _vm_create_variant = _vm_create_args.add_argument(
@@ -1792,6 +1802,12 @@ def build_parser() -> argparse.ArgumentParser:
         dest="disk_size",
         default=None,
         help="Per-disk size with suffix M or G (e.g. 500M, 2G)",
+    )
+    ccp.add_argument(
+        "--root-size",
+        dest="root_size",
+        default=None,
+        help="Root (OS) disk size per node, suffix M or G (e.g. 16G)",
     )
     ccp.add_argument(
         "--nic",

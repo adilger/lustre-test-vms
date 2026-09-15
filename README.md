@@ -103,7 +103,8 @@ ltvm build      <action> ...    Build artifacts (see below)
 ltvm target     <action> ...    Target OS management (see below)
 ltvm vm         <action> ...    VM inspection / crash / snapshot (see below)
 ltvm cluster    <action> ...    Multi-node cluster management (see below)
-ltvm create     <name>          Create a VM (idempotent)
+ltvm create     <name>          Create a VM (idempotent; --root-size sets
+                                the OS disk, --disk-size the MDT/OST ones)
 ltvm start|stop|destroy <name>  VM power / removal
 ltvm list                       Show all VMs
 ltvm deploy-lustre <vm>         Deploy Lustre into a running VM
@@ -200,6 +201,7 @@ Would create VM: co1-single
   kernel:  5.14.0-611.13.1.el9_7_lustre
   cpu/mem: 2 vcpus, 2048 MB
   disks:   1 MDT + 3 OST @ 500M each
+  root:    8G
   ip:      next free (auto)
 Nothing was written.  Re-run without --dry-run to create it.
 ```

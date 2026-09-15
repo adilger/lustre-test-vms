@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from ltvm_pkg.vm_state import VMInfo, VMNotFound
+from ltvm_pkg.vm_state import ROOT_SIZE_BYTES, VMInfo, VMNotFound
 
 
 @pytest.fixture
@@ -82,6 +82,16 @@ class TestVMInfoMetadata:
         # to the default ("") so old VMs show `by=-` in `ltvm list`
         # and don't crash anyone's existing tooling.
         assert vm.creator == ""
+        # Pre-ROOT_SIZE .info files describe VMs whose overlay was
+        # grown to the old hardcoded 8G, which is what the default is.
+        assert vm.root_size == ROOT_SIZE_BYTES
+
+    def test_root_size_round_trip(self, tmp_sockets: Path) -> None:
+        vm = VMInfo(
+            name="root-size", ip="192.168.100.60", root_size=20 * (1 << 30)
+        )
+        vm.save()
+        assert VMInfo.load("root-size").root_size == 20 * (1 << 30)
 
     def test_update_field_adds_missing(self, tmp_sockets: Path) -> None:
         """_update_field adds a field that doesn't exist yet."""

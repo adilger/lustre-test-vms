@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from ltvm_pkg import vm_commands
-from ltvm_pkg.vm_state import DISK_SIZE_BYTES, VMInfo
+from ltvm_pkg.vm_state import DISK_SIZE_BYTES, ROOT_SIZE_BYTES, VMInfo
 
 # ── _validate_vm_name ────────────────────────────────────
 
@@ -205,6 +205,173 @@ class TestParseDiskSize:
 
     def test_boundary_100g_accepted(self) -> None:
         assert vm_commands._parse_disk_size("100G") == 100 * (1 << 30)
+
+
+# ── _parse_root_size ─────────────────────────────────────
+
+
+class TestParseRootSize:
+    """The root (OS) disk takes the same forms as --disk-size, with a
+    floor of its own: a root smaller than 1G cannot hold an OS."""
+
+    def test_default_on_none(self) -> None:
+        assert vm_commands._parse_root_size(None) == ROOT_SIZE_BYTES
+
+    def test_default_is_8g(self) -> None:
+        assert ROOT_SIZE_BYTES == 8 * (1 << 30)
+
+    def test_parses_gigabytes(self) -> None:
+        assert vm_commands._parse_root_size("20G") == 20 * (1 << 30)
+
+    def test_parses_megabytes(self) -> None:
+        assert vm_commands._parse_root_size("4096M") == 4096 * (1 << 20)
+
+    def test_lowercase_suffix_accepted(self) -> None:
+        assert vm_commands._parse_root_size("20g") == 20 * (1 << 30)
+
+    def test_int_bytes_accepted(self) -> None:
+        assert vm_commands._parse_root_size(12 * (1 << 30)) == 12 * (1 << 30)
+
+    def test_boundary_1g_accepted(self) -> None:
+        assert vm_commands._parse_root_size("1G") == 1 << 30
+
+    def test_boundary_100g_accepted(self) -> None:
+        assert vm_commands._parse_root_size("100G") == 100 * (1 << 30)
+
+    def test_below_1g_dies(self) -> None:
+        """64M clears the data-disk floor but not the root one."""
+        with pytest.raises(SystemExit):
+            vm_commands._parse_root_size("512M")
+
+    def test_above_100g_dies(self) -> None:
+        with pytest.raises(SystemExit):
+            vm_commands._parse_root_size("200G")
+
+    def test_invalid_suffix_dies(self) -> None:
+        with pytest.raises(SystemExit):
+            vm_commands._parse_root_size("16T")
+
+    def test_no_suffix_dies(self) -> None:
+        with pytest.raises(SystemExit):
+            vm_commands._parse_root_size("16")
+
+    def test_zero_dies(self) -> None:
+        with pytest.raises(SystemExit):
+            vm_commands._parse_root_size("0G")
+
+    def test_error_names_the_root_flag(self, capsys: Any) -> None:
+        """--disk-size in a --root-size error sends the user to the
+        wrong flag."""
+        with pytest.raises(SystemExit):
+            vm_commands._parse_root_size("16T")
+        err = capsys.readouterr().err
+        assert "--root-size" in err
+        assert "--disk-size" not in err
+
+
+# ── _check_root_size_fits ────────────────────────────────
+
+
+class TestCheckRootSizeFits:
+    """The overlay cannot be smaller than the image it is backed by."""
+
+    def test_smaller_than_base_image_dies(self, tmp_path: Path) -> None:
+        image = tmp_path / "base.ext4"
+        image.write_bytes(b"\0" * (4 << 20))
+        with pytest.raises(SystemExit):
+            vm_commands._check_root_size_fits(2 << 20, str(image))
+
+    def test_error_names_both_sizes(self, tmp_path: Path, capsys: Any) -> None:
+        image = tmp_path / "base.ext4"
+        image.write_bytes(b"\0" * (4 << 20))
+        with pytest.raises(SystemExit):
+            vm_commands._check_root_size_fits(2 << 20, str(image))
+        err = capsys.readouterr().err
+        assert "2M" in err
+        assert "4M" in err
+
+    def test_equal_to_base_image_is_allowed(self, tmp_path: Path) -> None:
+        image = tmp_path / "base.ext4"
+        image.write_bytes(b"\0" * (4 << 20))
+        vm_commands._check_root_size_fits(4 << 20, str(image))
+
+    def test_larger_than_base_image_is_allowed(self, tmp_path: Path) -> None:
+        image = tmp_path / "base.ext4"
+        image.write_bytes(b"\0" * (4 << 20))
+        vm_commands._check_root_size_fits(8 << 30, str(image))
+
+    def test_missing_image_is_not_this_check_s_error(
+        self, tmp_path: Path
+    ) -> None:
+        """A missing image is reported by the resolver, with a better
+        message than this could give."""
+        vm_commands._check_root_size_fits(1 << 30, str(tmp_path / "nope.ext4"))
+
+
+# ── _size_label ──────────────────────────────────────────
+
+
+class TestSizeLabel:
+    def test_whole_gigabytes(self) -> None:
+        assert vm_commands._size_label(20 * (1 << 30)) == "20G"
+
+    def test_megabytes_when_not_a_whole_gigabyte(self) -> None:
+        assert vm_commands._size_label(500 * (1 << 20)) == "500M"
+
+
+# ── _warn_ignored_resource_flags ─────────────────────────
+
+
+class TestWarnIgnoredResourceFlags:
+    """An idempotent create cannot resize hardware, so flags that
+    disagree with the existing VM have to be called out."""
+
+    def _vm(self) -> VMInfo:
+        return VMInfo(
+            name="co1-exists",
+            ip="192.168.100.9",
+            mem=4096,
+            disk_size=DISK_SIZE_BYTES,
+            root_size=ROOT_SIZE_BYTES,
+        )
+
+    def test_differing_root_size_warns(self, capsys: Any) -> None:
+        args = argparse.Namespace(root_size="20G")
+        vm_commands._warn_ignored_resource_flags(
+            self._vm(),
+            args,
+            argv=["ltvm", "create", "co1-exists", "--root-size", "20G"],
+        )
+        err = capsys.readouterr().err
+        assert "--root-size: requested 20G, VM has 8G" in err
+
+    def test_matching_root_size_is_silent(self, capsys: Any) -> None:
+        """Bytes on the VM against "8G" from the user is the same size;
+        comparing their strings called it a mismatch."""
+        args = argparse.Namespace(root_size="8G")
+        vm_commands._warn_ignored_resource_flags(
+            self._vm(),
+            args,
+            argv=["ltvm", "create", "co1-exists", "--root-size", "8G"],
+        )
+        assert capsys.readouterr().err == ""
+
+    def test_matching_disk_size_is_silent(self, capsys: Any) -> None:
+        args = argparse.Namespace(disk_size="500M")
+        vm_commands._warn_ignored_resource_flags(
+            self._vm(),
+            args,
+            argv=["ltvm", "create", "co1-exists", "--disk-size", "500M"],
+        )
+        assert capsys.readouterr().err == ""
+
+    def test_flag_not_typed_is_not_reported(self, capsys: Any) -> None:
+        """An argparse default is not a request."""
+        args = argparse.Namespace(root_size=None, mem=8192)
+        vm_commands._warn_ignored_resource_flags(
+            self._vm(), args, argv=["ltvm", "create", "co1-exists"]
+        )
+        assert capsys.readouterr().err == ""
 
 
 # ── _ago formatter ───────────────────────────────────────

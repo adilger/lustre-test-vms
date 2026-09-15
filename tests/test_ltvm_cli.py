@@ -691,6 +691,24 @@ class TestVmSubcommands:
         args = p.parse_args(["doctor", "--fix"])
         assert args.fix is True
 
+    def test_create_parses_root_size(self) -> None:
+        p = ltvm.build_parser()
+        args = p.parse_args(["create", "co1-single", "--root-size", "20G"])
+        assert args.root_size == "20G"
+
+    def test_create_root_size_defaults_to_unset(self) -> None:
+        """None, not a number: vm_commands owns the default."""
+        p = ltvm.build_parser()
+        assert p.parse_args(["create", "co1-single"]).root_size is None
+
+    def test_root_size_is_distinct_from_disk_size(self) -> None:
+        p = ltvm.build_parser()
+        args = p.parse_args(
+            ["create", "co1-single", "--disk-size", "2G", "--root-size", "20G"]
+        )
+        assert args.disk_size == "2G"
+        assert args.root_size == "20G"
+
     def test_vm_subcommand_not_present(self) -> None:
         """'ltvm vm' no longer exists as a subcommand."""
         p = ltvm.build_parser()

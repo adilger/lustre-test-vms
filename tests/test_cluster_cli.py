@@ -257,6 +257,7 @@ class TestClusterCreateArgs:
         assert ns.os is None
         assert ns.arch is None
         assert ns.disk_size is None
+        assert ns.root_size is None
         assert ns.nic == []
 
     def test_vcpus_and_mem_flags_parsed(self) -> None:
@@ -335,6 +336,8 @@ class TestClusterCreateArgs:
                 "aarch64",
                 "--disk-size",
                 "5G",
+                "--root-size",
+                "16G",
                 "--nic",
                 "nat",
                 "--nic",
@@ -345,6 +348,7 @@ class TestClusterCreateArgs:
         ns = self._captured_ns()
         assert ns.arch == "aarch64"
         assert ns.disk_size == "5G"
+        assert ns.root_size == "16G"
         # --nic is repeatable; both values land in the list in order.
         assert ns.nic == ["nat", "softroce"]
 
@@ -1096,6 +1100,27 @@ class TestClusterNodeDiskArgs:
         assert "--mdt-disks" in argv
         assert argv[argv.index("--mdt-disks") + 1] == "0"
         assert argv[argv.index("--ost-disks") + 1] == "3"
+
+    def test_root_size_reaches_each_node(self) -> None:
+        from ltvm_pkg import vm_cluster
+
+        node = vm_cluster.parse_node_spec("oss:co9-oss:3")
+        with patch.object(vm_cluster.subprocess, "run") as run:
+            run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            vm_cluster._create_one_node(
+                node, vcpus=2, mem=None, root_size="16G"
+            )
+        argv = run.call_args.args[0]
+        assert argv[argv.index("--root-size") + 1] == "16G"
+
+    def test_root_size_omitted_when_not_asked_for(self) -> None:
+        from ltvm_pkg import vm_cluster
+
+        node = vm_cluster.parse_node_spec("oss:co9-oss:3")
+        with patch.object(vm_cluster.subprocess, "run") as run:
+            run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            vm_cluster._create_one_node(node, vcpus=2, mem=None)
+        assert "--root-size" not in run.call_args.args[0]
 
 
 class TestClusterCreateRefusesExistingVMs:

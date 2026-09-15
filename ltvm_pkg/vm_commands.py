@@ -46,6 +46,7 @@ from .vm_state import (
     MARKER,
     OVERLAYS,
     QEMU_IMG,
+    ROOT_SIZE_BYTES,
     SOCKETS,
     SSH_TIMEOUT,
     VMInfo,
@@ -278,10 +279,25 @@ def _ago(epoch: int) -> str:
 
 _SIZE_SUFFIXES = {"M": 1 << 20, "G": 1 << 30}
 _MIN_DISK_BYTES = 64 * (1 << 20)  # 64 MiB
+_MIN_ROOT_BYTES = 1 << 30  # 1 GiB
 _MAX_DISK_BYTES = 100 * (1 << 30)  # 100 GiB
 
 
-def _parse_disk_size(value: str | int | None) -> int:
+def _size_label(nbytes: int) -> str:
+    """A size as the user would have typed it: 8G, 512M."""
+    if nbytes % (1 << 30) == 0:
+        return f"{nbytes // (1 << 30)}G"
+    return f"{nbytes // (1 << 20)}M"
+
+
+def _parse_size(
+    value: str | int | None,
+    *,
+    default: int,
+    flag: str,
+    minimum: int,
+    min_label: str,
+) -> int:
     """Parse a disk size to bytes.
 
     Accepts:
@@ -296,33 +312,76 @@ def _parse_disk_size(value: str | int | None) -> int:
     Raises SystemExit on out-of-range or invalid input.
     """
     if value is None or value == "":
-        return DISK_SIZE_BYTES
+        return default
     if isinstance(value, int):
-        if value < _MIN_DISK_BYTES:
-            die(f"disk size {value} bytes is below the minimum of 64M")
+        if value < minimum:
+            die(f"disk size {value} bytes is below the minimum of {min_label}")
         if value > _MAX_DISK_BYTES:
             die(f"disk size {value} bytes exceeds the maximum of 100G")
         return value
     s = value.strip().upper()
     if not s:
-        return DISK_SIZE_BYTES
+        return default
     suffix = s[-1]
     if suffix not in _SIZE_SUFFIXES:
-        die(
-            f"Invalid --disk-size '{value}': suffix must be M or G (e.g. 500M, 2G)"
-        )
+        die(f"Invalid {flag} '{value}': suffix must be M or G (e.g. 500M, 2G)")
     try:
         n = int(s[:-1])
     except ValueError:
-        die(f"Invalid --disk-size '{value}': not a number before the suffix")
+        die(f"Invalid {flag} '{value}': not a number before the suffix")
     if n <= 0:
-        die(f"Invalid --disk-size '{value}': size must be positive")
+        die(f"Invalid {flag} '{value}': size must be positive")
     result = n * _SIZE_SUFFIXES[suffix]
-    if result < _MIN_DISK_BYTES:
-        die(f"--disk-size '{value}' is below the minimum of 64M")
+    if result < minimum:
+        die(f"{flag} '{value}' is below the minimum of {min_label}")
     if result > _MAX_DISK_BYTES:
-        die(f"--disk-size '{value}' exceeds the maximum of 100G")
+        die(f"{flag} '{value}' exceeds the maximum of 100G")
     return result
+
+
+def _parse_disk_size(value: str | int | None) -> int:
+    """Parse an MDT/OST disk size (``--disk-size``) to bytes."""
+    return _parse_size(
+        value,
+        default=DISK_SIZE_BYTES,
+        flag="--disk-size",
+        minimum=_MIN_DISK_BYTES,
+        min_label="64M",
+    )
+
+
+def _parse_root_size(value: str | int | None) -> int:
+    """Parse the root (OS) disk size (``--root-size``) to bytes.
+
+    The floor is coarse; what a root disk actually has to clear is the
+    base image it overlays, which _check_root_size_fits knows once the
+    image is resolved.
+    """
+    return _parse_size(
+        value,
+        default=ROOT_SIZE_BYTES,
+        flag="--root-size",
+        minimum=_MIN_ROOT_BYTES,
+        min_label="1G",
+    )
+
+
+def _check_root_size_fits(root_size: int, image: str) -> None:
+    """Refuse a root disk smaller than the image it overlays.
+
+    qemu-img would take the resize and the VM would then read past the
+    end of its own filesystem.
+    """
+    try:
+        base_bytes = Path(image).stat().st_size
+    except OSError:
+        return
+    if root_size < base_bytes:
+        die(
+            f"--root-size {root_size // (1 << 20)}M is smaller than the "
+            f"base image it overlays ({base_bytes // (1 << 20)}M): "
+            f"{image}"
+        )
 
 
 # ── lifecycle ────────────────────────────────────────────
@@ -468,6 +527,15 @@ _RESOURCE_FLAGS = {
     "mdt_disks": "--mdt-disks",
     "ost_disks": "--ost-disks",
     "disk_size": "--disk-size",
+    "root_size": "--root-size",
+}
+
+# Size flags are typed as "500M" and stored as bytes, so they have to be
+# compared through the parser -- a straight string compare reported
+# `--disk-size 500M` as ignored on a VM that has exactly that.
+_SIZE_FLAG_PARSERS = {
+    "disk_size": _parse_disk_size,
+    "root_size": _parse_root_size,
 }
 
 
@@ -502,7 +570,17 @@ def _warn_ignored_resource_flags(
         if requested is None:
             continue
         current = getattr(vm, dest, None)
-        if current is not None and str(current) != str(requested):
+        if current is None:
+            continue
+        parse = _SIZE_FLAG_PARSERS.get(dest)
+        if parse is not None:
+            if parse(requested) == current:
+                continue
+            ignored.append(
+                f"{_RESOURCE_FLAGS[dest]}: requested {requested}, "
+                f"VM has {_size_label(current)}"
+            )
+        elif str(current) != str(requested):
             ignored.append(
                 f"{_RESOURCE_FLAGS[dest]}: requested {requested}, "
                 f"VM has {current}"
@@ -582,6 +660,7 @@ def _allocate_and_persist_vm(
     variant: str,
     extra_nic_types: list[str],
     disk_size: int,
+    root_size: int,
 ) -> VMInfo:
     """Under the alloc_ip file lock, re-check for a racing create,
     construct the VMInfo, create overlay+backing disks (with inner
@@ -616,6 +695,7 @@ def _allocate_and_persist_vm(
             mdt_disks=args.mdt_disks,
             ost_disks=args.ost_disks,
             disk_size=disk_size,
+            root_size=root_size,
             image=image,
             kernel=kernel,
             created=int(time.time()),
@@ -680,9 +760,11 @@ def _print_create_plan(
     variant: str,
     extra_nic_types: list[str],
     disk_size: int,
+    root_size: int,
 ) -> None:
     """Report what `create` would do, for --dry-run."""
     size_mb = disk_size // (1024 * 1024)
+    root_mb = root_size // (1024 * 1024)
     plan: dict[str, Any] = {
         "action": "would-create",
         "name": args.name,
@@ -698,6 +780,7 @@ def _print_create_plan(
         "mdt_disks": args.mdt_disks,
         "ost_disks": args.ost_disks,
         "disk_size_mb": size_mb,
+        "root_size_mb": root_mb,
         "ip": getattr(args, "ip", None),
         "tap": tap,
         "mac": mac,
@@ -723,6 +806,7 @@ def _print_create_plan(
         f"  disks:   {args.mdt_disks} MDT + {args.ost_disks} OST "
         f"@ {size_mb}M each"
     )
+    print(f"  root:    {_size_label(root_size)}")
     # The IP is claimed under a lock by the step this stops short of, so
     # there is no honest way to name the one a real run would get.
     print(f"  ip:      {getattr(args, 'ip', None) or 'next free (auto)'}")
@@ -991,7 +1075,9 @@ def _create_disks(vm: VMInfo, image: str) -> None:
         # Grow the qcow2 virtual disk so the VM has room for Lustre
         # modules, logs, etc.  The ext4 filesystem is resized on first
         # boot (rc.local).
-        _sudo_checked([QEMU_IMG, "resize", str(vm.overlay_path), "8G"])
+        _sudo_checked(
+            [QEMU_IMG, "resize", str(vm.overlay_path), str(vm.root_size)]
+        )
 
         # Create backing disks
         total = vm.mdt_disks + vm.ost_disks
@@ -1178,6 +1264,8 @@ def cmd_create(args: argparse.Namespace) -> None:
     os_id = os_target
 
     disk_size = _parse_disk_size(getattr(args, "disk_size", None))
+    root_size = _parse_root_size(getattr(args, "root_size", None))
+    _check_root_size_fits(root_size, image)
 
     if dry_run:
         # Everything above resolves and validates without writing: the
@@ -1197,6 +1285,7 @@ def cmd_create(args: argparse.Namespace) -> None:
             variant=variant,
             extra_nic_types=extra_nic_types,
             disk_size=disk_size,
+            root_size=root_size,
         )
         return
 
@@ -1214,6 +1303,7 @@ def cmd_create(args: argparse.Namespace) -> None:
         variant,
         extra_nic_types,
         disk_size,
+        root_size,
     )
     # If anything from launch_qemu through _seed_kdump_boot raises or
     # die()s, we want to leave the user with a clean slate (no
@@ -1496,6 +1586,7 @@ def cmd_list(args: argparse.Namespace) -> None:
                 "mdt_disks": vm.mdt_disks,
                 "ost_disks": vm.ost_disks,
                 "disk": disk_mb,
+                "root_size_mb": vm.root_size // 1048576,
                 "created": vm.created,
                 "last_boot": vm.last_boot,
                 "last_deploy": vm.last_deploy,

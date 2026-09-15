@@ -259,6 +259,7 @@ def _create_one_node(
     os_target: str | None = None,
     arch: str | None = None,
     disk_size: str | None = None,
+    root_size: str | None = None,
     nics: list[str] | None = None,
     owner_id: str | None = None,
 ) -> tuple[str, int, str]:
@@ -300,6 +301,8 @@ def _create_one_node(
         cmd += ["--arch", arch]
     if disk_size:
         cmd += ["--disk-size", disk_size]
+    if root_size:
+        cmd += ["--root-size", root_size]
     if owner_id:
         # Pass the cluster parent's resolved value explicitly so all members
         # share one owner even though each child has a different process PID.
@@ -361,6 +364,7 @@ def _print_cluster_plan(
     os_target: str | None,
     arch: str | None,
     disk_size: str | None,
+    root_size: str | None,
     nics: list[str],
     owner_id: str | None,
 ) -> None:
@@ -389,6 +393,8 @@ def _print_cluster_plan(
     print(f"  cpu/mem: {vcpus} vcpus, {mem_desc}")
     if disk_size:
         print(f"  disk:    {disk_size} each")
+    if root_size:
+        print(f"  root:    {root_size} each")
     if nics:
         print(f"  nics:    eth0 (mgmt) + {', '.join(nics)}")
     print(f"  owner:   {owner_id}")
@@ -463,6 +469,7 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
     os_target = getattr(args, "os", None)
     arch = getattr(args, "arch", None)
     disk_size = getattr(args, "disk_size", None)
+    root_size = getattr(args, "root_size", None)
     # Multi-NIC: same list of --nic specs applies to every node in the
     # cluster.  The CLI layer (cli.py::cmd_cluster) collects them into
     # args.nic; older call sites that don't know about --nic land here
@@ -486,6 +493,7 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
             os_target=os_target,
             arch=arch,
             disk_size=disk_size,
+            root_size=root_size,
             nics=nics,
             owner_id=owner_id,
         )
@@ -507,6 +515,7 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
                 os_target,
                 arch,
                 disk_size,
+                root_size,
                 nics,
                 owner_id,
             ): node

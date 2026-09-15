@@ -37,7 +37,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from ltvm_pkg import vm_commands
-from ltvm_pkg.vm_state import DISK_SIZE_BYTES, VMInfo
+from ltvm_pkg.vm_state import DISK_SIZE_BYTES, ROOT_SIZE_BYTES, VMInfo
 
 # ────────────────────────────────────────────────────────
 # Fixtures mirroring test_vm_commands.py's tmp_vmdir.
@@ -70,6 +70,7 @@ def _create_args(**overrides: Any) -> argparse.Namespace:
         "mdt_disks": 0,
         "ost_disks": 0,
         "disk_size": None,
+        "root_size": None,
         "image": "",
         "kernel": "",
         "target": "",
@@ -210,6 +211,60 @@ class TestCreateDiskAllocation:
             )
         vm = VMInfo.load("co1-def-size")
         assert vm.disk_size == DISK_SIZE_BYTES
+
+    def test_root_size_default_persisted_on_vm(self, tmp_vmdir: Path) -> None:
+        with _create_env(tmp_vmdir):
+            vm_commands.cmd_create(_create_args(name="co1-def-root"))
+        assert VMInfo.load("co1-def-root").root_size == ROOT_SIZE_BYTES
+
+    def test_root_size_explicit_persisted_on_vm(self, tmp_vmdir: Path) -> None:
+        with _create_env(tmp_vmdir):
+            vm_commands.cmd_create(
+                _create_args(name="co1-big-root", root_size="20G")
+            )
+        assert VMInfo.load("co1-big-root").root_size == 20 * (1 << 30)
+
+    def test_root_size_reaches_qemu_img_resize(self, tmp_vmdir: Path) -> None:
+        """The overlay has to actually be grown -- persisting the number
+        alone would leave an 8G VM claiming 20G."""
+        with _create_env(tmp_vmdir) as env:
+            vm_commands.cmd_create(
+                _create_args(name="co1-resize", root_size="20G")
+            )
+        resizes = [
+            c.args[0]
+            for c in env["run"].call_args_list
+            if len(c.args[0]) > 1 and c.args[0][1] == "resize"
+        ]
+        assert len(resizes) == 1
+        assert resizes[0][-1] == str(20 * (1 << 30))
+
+    def test_default_root_size_reaches_qemu_img_resize(
+        self, tmp_vmdir: Path
+    ) -> None:
+        with _create_env(tmp_vmdir) as env:
+            vm_commands.cmd_create(_create_args(name="co1-defresize"))
+        resizes = [
+            c.args[0]
+            for c in env["run"].call_args_list
+            if len(c.args[0]) > 1 and c.args[0][1] == "resize"
+        ]
+        assert resizes[0][-1] == str(ROOT_SIZE_BYTES)
+
+    def test_root_smaller_than_base_image_refused(
+        self, tmp_vmdir: Path, capsys: Any
+    ) -> None:
+        """A 2G root over a 3G image would read past its own end."""
+        with _create_env(tmp_vmdir) as env:
+            image: Path = env["arts"].image
+            with image.open("wb") as f:
+                f.truncate(3 << 30)  # sparse: no 3 GiB written
+            with pytest.raises(SystemExit):
+                vm_commands.cmd_create(
+                    _create_args(name="co1-tinyroot", root_size="2G")
+                )
+        assert "smaller than the base image" in capsys.readouterr().err
+        assert not (tmp_vmdir / "sockets" / "co1-tinyroot.info").exists()
 
     def test_disk_size_explicit_megs_persisted(self, tmp_vmdir: Path) -> None:
         """--disk-size 200M threads to VMInfo.disk_size (208 MiB)."""
