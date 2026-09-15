@@ -1854,3 +1854,77 @@ class TestCmdListRendering:
         assert "1 running, 0 stopped" in out
         assert "vcpus: 4/" in out
         assert "mem: 2048M/" in out
+
+
+class TestCmdListMemory:
+    """Each row says what the VM is holding, not just what it was given.
+
+    QEMU faults guest RAM in lazily, so a host that looks fully
+    committed can be half idle -- and when the launch budget refuses the
+    next VM, which one to stop is the question the list has to answer.
+    """
+
+    def test_running_row_shows_resident_over_configured(
+        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        VMInfo(name="mem-a", ip="10.0.0.6", pid=42, vcpus=2, mem=4096).save()
+        with (
+            patch(
+                "ltvm_pkg.vm_commands.is_running",
+                side_effect=lambda vm: vm.pid > 0,
+            ),
+            patch("ltvm_pkg.vm_commands._rss_mb", return_value=900),
+        ):
+            vm_commands.cmd_list(argparse.Namespace(json=False))
+        out = capsys.readouterr().out
+        assert "mem=900/4096M" in out
+        assert "(900M resident)" in out
+
+    def test_stopped_row_shows_configured_only(
+        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        VMInfo(name="mem-b", ip="10.0.0.7", pid=0, vcpus=2, mem=4096).save()
+        with patch(
+            "ltvm_pkg.vm_commands.is_running", side_effect=lambda vm: False
+        ):
+            vm_commands.cmd_list(argparse.Namespace(json=False))
+        out = capsys.readouterr().out
+        assert "mem=4096M" in out
+        assert "resident" not in out
+
+    def test_json_carries_both_numbers(
+        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        VMInfo(name="mem-c", ip="10.0.0.8", pid=42, vcpus=2, mem=4096).save()
+        with (
+            patch(
+                "ltvm_pkg.vm_commands.is_running",
+                side_effect=lambda vm: vm.pid > 0,
+            ),
+            patch("ltvm_pkg.vm_commands._rss_mb", return_value=900),
+        ):
+            vm_commands.cmd_list(argparse.Namespace(json=True))
+        data = json.loads(capsys.readouterr().out)
+        assert data["vms"][0]["mem"] == 4096
+        assert data["vms"][0]["mem_rss_mb"] == 900
+        assert data["totals"]["mem_used_mb"] == 4096
+        assert data["totals"]["mem_rss_mb"] == 900
+
+
+class TestRssMb:
+    def test_unknown_pid_is_none(self) -> None:
+        from ltvm_pkg.vm_commands import _rss_mb
+
+        assert _rss_mb(0) is None
+        assert _rss_mb(-1) is None
+        # A pid that cannot be read is unknown, not zero: a row saying
+        # 0M would read as "this VM is free".
+        assert _rss_mb(4194303) is None
+
+    def test_our_own_process_reports_something(self) -> None:
+        import os as _os
+
+        from ltvm_pkg.vm_commands import _rss_mb
+
+        mb = _rss_mb(_os.getpid())
+        assert mb is not None and mb >= 0

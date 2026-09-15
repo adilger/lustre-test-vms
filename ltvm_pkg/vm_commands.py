@@ -1510,6 +1510,24 @@ def cmd_llmount(args: argparse.Namespace) -> None:
 # ── info + observability ─────────────────────────────────
 
 
+def _rss_mb(pid: int) -> int | None:
+    """Resident memory of a running QEMU, in MiB, or None if unknown.
+
+    QEMU faults guest RAM in lazily, so a VM configured with 8G may be
+    holding a fraction of that.  The launch budget deliberately counts
+    the configured size (a VM that has not touched its pages yet still
+    will), but for reading a list of VMs the difference is the useful
+    part: which of these is actually using the host's memory.
+    """
+    if pid <= 0:
+        return None
+    try:
+        fields = Path(f"/proc/{pid}/statm").read_text().split()
+        return int(fields[1]) * os.sysconf("SC_PAGE_SIZE") // (1 << 20)
+    except (OSError, IndexError, ValueError):
+        return None
+
+
 def _host_total_mem_mb() -> int:
     if is_macos():
         try:
@@ -1535,6 +1553,7 @@ def _host_total_mem_mb() -> int:
 def cmd_list(args: argparse.Namespace) -> None:
     total_vcpus = 0
     total_mem = 0
+    total_rss = 0
     running_count = 0
     stopped_count = 0
     entries: list[dict[str, Any]] = []
@@ -1564,10 +1583,12 @@ def cmd_list(args: argparse.Namespace) -> None:
             continue
         status = "running" if is_running(vm) else "stopped"
 
+        rss = _rss_mb(vm.pid) if status == "running" else None
         if status == "running":
             running_count += 1
             total_vcpus += vm.vcpus
             total_mem += vm.mem
+            total_rss += rss or 0
         else:
             stopped_count += 1
 
@@ -1583,6 +1604,7 @@ def cmd_list(args: argparse.Namespace) -> None:
                 "pid": vm.pid,
                 "vcpus": vm.vcpus,
                 "mem": vm.mem,
+                "mem_rss_mb": rss,
                 "mdt_disks": vm.mdt_disks,
                 "ost_disks": vm.ost_disks,
                 "disk": disk_mb,
@@ -1612,6 +1634,7 @@ def cmd_list(args: argparse.Namespace) -> None:
                         "vcpus_used": total_vcpus,
                         "vcpus_available": host_cpus,
                         "mem_used_mb": total_mem,
+                        "mem_rss_mb": total_rss,
                         "mem_available_mb": host_mem_mb,
                     },
                 }
@@ -1638,9 +1661,16 @@ def cmd_list(args: argparse.Namespace) -> None:
             # legacy VMs from before this field existed show `by=-`.
             creator = e.get("creator") or "-"
             owner_id = e.get("owner_id") or "-"
+            # Running VMs show what they are actually holding against
+            # what they were given; stopped ones have only the latter.
+            mem = (
+                f"{e['mem_rss_mb']}/{e['mem']}M"
+                if e.get("mem_rss_mb") is not None
+                else f"{e['mem']}M"
+            )
             print(
                 f"{e['name']:<20} {e['ip']:<18} {e['status']:<8} "
-                f"{os_id:<8} {disks:<14} "
+                f"{os_id:<8} {disks:<14} mem={mem:<12} "
                 f"boot={boot:<10} deploy={deploy:<10} by={creator} "
                 f"owner={owner_id}"
             )
@@ -1648,7 +1678,8 @@ def cmd_list(args: argparse.Namespace) -> None:
         print(
             f"{running_count} running, {stopped_count} stopped | "
             f"vcpus: {total_vcpus}/{host_cpus} | "
-            f"mem: {total_mem}M/{host_mem_mb}M"
+            f"mem: {total_mem}M/{host_mem_mb}M committed"
+            f"{f' ({total_rss}M resident)' if total_rss else ''}"
         )
 
 
