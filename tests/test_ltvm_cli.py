@@ -11,6 +11,8 @@ import importlib.machinery
 import importlib.util
 import json
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -2100,3 +2102,113 @@ class TestCmdTargetsPerKernelRows:
         )
         assert remote2.endswith("el9_7_lustre")
 
+
+class TestFetchPrefersTheDefaultKernel:
+    """A fetch has to land the kernel `ltvm create` will ask for.
+
+    Taking the newest published release instead left a fresh host
+    holding artifacts its own create refused: "Default kernel
+    '5.14-rhel9.7' for 'rocky9' is not built", immediately after a
+    fetch that reported success.
+    """
+
+    def _args(self, **kw: Any) -> argparse.Namespace:
+        base = dict(
+            url=None,
+            target="rocky9",
+            filter=None,
+            arch=None,
+            kernel=None,
+            list=False,
+            json=False,
+            variant="base",
+            image=False,
+            dry_run=True,
+        )
+        base.update(kw)
+        return argparse.Namespace(**base)
+
+    @contextmanager
+    def _patched(self, tmp_targets: Path, find: Any) -> Iterator[None]:
+        import ltvm_pkg.cli as cli_mod
+        import ltvm_pkg.target_config as cfg
+
+        with (
+            patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
+            patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"),
+            patch.object(cli_mod, "TargetConfig", cfg.TargetConfig),
+            patch.object(
+                cfg, "TARGETS_YAML", tmp_targets / "targets" / "targets.yaml"
+            ),
+            patch.object(cli_mod, "_find_release_url", find),
+        ):
+            yield
+
+    def test_no_flag_asks_for_the_default_kernels_release(
+        self, tmp_targets: Path
+    ) -> None:
+        import ltvm_pkg.cli as cli_mod
+
+        seen: list[Any] = []
+
+        def find(target: str, **kw: Any) -> str:
+            seen.append(kw.get("kernel_signature"))
+            return (
+                "https://ex/releases/download/"
+                "rocky9-x86_64-5.14.0-611.55.1.el9_7_lustre/m.json"
+            )
+
+        with self._patched(tmp_targets, find):
+            cli_mod.cmd_fetch(self._args())
+
+        assert seen == ["el9_7"]
+
+    def test_explicit_kernel_still_wins(self, tmp_targets: Path) -> None:
+        import ltvm_pkg.cli as cli_mod
+
+        seen: list[Any] = []
+
+        def find(target: str, **kw: Any) -> str:
+            seen.append(kw.get("kernel_signature"))
+            return (
+                "https://ex/releases/download/"
+                "rocky9-x86_64-5.14.0-503.26.1.el9_5_lustre/m.json"
+            )
+
+        with self._patched(tmp_targets, find):
+            cli_mod.cmd_fetch(self._args(kernel="5.14-rhel9.5"))
+
+        assert seen == ["el9_5"]
+
+    def test_falls_back_when_the_default_has_no_release(
+        self, tmp_targets: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        import ltvm_pkg.cli as cli_mod
+
+        seen: list[Any] = []
+
+        def find(target: str, **kw: Any) -> str:
+            sig = kw.get("kernel_signature")
+            seen.append(sig)
+            if sig is not None:
+                raise RuntimeError(f"no release matching {sig}")
+            return (
+                "https://ex/releases/download/"
+                "rocky9-x86_64-5.14.0-503.26.1.el9_5_lustre/m.json"
+            )
+
+        with self._patched(tmp_targets, find):
+            rc = cli_mod.cmd_fetch(self._args())
+
+        # Asked for the default, then took what exists rather than
+        # refusing -- and said the create will need --kernel.
+        assert seen == ["el9_7", None]
+        assert rc == EXIT_OK
+        assert "default" in capsys.readouterr().err
+
+    def test_kernel_name_recovered_from_a_release_tag(self) -> None:
+        from ltvm_pkg.cli.fetch import _fetched_kernel_name
+
+        tag = "rocky9-x86_64-5.14.0-503.26.1.el9_5_lustre"
+        assert _fetched_kernel_name("rocky9", tag, "x86_64") == "5.14-rhel9.5"
+        assert _fetched_kernel_name("rocky9", "", "x86_64") is None

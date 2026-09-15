@@ -173,6 +173,30 @@ def _kernel_release_signature(kname: str) -> str | None:
     return None
 
 
+def _fetched_kernel_name(
+    target: str, release_tag: str, arch: str
+) -> str | None:
+    """The declared kernel name whose signature matches ``release_tag``.
+
+    Release tags carry the uname-r suffix, not the short name a user
+    types, so this maps back: rocky9-x86_64-...el9_8_lustre ->
+    5.14-rhel9.8.  None when nothing matches (an unparseable tag, or a
+    target whose kernels share a signature).
+    """
+    if not release_tag:
+        return None
+    try:
+        tc = _cli_attr("TargetConfig")(target, arch=arch)
+        declared = tc.declared_kernels()
+    except Exception:  # noqa: BLE001
+        return None
+    for name in declared:
+        sig = _kernel_release_signature(name)
+        if sig and sig in release_tag:
+            return str(name)
+    return None
+
+
 def _release_matches_kernel(rel: dict, signature: str, arch: str) -> bool:
     """True iff ``rel`` has an arch-matching asset whose name contains
     the kernel signature."""
@@ -528,6 +552,8 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     # we just skip the lookup.
     tc = None
     kernel_signature: str | None = None
+    default_signature: str | None = None
+    default_unavailable = False
     if kernel and not target:
         return _error(
             "--kernel requires a target (e.g. ltvm target fetch rocky9 "
@@ -565,6 +591,14 @@ def cmd_fetch(args: argparse.Namespace) -> int:
                     f"the kernel you asked for.",
                     file=sys.stderr,
                 )
+        else:
+            # No --kernel: fetch the release for the target's *default*
+            # kernel, which is the one `ltvm create` will ask for.
+            # Taking the newest published release instead left a fresh
+            # host holding artifacts its own create refuses to use --
+            # "Default kernel ... is not built" immediately after a
+            # fetch that said it succeeded.
+            default_signature = _kernel_release_signature(tc.default_kernel)
 
     # --list: show available releases
     if getattr(args, "list", False):
@@ -664,17 +698,40 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     if not url:
         if not use_json:
             print(f"Looking up {target} ({variant}) from GitHub releases...")
+        find = _cli_attr("_find_release_url")
         try:
-            url = _cli_attr("_find_release_url")(
+            url = find(
                 target,
                 filter_str=filt,
                 arch=arch,
-                kernel_signature=kernel_signature,
+                kernel_signature=kernel_signature or default_signature,
                 variant=variant,
                 mode="ecosystem",
             )
         except RuntimeError as e:
-            return _error(str(e), use_json)
+            if kernel_signature or not default_signature:
+                return _error(str(e), use_json)
+            # The default kernel has no published release.  Take what
+            # is published rather than refusing, but say so: the create
+            # that follows needs --kernel for these artifacts.
+            try:
+                url = find(
+                    target,
+                    filter_str=filt,
+                    arch=arch,
+                    kernel_signature=None,
+                    variant=variant,
+                    mode="ecosystem",
+                )
+            except RuntimeError as e2:
+                return _error(str(e2), use_json)
+            default_unavailable = True
+            print(
+                f"warning: no published release for {target}'s default "
+                f"kernel ({tc.default_kernel if tc else '?'}); fetching "
+                f"another one -- `ltvm create` will need --kernel.",
+                file=sys.stderr,
+            )
 
     # Extract release tag from URL to check if already fetched.
     # URL: .../releases/download/<tag>/<filename>
@@ -855,9 +912,18 @@ def cmd_fetch(args: argparse.Namespace) -> int:
         print()
         print("Next:")
         arch_flag = f" --arch {arch}" if arch != host_arch() else ""
+        # When what we fetched is not the target's default kernel,
+        # create needs to be told -- otherwise it asks for the default,
+        # finds it unbuilt, and refuses right after a successful fetch.
+        fetched = _fetched_kernel_name(target, release_tag, arch)
+        kernel_flag = (
+            f" --kernel {fetched}"
+            if (kernel_signature or default_unavailable) and fetched
+            else ""
+        )
         print(
-            f"  ltvm create co1-test --target {target}{arch_flag} "
-            f"--vcpus 2 --mdt-disks 1 --ost-disks 2"
+            f"  ltvm create co1-test --target {target}{arch_flag}"
+            f"{kernel_flag} --vcpus 2 --mdt-disks 1 --ost-disks 2"
         )
         print("  ltvm llmount co1-test")
         try:
