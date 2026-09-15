@@ -1366,3 +1366,84 @@ class TestSubnetCollision:
             setup_network(MagicMock(), subnet="192.168.100", force=True)
 
         in_use.assert_not_called()
+
+
+class TestChooseSubnet:
+    """With no --subnet, install picks a range instead of refusing.
+
+    Refusing is right for a range the user named; for the default it
+    just leaves them to retry with a flag, when ltvm can see perfectly
+    well which ranges are free.
+    """
+
+    def test_explicit_request_is_obeyed_verbatim(self) -> None:
+        from ltvm_pkg.host_setup import choose_subnet
+
+        with patch("ltvm_pkg.host_setup._subnet_in_use") as in_use:
+            assert choose_subnet("192.168.77") == "192.168.77"
+        in_use.assert_not_called()
+
+    def test_default_when_nothing_holds_it(self) -> None:
+        from ltvm_pkg.host_setup import DEFAULT_SUBNET, choose_subnet
+
+        with (
+            patch("ltvm_pkg.host_setup._recorded_subnet", return_value=None),
+            patch("ltvm_pkg.host_setup._subnet_in_use", return_value=None),
+        ):
+            assert choose_subnet(None) == DEFAULT_SUBNET
+
+    def test_moves_off_a_taken_default(self) -> None:
+        from ltvm_pkg.host_setup import choose_subnet
+
+        def in_use(subnet: str) -> tuple[str, str] | None:
+            if subnet == "192.168.100":
+                return ("eth0", "192.168.100.51/24")
+            return None
+
+        with (
+            patch("ltvm_pkg.host_setup._recorded_subnet", return_value=None),
+            patch("ltvm_pkg.host_setup._subnet_in_use", side_effect=in_use),
+        ):
+            assert choose_subnet(None) == "192.168.200"
+
+    def test_skips_candidates_that_are_also_taken(self) -> None:
+        from ltvm_pkg.host_setup import choose_subnet
+
+        taken = {"192.168.100", "192.168.200", "192.168.201"}
+
+        def in_use(subnet: str) -> tuple[str, str] | None:
+            return ("br0", f"{subnet}.1/24") if subnet in taken else None
+
+        with (
+            patch("ltvm_pkg.host_setup._recorded_subnet", return_value=None),
+            patch("ltvm_pkg.host_setup._subnet_in_use", side_effect=in_use),
+        ):
+            assert choose_subnet(None) == "192.168.202"
+
+    def test_an_earlier_install_choice_sticks(self) -> None:
+        """Re-running install must not renumber a host's VMs."""
+        from ltvm_pkg.host_setup import choose_subnet
+
+        with (
+            patch(
+                "ltvm_pkg.host_setup._recorded_subnet",
+                return_value="192.168.200",
+            ),
+            patch("ltvm_pkg.host_setup._subnet_in_use", return_value=None),
+        ):
+            assert choose_subnet(None) == "192.168.200"
+
+    def test_raises_when_every_candidate_is_taken(self) -> None:
+        from ltvm_pkg.host_setup import choose_subnet
+
+        with (
+            patch("ltvm_pkg.host_setup._recorded_subnet", return_value=None),
+            patch(
+                "ltvm_pkg.host_setup._subnet_in_use",
+                return_value=("eth0", "192.168.100.51/24"),
+            ),
+            pytest.raises(RuntimeError) as e,
+        ):
+            choose_subnet(None)
+
+        assert "--subnet" in str(e.value)

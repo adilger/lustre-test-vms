@@ -128,7 +128,11 @@ def cmd_setup(args: argparse.Namespace) -> int:
 
     if args.verify:
         try:
-            results = host_setup.verify(subnet=args.subnet)
+            # verify reports on what is configured, so with no flag it
+            # asks about the range the install actually chose.
+            results = host_setup.verify(
+                subnet=host_setup.choose_subnet(args.subnet)
+            )
         except Exception as e:
             return _error(str(e), use_json)
         if use_json:

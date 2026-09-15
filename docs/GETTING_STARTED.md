@@ -22,9 +22,12 @@ This installs QEMU (with microvm support), configures the
 network bridge + dnsmasq, sets up SSH keys, and puts `ltvm`
 on your PATH.
 
-The bridge claims `192.168.100.0/24`. If something on the
-machine already uses that range, install refuses rather than
-taking it over -- pick another with `--subnet 192.168.200`.
+The bridge wants `192.168.100.0/24`. If something on the
+machine already uses that range, install moves to the next free
+`192.168.x` and says so, rather than taking the host's own
+network out from under it. Name a range yourself with
+`--subnet 192.168.200`; an explicit one is obeyed, or refused if
+it is occupied.
 
 It also installs tab completion for bash, zsh and fish --
 whichever of them the host has. **Open a new shell** to pick

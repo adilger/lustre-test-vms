@@ -523,8 +523,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp.add_argument(
         "--subnet",
-        default="192.168.100",
-        help="Bridge subnet (default: 192.168.100)",
+        default=None,
+        help="Bridge subnet (default: 192.168.100, or the next free "
+        "192.168.x when something else already uses it)",
     )
     sp.set_defaults(func=cmd_setup)
 

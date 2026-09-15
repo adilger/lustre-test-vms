@@ -1765,6 +1765,69 @@ def _subnet_in_use(subnet: str) -> tuple[str, str] | None:
     return None
 
 
+def _recorded_subnet() -> str | None:
+    """The subnet a previous install configured, if any."""
+    f = VM_DIR / "subnet"
+    try:
+        v = f.read_text().strip()
+    except OSError:
+        return None
+    return v or None
+
+
+# Where to look for a free range when the usual one is taken.  The
+# default first (so nothing changes on a host that can have it), then
+# 192.168.200+, which is far enough from the ranges a home router or a
+# container runtime hands out to be free in practice.
+_SUBNET_CANDIDATES = [DEFAULT_SUBNET] + [
+    f"192.168.{n}" for n in range(200, 255)
+]
+
+
+def choose_subnet(requested: str | None) -> str:
+    """The subnet to configure fcbr0 on.
+
+    An explicit ``--subnet`` is obeyed as given -- the user named that
+    range, and setup_network refuses it if something else holds it
+    rather than quietly using a different one.
+
+    With no flag, keep what a previous install recorded, else the
+    default -- and when that range already belongs to another
+    interface, move to the first free candidate instead.  Taking over
+    the host's own network is never what the user meant by running an
+    installer.
+    """
+    if requested is not None:
+        return requested
+
+    preferred = _recorded_subnet() or DEFAULT_SUBNET
+    clash = _subnet_in_use(preferred)
+    if clash is None:
+        return preferred
+
+    for candidate in _SUBNET_CANDIDATES:
+        if candidate == preferred or _subnet_in_use(candidate) is not None:
+            continue
+        ifname, addr = clash
+        log.warning(
+            "%s.0/24 is in use by %s (%s) -- putting fcbr0 on %s.0/24 "
+            "instead (override with --subnet)",
+            preferred,
+            ifname,
+            addr,
+            candidate,
+        )
+        return candidate
+
+    ifname, addr = clash
+    raise RuntimeError(
+        f"{preferred}.0/24 is in use by {ifname} ({addr}) and no "
+        f"alternative in 192.168.200-254 is free either.\n"
+        f"Name a range with --subnet, or --force to use "
+        f"{preferred}.0/24 anyway."
+    )
+
+
 def setup_network(
     host: HostInfo, subnet: str = DEFAULT_SUBNET, force: bool = False
 ) -> None:
@@ -2600,7 +2663,7 @@ def _run_setup_macos(
 
 def run_setup(
     steps: list[str] | None = None,
-    subnet: str = DEFAULT_SUBNET,
+    subnet: str | None = None,
     force: bool = False,
 ) -> None:
     """Run host setup.
@@ -2614,6 +2677,10 @@ def run_setup(
 
     if os.geteuid() != 0:
         raise RuntimeError("Must run as root")
+
+    # Resolve once: setup_network and setup_ssh must agree on the range,
+    # and so must the VM_DIR/subnet file vm_net reads later.
+    subnet = choose_subnet(subnet)
 
     host = HostInfo()
     log.info("Host: %s", host)
