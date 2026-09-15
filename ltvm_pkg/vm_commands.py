@@ -1144,6 +1144,17 @@ def cmd_create(args: argparse.Namespace) -> None:
     dry_run = getattr(args, "dry_run", False)
     info_path = SOCKETS / f"{name}.info"
     exists = info_path.exists()
+
+    # Say what is about to happen before the first thing that can
+    # block.  An existing running VM goes straight into a silent wait
+    # for ssh, which from the outside is indistinguishable from a hang
+    # -- and that is the case where the VM is in trouble.
+    if not dry_run and not args.json:
+        print(
+            f"{name}: {'converging existing VM' if exists else 'creating'}",
+            flush=True,
+        )
+
     # _handle_existing_vm converges an existing VM (it can start one), so
     # a dry run reports the name is taken rather than calling it.
     if not dry_run and _handle_existing_vm(name, args):

@@ -8,6 +8,7 @@ import logging
 import os
 import signal
 import subprocess
+import sys
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -762,6 +763,14 @@ def wait_for_ssh(ip: str, max_wait: int = 30) -> None:
     a host-setup bug we want to surface immediately rather than masquerade
     as "SSH not ready".
     """
+    # Announce the wait: this is the one step in create/start that can
+    # take tens of seconds, and it is silent otherwise.  stderr, so
+    # --json callers still get a clean stdout.
+    print(
+        f"waiting for ssh on {ip} (up to {max_wait}s)...",
+        file=sys.stderr,
+        flush=True,
+    )
     start = time.monotonic()
     deadline = start + max_wait
     while time.monotonic() < deadline:
