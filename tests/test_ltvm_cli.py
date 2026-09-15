@@ -678,19 +678,6 @@ class TestVmSubcommands:
         assert args.name == "co1-single"
         assert args.vcpus == 4
 
-    def test_crash_collect_mod_dir(self) -> None:
-        p = ltvm.build_parser()
-        args = p.parse_args(
-            ["vm", "crash-collect", "co1-single", "--mod-dir", "/path/to/build"]
-        )
-        assert args.name == "co1-single"
-        assert args.mod_dir == "/path/to/build"
-
-    def test_doctor_fix_flag(self) -> None:
-        p = ltvm.build_parser()
-        args = p.parse_args(["doctor", "--fix"])
-        assert args.fix is True
-
     def test_create_parses_root_size(self) -> None:
         p = ltvm.build_parser()
         args = p.parse_args(["create", "co1-single", "--root-size", "20G"])
@@ -709,11 +696,70 @@ class TestVmSubcommands:
         assert args.disk_size == "2G"
         assert args.root_size == "20G"
 
-    def test_vm_subcommand_not_present(self) -> None:
-        """'ltvm vm' no longer exists as a subcommand."""
+    def test_crash_collect_mod_dir(self) -> None:
         p = ltvm.build_parser()
-        with pytest.raises(SystemExit):
-            p.parse_args(["vm", "list"])
+        args = p.parse_args(
+            ["vm", "crash-collect", "co1-single", "--mod-dir", "/path/to/build"]
+        )
+        assert args.name == "co1-single"
+        assert args.mod_dir == "/path/to/build"
+
+    def test_doctor_fix_flag(self) -> None:
+        p = ltvm.build_parser()
+        args = p.parse_args(["doctor", "--fix"])
+        assert args.fix is True
+
+    @pytest.mark.parametrize("name", ltvm._VM_ALIASES)
+    def test_vm_prefix_is_an_alias(self, name: str) -> None:
+        """`ltvm vm <cmd>` reaches the same parser as `ltvm <cmd>`."""
+        p = ltvm.build_parser()
+        top = p._subparsers._group_actions[0].choices[name]
+        vm_sub = p._subparsers._group_actions[0].choices["vm"]
+        assert vm_sub._subparsers._group_actions[0].choices[name] is top
+
+    def test_vm_alias_parses_to_the_same_handler(self) -> None:
+        p = ltvm.build_parser()
+        direct = p.parse_args(["create", "co1-single", "--vcpus", "4"])
+        aliased = p.parse_args(["vm", "create", "co1-single", "--vcpus", "4"])
+        assert aliased.func is direct.func
+        assert aliased.name == "co1-single"
+        assert aliased.vcpus == 4
+
+    def test_vm_alias_command_collapses_to_top_level(self) -> None:
+        """main() reports one name, so telemetry does not split counters."""
+        import ltvm_pkg.telemetry as tel
+        import ltvm_pkg.update_check as uc
+
+        p = ltvm.build_parser()
+        args = p.parse_args(["vm", "list"])
+        assert args.command == "vm"
+        assert args.vm_action == "list"
+
+        # Both spellings share the parser, so one set_defaults stubs both.
+        p._subparsers._group_actions[0].choices["list"].set_defaults(
+            func=lambda a: 0
+        )
+        seen: dict[str, Any] = {}
+
+        with (
+            patch.object(ltvm, "build_parser", return_value=p),
+            patch.object(sys, "argv", ["ltvm", "vm", "list"]),
+            patch.object(uc, "maybe_check_for_updates", lambda **kw: None),
+            patch.object(
+                tel, "record", lambda a, rc: seen.update(command=a.command)
+            ),
+            patch.object(tel, "maybe_send", lambda: None),
+        ):
+            assert ltvm.main() == 0
+        assert seen["command"] == "list"
+
+    def test_vm_only_aliases_vm_commands(self) -> None:
+        """Host/artifact commands stay off the `vm` group."""
+        p = ltvm.build_parser()
+        vm_sub = p._subparsers._group_actions[0].choices["vm"]
+        actions = vm_sub._subparsers._group_actions[0].choices
+        for name in ("build", "target", "cluster", "install", "clean"):
+            assert name not in actions
 
 
 # ---------------------------------------------------------------------------
@@ -2053,3 +2099,4 @@ class TestCmdTargetsPerKernelRows:
             "rocky9", "x86_64", releases, kernel_signature="el9_7"
         )
         assert remote2.endswith("el9_7_lustre")
+

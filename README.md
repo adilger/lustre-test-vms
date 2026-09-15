@@ -101,7 +101,9 @@ ltvm install                    One-time host setup (sudo)
 ltvm update                     git fast-forward ltvm itself
 ltvm build      <action> ...    Build artifacts (see below)
 ltvm target     <action> ...    Target OS management (see below)
-ltvm vm         <action> ...    VM inspection / crash / snapshot (see below)
+ltvm vm         <action> ...    VM inspection / crash / snapshot (see below);
+                                also accepts every VM command below, so
+                                `ltvm vm create` == `ltvm create`
 ltvm cluster    <action> ...    Multi-node cluster management (see below)
 ltvm create     <name>          Create a VM (idempotent; --root-size sets
                                 the OS disk, --disk-size the MDT/OST ones)
@@ -189,6 +191,13 @@ ltvm vm nmi           <name>    Inject NMI (panic + kdump)
 ltvm vm snapshot      <name>    Snapshot overlay disk
 ltvm vm restore       <name>    Restore to a snapshot
 ```
+
+`vm` also answers for the top-level VM commands -- `create`, `destroy`,
+`start`, `stop`, `list`, `deploy-lustre`, `llmount`, `llumount` and
+`doctor`.  They were `vm` sub-actions before they were promoted, and
+both spellings reach the same parser: `ltvm vm create co1-single` and
+`ltvm create co1-single` are one command, flags, help and tab
+completion included.
 
 `ltvm create` and `ltvm cluster create` take `--dry-run` (`-n`): they
 resolve and validate everything, print what they would make, and write

@@ -385,6 +385,38 @@ class _HideSuppressedSubcommands(argparse.HelpFormatter):
         return super()._metavar_formatter(action, default_metavar)
 
 
+# VM commands answer under `vm` as well as at the top level, so
+# `ltvm vm create` and `ltvm create` are the same command.  The pair of
+# spellings exists because these were `vm` sub-actions before they were
+# promoted, and both are in scripts and in muscle memory.
+_VM_ALIASES = (
+    "create",
+    "destroy",
+    "start",
+    "stop",
+    "list",
+    "deploy-lustre",
+    "llmount",
+    "llumount",
+    "doctor",
+)
+
+
+def _alias_subcommands(src: Any, dst: Any, names: tuple[str, ...]) -> None:
+    """Register src's parsers for `names` under dst as a second spelling.
+
+    The same parser object goes in both groups rather than a second one
+    being built, so the two spellings cannot drift in arguments, help or
+    completion.
+    """
+    helps = {a.dest: a.help for a in src._choices_actions}
+    for name in names:
+        dst._name_parser_map[name] = src._name_parser_map[name]
+        dst._choices_actions.append(
+            dst._ChoicesPseudoAction(name, (), helps.get(name))
+        )
+
+
 def build_parser() -> argparse.ArgumentParser:
     # Common flags accepted by all subcommands
     common = argparse.ArgumentParser(add_help=False)
@@ -1294,8 +1326,8 @@ def build_parser() -> argparse.ArgumentParser:
     vm_parser = sub.add_parser(
         "vm",
         parents=[common],
-        help="VM inspection and crash/snapshot ops "
-        "(console-log/crash-collect/nmi/snapshot/restore)",
+        help="VM ops: inspection and crash/snapshot, plus every "
+        "top-level VM command (`ltvm vm create` == `ltvm create`)",
     )
     vm_sub = vm_parser.add_subparsers(dest="vm_action", metavar="<action>")
 
@@ -1994,6 +2026,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp.set_defaults(func=cmd_completion)
 
+    _alias_subcommands(sub, vm_sub, _VM_ALIASES)
+
     _attach_completers(p)
     return p
 
@@ -2125,6 +2159,12 @@ def main() -> int:
     if not args.command:
         parser.print_help()
         return EXIT_ERROR
+
+    # `ltvm vm create` is `ltvm create`.  Collapse it to the top-level
+    # name so everything downstream -- telemetry counters included --
+    # sees one command rather than two spellings of it.
+    if args.command == "vm" and getattr(args, "vm_action", None) in _VM_ALIASES:
+        args.command = args.vm_action
 
     rc = _reconcile_target_args(args)
     if rc is not None:

@@ -409,6 +409,11 @@ ltvm vm crash-collect co1-single --mod-dir $CO/1
 ltvm destroy co1-single
 ```
 
+The VM commands answer under `vm` too: `ltvm vm create` is `ltvm
+create`, and likewise for `destroy`, `start`, `stop`, `list`,
+`deploy-lustre`, `llmount`, `llumount` and `doctor`.  One parser
+registered under both groups, so there is nothing to keep in sync.
+
 **Owner/session metadata:** New VMs persist an advisory opaque `owner_id`.
 Agent controllers should export `LTVM_OWNER_ID=<durable-session-id>` before
 running normal create commands.  (If you do run create under sudo
