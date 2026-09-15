@@ -169,6 +169,16 @@ ltvm target publish <target>    Bundle artifacts and upload to GitHub release
                                 (use --no-upload to produce tarballs locally)
 ```
 
+A fetch pulls several hundred-MB tarballs, so it draws two lines: the
+asset in flight, and one bar for the whole set with its rate and ETA.
+
+```
+  [3/4] image-rocky9-x86_64-5.14.0-611.55.1.el9_7.tar.zst  190/260 MB   73%
+  total [#################################---------------]  69%  320/460 MB   38.9 MB/s  eta     4s
+```
+
+Off a TTY (CI, a pipe, a log file) it prints one line per asset instead.
+
 `cluster` sub-actions (each takes `--help`):
 
 ```

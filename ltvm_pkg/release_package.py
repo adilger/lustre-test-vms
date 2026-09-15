@@ -34,9 +34,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -1050,8 +1053,217 @@ def package_bootable(
 # ---------------------------------------------------------------------------
 
 
-def _download(url: str, dest: Path, *, quiet: bool = False) -> None:
+# How often the download loop re-reads the growing file to repaint.
+_PROGRESS_POLL_SECONDS = 0.25
+
+# Rate and ETA are averaged over this much recent history rather than
+# the whole run: a fetch that starts on a warm CDN edge and then slows
+# down should say so, not quote the average it has been beating.
+_RATE_WINDOW_SECONDS = 8.0
+
+# Our cap on one asset, set above curl's own --max-time so curl gets to
+# report the timeout itself.
+_DOWNLOAD_TIMEOUT = 1850
+
+
+# Below these the field is dropped rather than squeezed into something
+# unreadable -- a two-character bar says less than the percentage does.
+_MIN_BAR_CHARS = 8
+_MIN_NAME_CHARS = 12
+
+
+def _mb(n: float) -> int:
+    return int(round(n / (1024 * 1024)))
+
+
+def _shorten(name: str, room: int) -> str:
+    """Trim an asset name from the left: the kernel version and variant
+    at the end are what distinguish one asset from the next."""
+    if room >= len(name):
+        return name
+    if room <= 3:
+        return name[: max(0, room)]
+    return "..." + name[-(room - 3) :]
+
+
+class FetchProgress:
+    """One bar for the whole asset set, plus the asset in flight.
+
+    A fetch is several hundred-MB tarballs, and curl's per-transfer bar
+    could only ever answer "how far through this one file", which is the
+    less useful of the two questions.  So this draws both: the object
+    being downloaded on one line, the set as a whole on the next.
+
+    On a TTY the two lines are redrawn in place.  Anywhere else -- a log
+    file, CI, a pipe -- it prints one line per asset instead, because a
+    redrawn bar in a log is noise.
+    """
+
+    def __init__(
+        self,
+        total_bytes: int,
+        total_items: int,
+        stream: Any = None,
+    ) -> None:
+        self._out = stream if stream is not None else sys.stdout
+        self._total_bytes = max(total_bytes, 0)
+        self._total_items = total_items
+        self._tty = bool(getattr(self._out, "isatty", lambda: False)())
+        self._done_bytes = 0
+        self._index = 0
+        self._name = ""
+        self._size = 0
+        self._current = 0
+        self._phase = ""
+        self._drawn = False
+        self._samples: deque[tuple[float, int]] = deque()
+
+    # -- item lifecycle --
+
+    def start_item(self, kind: str, name: str, size: int) -> None:
+        self._index += 1
+        self._name = name
+        self._size = size
+        self._current = 0
+        self._phase = ""
+        if not self._tty:
+            self._out.write(
+                f"    [{self._index}/{self._total_items}] [{kind}] "
+                f"{name} ({_mb(size)} MB)\n"
+            )
+            self._out.flush()
+            return
+        self._render()
+
+    def update(self, current_bytes: int) -> None:
+        """Note how much of the current asset is on disk, and repaint."""
+        self._current = max(0, min(current_bytes, self._size))
+        self._sample(self._done_bytes + self._current)
+        self._render()
+
+    def set_phase(self, phase: str) -> None:
+        """Name what is happening to a fully-downloaded asset.
+
+        sha256 and extraction of a multi-hundred-MB tarball are long
+        enough that a bar frozen at 100% reads as a hang.
+        """
+        self._phase = phase
+        self._current = self._size
+        self._render()
+
+    def finish_item(self) -> None:
+        self._done_bytes += self._size
+        self._current = 0
+        self._size = 0
+        self._phase = ""
+
+    def close(self) -> None:
+        """Leave the cursor on a fresh line below the bar."""
+        if self._tty and self._drawn:
+            self._out.write("\n")
+            self._out.flush()
+            self._drawn = False
+
+    # -- rate --
+
+    def _sample(self, total_done: int) -> None:
+        now = time.monotonic()
+        self._samples.append((now, total_done))
+        cutoff = now - _RATE_WINDOW_SECONDS
+        while len(self._samples) > 2 and self._samples[0][0] < cutoff:
+            self._samples.popleft()
+
+    def _rate(self) -> float:
+        """Bytes/second over the recent window, 0 when not yet known."""
+        if len(self._samples) < 2:
+            return 0.0
+        (t0, b0), (t1, b1) = self._samples[0], self._samples[-1]
+        span = t1 - t0
+        if span <= 0 or b1 <= b0:
+            return 0.0
+        return (b1 - b0) / span
+
+    # -- drawing --
+
+    def _render(self) -> None:
+        if not self._tty:
+            return
+        width = shutil.get_terminal_size((80, 24)).columns
+        # Neither line may reach the right margin: a wrapped line makes
+        # the redraw's "up one line" land in the wrong place, and the
+        # display starts marching down the screen.
+        cap = max(1, width - 1)
+        self._draw(self._item_line(width)[:cap], self._total_line(width)[:cap])
+
+    def _item_line(self, width: int) -> str:
+        head = f"  [{self._index}/{self._total_items}] "
+        size_mb = _mb(self._size)
+        # Fields are padded to the width they will reach, so nothing to
+        # the right of the name shifts as the numbers grow.
+        if self._phase:
+            tails = [f"  {size_mb} MB  {self._phase}", f"  {self._phase}"]
+        else:
+            pct = int(self._current * 100 / self._size) if self._size else 100
+            tails = [
+                f"  {_mb(self._current):>{len(str(size_mb))}}/{size_mb} MB"
+                f"  {pct:3d}%",
+                f"  {pct:3d}%",
+            ]
+        for tail in tails:
+            room = width - 1 - len(head) - len(tail)
+            if room >= _MIN_NAME_CHARS:
+                return head + _shorten(self._name, room) + tail
+        return head + _shorten(self._name, width - 1 - len(head))
+
+    def _total_line(self, width: int) -> str:
+        from ltvm_pkg.cli.util import format_duration
+
+        done = self._done_bytes + self._current
+        frac = done / self._total_bytes if self._total_bytes else 1.0
+        frac = max(0.0, min(1.0, frac))
+        rate = self._rate()
+        total_mb = _mb(self._total_bytes)
+        pct = f" {int(frac * 100):3d}%"
+        counts = f"  {_mb(done):>{len(str(total_mb))}}/{total_mb} MB"
+        speed = (
+            f"  {rate / (1024 * 1024):5.1f} MB/s" if rate else "     -- MB/s"
+        )
+        eta = (
+            f"  eta {format_duration((self._total_bytes - done) / rate):>6}"
+            if rate
+            else "  eta     --"
+        )
+        head = "  total ["
+        # Narrowest terminal wins: drop the least useful field rather
+        # than let the line wrap.
+        for tail in (pct + counts + speed + eta, pct + counts, pct):
+            bar_width = width - 1 - len(head) - 1 - len(tail)
+            if bar_width >= _MIN_BAR_CHARS:
+                filled = int(round(frac * bar_width))
+                fill = "#" * filled + "-" * (bar_width - filled)
+                return f"{head}{fill}]{tail}"
+        return f"  total{pct}"
+
+    def _draw(self, line1: str, line2: str) -> None:
+        if self._drawn:
+            self._out.write("\x1b[1A")
+        self._out.write(f"\r\x1b[2K{line1}\n\r\x1b[2K{line2}")
+        self._out.flush()
+        self._drawn = True
+
+
+def _download(
+    url: str,
+    dest: Path,
+    *,
+    quiet: bool = False,
+    progress: FetchProgress | None = None,
+) -> None:
     """Fetch ``url`` to ``dest`` with curl; fail loudly on non-2xx.
+
+    With ``progress``, curl is silenced and the bar is driven from the
+    size of ``dest`` as it grows -- that is what lets one bar span a
+    whole set of assets, which curl cannot know about.
 
     On KeyboardInterrupt (Ctrl+C) the partial ``dest`` file is removed
     before re-raising so a subsequent retry doesn't see a truncated
@@ -1060,7 +1272,7 @@ def _download(url: str, dest: Path, *, quiet: bool = False) -> None:
     # -s silences curl's default throughput table (we print our own
     # "Fetching..." lines above); -S keeps error messages visible.
     # --progress-bar is the ###... bar for asset downloads.
-    if quiet:
+    if quiet or progress is not None:
         flags = ["-fsSL"]
     else:
         flags = ["-fSL", "--progress-bar"]
@@ -1075,26 +1287,62 @@ def _download(url: str, dest: Path, *, quiet: bool = False) -> None:
         "5",
         "--retry-all-errors",
     ]
+    cmd = ["curl", *flags, "-o", str(dest), url]
     try:
-        r = subprocess.run(
-            ["curl", *flags, "-o", str(dest), url],
-            check=False,
-            timeout=1850,
-        )
+        proc = subprocess.Popen(cmd)
     except FileNotFoundError:
         raise RuntimeError("curl not found -- run `sudo ltvm install`")
+
+    deadline = time.monotonic() + _DOWNLOAD_TIMEOUT
+    try:
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                proc.kill()
+                proc.wait()
+                _unlink(dest)
+                raise subprocess.TimeoutExpired(cmd, _DOWNLOAD_TIMEOUT)
+            # Without a bar to feed there is nothing to wake up for, so
+            # wait out the whole remaining budget in one call.
+            slice_ = (
+                min(_PROGRESS_POLL_SECONDS, left)
+                if progress is not None
+                else left
+            )
+            try:
+                rc = proc.wait(timeout=slice_)
+            except subprocess.TimeoutExpired:
+                if progress is not None:
+                    progress.update(_size_on_disk(dest))
+                continue
+            break
     except KeyboardInterrupt:
+        proc.terminate()
         try:
-            dest.unlink()
-        except OSError:
-            pass
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        _unlink(dest)
         raise
-    if r.returncode != 0:
-        try:
-            dest.unlink()
-        except OSError:
-            pass
-        raise RuntimeError(f"Download failed (rc={r.returncode}): {url}")
+    if rc != 0:
+        _unlink(dest)
+        raise RuntimeError(f"Download failed (rc={rc}): {url}")
+    if progress is not None:
+        progress.update(_size_on_disk(dest))
+
+
+def _size_on_disk(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def _unlink(path: Path) -> None:
+    try:
+        path.unlink()
+    except OSError:
+        pass
 
 
 def _expect_sha256(
@@ -1193,18 +1441,25 @@ def fetch_target(
             f"{total_bytes / (1024 * 1024):.0f} MB total"
         )
 
-        for asset in manifest["assets"]:
-            name = asset["name"]
-            sha = asset["sha256"]
-            size = asset["size"]
-            tarball = td / name
-            print(
-                f"    [{asset['kind']}] {name} ({size / (1024 * 1024):.0f} MB)"
-            )
-            _download(url_prefix + name, tarball)
-            _expect_sha256(tarball, sha, expected_size=size)
-            _untar_zstd(tarball, output_base)
-            tarball.unlink()  # free disk eagerly on a multi-GB fetch
+        progress = FetchProgress(total_bytes, len(manifest["assets"]))
+        try:
+            for asset in manifest["assets"]:
+                name = asset["name"]
+                sha = asset["sha256"]
+                size = asset["size"]
+                tarball = td / name
+                progress.start_item(asset["kind"], name, size)
+                _download(url_prefix + name, tarball, progress=progress)
+                progress.set_phase("verifying")
+                _expect_sha256(tarball, sha, expected_size=size)
+                progress.set_phase("extracting")
+                _untar_zstd(tarball, output_base)
+                tarball.unlink()  # free disk eagerly on a multi-GB fetch
+                progress.finish_item()
+        finally:
+            # Land the cursor below the bar before anything else prints,
+            # including the traceback of whatever went wrong.
+            progress.close()
 
     target_dir = output_base / target_name / arch
     if not target_dir.is_dir():
