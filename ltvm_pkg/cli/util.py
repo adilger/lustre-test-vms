@@ -18,7 +18,7 @@ import shlex
 import subprocess
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -457,6 +457,61 @@ def _require_root(use_json: bool, hint: str = "") -> int | None:
             msg += f"\n  {hint}"
         return _error(msg, use_json)
     return None
+
+
+def _vm_privileges(
+    reason: str,
+    use_json: bool,
+    *,
+    passthrough: bool = False,
+    drop: Callable[[], object] | None = None,
+) -> int | None:
+    """Get privileges in order for a VM lifecycle command.
+
+    On a host set up for unprivileged VMs a plain `ltvm` needs no sudo
+    at all, and under `sudo ltvm` *drop* moves a command that creates
+    VM files to the right user; one that only stops or removes a VM
+    stays root.  Otherwise sudo is primed once, as before.  A
+    passthrough NIC needs a root QEMU, so it always takes the sudo path.
+    Returns an exit code when sudo refuses.
+    """
+    from ltvm_pkg import priv, rootless
+
+    if not passthrough:
+        if os.geteuid() == 0:
+            if drop is not None:
+                drop()
+            return None
+        if rootless.ready():
+            return None
+    if use_json:
+        return None
+    try:
+        priv.sudo_prime(reason)
+    except priv.SudoUnavailable as e:
+        return _error(str(e), use_json)
+    return None
+
+
+def _drop_to_vm_owner(names: list[str]) -> None:
+    from ltvm_pkg import rootless
+    from ltvm_pkg.vm_state import SOCKETS
+
+    rootless.drop_to_owner([SOCKETS / f"{n}.info" for n in names])
+
+
+def _uses_passthrough(names: list[str]) -> bool:
+    """Does any of these existing VMs have a passthrough NIC?"""
+    from ltvm_pkg.vm_state import VMInfo
+
+    for name in names:
+        try:
+            nics = VMInfo.load(name).nics
+        except Exception:
+            continue
+        if any(n.split(":", 1)[0] == "passthrough" for n in nics):
+            return True
+    return False
 
 
 def _qemu_ns(**kwargs: Any) -> argparse.Namespace:

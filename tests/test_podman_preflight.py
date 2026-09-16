@@ -255,12 +255,65 @@ class TestCliPreflight:
 class TestPreflightContainerHelper:
     """``_preflight_container`` validates the cached image before use."""
 
+    @pytest.fixture(autouse=True)
+    def _container_dir(self, tmp_path: Path) -> None:
+        self.container_dir = tmp_path
+
     def _tc(self, tag: str = "ltvm-build-rocky9", arch: str = "x86_64") -> Any:
         tc = MagicMock()
         tc.container_tag = tag
         tc.name = "rocky9"
         tc.arch = arch
+        tc.container_output_dir.return_value = self.container_dir
         return tc
+
+    def test_saved_container_is_loaded_when_missing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Another user fetched it: the tarball is on disk, not in our store."""
+        from ltvm_pkg.cli import build as build_mod
+
+        (self.container_dir / "image.tar").write_text("")
+        run = MagicMock(
+            side_effect=[
+                MagicMock(returncode=1),
+                MagicMock(returncode=0, stdout="Loaded image: x\n"),
+                MagicMock(returncode=0),
+                MagicMock(returncode=0, stdout="x86_64\n"),
+            ]
+        )
+        monkeypatch.setattr(build_mod.subprocess, "run", run)
+        monkeypatch.setattr(build_mod.platform, "machine", lambda: "x86_64")
+        assert _real_preflight_container(self._tc(), False) is None
+        assert run.call_args_list[1].args[0] == [
+            "podman",
+            "load",
+            "-i",
+            str(self.container_dir / "image.tar"),
+        ]
+
+    def test_failed_load_still_reports_missing(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from ltvm_pkg.cli import build as build_mod
+
+        (self.container_dir / "image.tar").write_text("")
+        monkeypatch.setattr(
+            build_mod.subprocess,
+            "run",
+            MagicMock(
+                side_effect=[
+                    MagicMock(returncode=1),
+                    MagicMock(returncode=125, stderr="bad tarball"),
+                ]
+            ),
+        )
+        assert _real_preflight_container(self._tc(), False) == EXIT_ERROR
+        err = capsys.readouterr().err
+        assert "podman load failed (rc=125): bad tarball" in err
+        assert "ltvm-build-rocky9 not found" in err
 
     def test_pass_when_image_present(
         self, monkeypatch: pytest.MonkeyPatch

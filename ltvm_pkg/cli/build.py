@@ -62,6 +62,30 @@ def _preflight_podman(use_json: bool) -> int | None:
     return None
 
 
+def _load_saved_container(tc: TargetConfig) -> bool:
+    """Load the build container a fetch or publish saved in artifacts.
+
+    podman storage is per user, so on a shared host a container someone
+    else fetched is on disk but not in this user's store.
+    """
+    image_tar = tc.container_output_dir() / "image.tar"
+    if not image_tar.is_file():
+        return False
+    print(f"Loading build container from {image_tar}", file=sys.stderr)
+    r = subprocess.run(
+        ["podman", "load", "-i", str(image_tar)],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        print(
+            f"podman load failed (rc={r.returncode}): {r.stderr.strip()}",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
 def _preflight_container(tc: TargetConfig, use_json: bool) -> int | None:
     """Return an error code if the build container is unusable, else None.
 
@@ -83,6 +107,10 @@ def _preflight_container(tc: TargetConfig, use_json: bool) -> int | None:
             "podman not found",
             use_json,
             hint="install podman or run `ltvm install` to set up the host",
+        )
+    if r.returncode != 0 and _load_saved_container(tc):
+        r = subprocess.run(
+            ["podman", "image", "exists", tag], capture_output=True
         )
     if r.returncode != 0:
         return _error(

@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 from typing import Any, NoReturn
 
+from . import rootless
 from .host_setup import is_macos, socket_vmnet_socket_path
 from .priv import invoking_user, sudo_run
 from .vm_state import (
@@ -261,6 +262,17 @@ def _prepare_log(vm: Any) -> None:
     """
     if os.access(vm.log_path, os.W_OK):
         return
+    if os.geteuid() != 0:
+        try:
+            fd = os.open(
+                vm.log_path,
+                os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW,
+                0o644,
+            )
+            os.close(fd)
+            return
+        except PermissionError:
+            pass
     sudo_run(["touch", str(vm.log_path)], quiet=True)
     owner = invoking_user()
     if owner:
@@ -340,10 +352,19 @@ def launch_qemu(vm: VMInfo) -> None:
     # multiplexes every guest onto one Unix socket managed by launchd.
     all_taps = [vm.tap] + [t for (_i, _n, t, _m) in extra_nics]
     macos = is_macos()
+    has_passthrough = any(n.split(":", 1)[0] == "passthrough" for n in vm.nics)
+    # With the bridge helper, QEMU runs as the user and each NIC's tap
+    # is created by the helper and goes away with QEMU.  Passthrough
+    # still needs a root QEMU for the vfio device.
+    helper: Path | None = None
+    if not macos and not has_passthrough and os.geteuid() != 0:
+        ready = rootless.readiness()
+        if ready.ok:
+            helper = ready.helper
     vmnet_socket: str | None = None
     if macos:
         vmnet_socket = str(socket_vmnet_socket_path())
-    else:
+    elif helper is None:
         # On Linux the TAP is created with ``user $LOGNAME`` so QEMU can
         # attach to it without root via TUNSETIFF; the ``ip`` calls
         # themselves still need sudo for CAP_NET_ADMIN.
@@ -399,7 +420,7 @@ def launch_qemu(vm: VMInfo) -> None:
             # softroce presents to QEMU exactly like tcp (a virtio-net
             # on the bridge); the rxe layer is built inside the guest
             # at boot via setup-nic-softroce.sh.
-            if macos:
+            if macos or helper is not None:
                 continue
             sudo_run(
                 [
@@ -515,6 +536,8 @@ def launch_qemu(vm: VMInfo) -> None:
         (
             f"stream,id=net0,addr.type=unix,addr.path={vmnet_socket},server=off"
             if macos
+            else f"bridge,id=net0,br={BRIDGE},helper={helper}"
+            if helper is not None
             else f"tap,id=net0,ifname={vm.tap},script=no,downscript=no"
         ),
         "-device",
@@ -538,7 +561,6 @@ def launch_qemu(vm: VMInfo) -> None:
     # host=<BDF>` with no -netdev / no TAP.  The current CLI parser
     # rejects both, so those branches aren't emitted today -- but the
     # loop shape is what lets them slot in without reworking.
-    has_passthrough = any(n.split(":", 1)[0] == "passthrough" for n in vm.nics)
     if has_passthrough:
         # vfio-pci pins guest memory; QEMU needs -mem-prealloc up-front
         # so DMA translations are stable at launch time.  Harmless for
@@ -556,6 +578,10 @@ def launch_qemu(vm: VMInfo) -> None:
                 _netdev_arg = (
                     f"stream,id={_netdev_id},addr.type=unix,"
                     f"addr.path={vmnet_socket},server=off"
+                )
+            elif helper is not None:
+                _netdev_arg = (
+                    f"bridge,id={_netdev_id},br={BRIDGE},helper={helper}"
                 )
             else:
                 _netdev_arg = (
@@ -604,7 +630,8 @@ def launch_qemu(vm: VMInfo) -> None:
             # the root-owned SOCKETS dir, and attaches the TAP.  The log
             # is opened here, unprivileged, and inherited as fd 1/2 --
             # sudo preserves those.
-            r = subprocess.run(_as_root(qemu_args), stdout=log, stderr=log)
+            argv = qemu_args if helper is not None else _as_root(qemu_args)
+            r = subprocess.run(argv, stdout=log, stderr=log)
         if r.returncode != 0:
             die(
                 f"QEMU failed to start for '{vm.name}' "
@@ -627,7 +654,7 @@ def launch_qemu(vm: VMInfo) -> None:
         # the same bargain the QMP socket gets below -- a pid is not a
         # secret, and without this an unprivileged ltvm cannot read the
         # pid of the VM it just started.
-        owner = invoking_user()
+        owner = invoking_user() if helper is None else None
         if owner is not None:
             sudo_run(
                 ["chown", f"{owner[0]}:{owner[1]}", str(vm.pid_path)],
@@ -661,7 +688,7 @@ def launch_qemu(vm: VMInfo) -> None:
         # catches SystemExit raised by die() so cleanup runs before
         # the process exits.  macOS has no TAPs -- socket_vmnet owns
         # the L2 fabric and no per-VM host state was created here.
-        if not macos:
+        if not macos and helper is None:
             for _tap in all_taps:
                 sudo_run(
                     ["ip", "link", "del", _tap],
@@ -757,9 +784,22 @@ def kill_qemu(vm: VMInfo) -> None:
     # one Unix socket -- so teardown is a no-op there.
     if is_macos():
         return
-    sudo_run(["ip", "link", "del", vm.tap], check=False, quiet=True)
-    for _idx, _nic_type, _tap, _mac in vm.extra_nics():
-        sudo_run(["ip", "link", "del", _tap], check=False, quiet=True)
+    taps = [vm.tap] + [t for (_i, _n, t, _m) in vm.extra_nics()]
+    if os.geteuid() != 0 and rootless.readiness().ok:
+        # A helper-attached tap closes with QEMU.  Only one left by an
+        # earlier privileged start can still be here, and removing it
+        # is worth a try but not a password prompt.
+        for tap in taps:
+            if Path("/sys/class/net", tap).exists():
+                sudo_run(
+                    ["ip", "link", "del", tap],
+                    check=False,
+                    quiet=True,
+                    noninteractive=True,
+                )
+        return
+    for tap in taps:
+        sudo_run(["ip", "link", "del", tap], check=False, quiet=True)
     # Flush stale ARP entry so the bridge doesn't poison new VMs or
     # re-creations of this VM that may get a different MAC.
     sudo_run(

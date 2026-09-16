@@ -1258,6 +1258,8 @@ class TestCmdCreateChown:
             patch("ltvm_pkg.vm_commands._seed_kdump_boot"),
             patch("ltvm_pkg.vm_commands.os.environ", env),
             patch("getpass.getuser", return_value="patrick"),
+            # A classic, root-owned VM_DIR: the images are made via sudo.
+            patch("ltvm_pkg.vm_commands._user_can_write", return_value=False),
         ):
             arts = MagicMock()
             arts.image = tmp_vmdir / "base.ext4"

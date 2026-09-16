@@ -16,6 +16,7 @@ the cluster block in ``ltvm``), which is why these are short.
 from __future__ import annotations
 
 import argparse
+import os
 from typing import Any
 
 from ltvm_pkg.cli.util import (
@@ -65,6 +66,23 @@ def _handler(name: str) -> Any:
     return getattr(vm_cluster, name)
 
 
+def _cluster_privileges(use_json: bool, *, drop: bool) -> int | None:
+    """Clusters need root unless the host runs VMs unprivileged.
+
+    Under sudo, a create continues as the user who typed it (see
+    cli.util._vm_privileges); a destroy stays root.
+    """
+    from ltvm_pkg import rootless
+
+    if os.geteuid() == 0:
+        if drop:
+            rootless.drop_to_sudo_user()
+        return None
+    if rootless.ready():
+        return None
+    return _require_root(use_json)
+
+
 def cmd_cluster_create(args: argparse.Namespace) -> int:
     """Create a cluster from node specs."""
     use_json = args.json
@@ -73,7 +91,7 @@ def cmd_cluster_create(args: argparse.Namespace) -> int:
     # password nothing will spend is the surest way to stop people using
     # it.
     if not args.dry_run:
-        err = _require_root(use_json)
+        err = _cluster_privileges(use_json, drop=True)
         if err is not None:
             return err
 
@@ -132,7 +150,7 @@ def cmd_cluster_create(args: argparse.Namespace) -> int:
 def cmd_cluster_destroy(args: argparse.Namespace) -> int:
     """Destroy a cluster and every node in it."""
     use_json = args.json
-    err = _require_root(use_json)
+    err = _cluster_privileges(use_json, drop=False)
     if err is not None:
         return err
     return _call(

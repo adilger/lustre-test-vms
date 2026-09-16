@@ -1,6 +1,6 @@
 [project]
 name = "lustre-test-vms"
-version = "0.5.35"
+version = "0.5.36"
 description = "Lustre test VM infrastructure"
 license = "BSD-3-Clause"
 license-files = ["LICENSE"]

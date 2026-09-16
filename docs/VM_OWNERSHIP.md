@@ -12,7 +12,7 @@ spelling, `--owner-id ID`:
 
 ```bash
 ltvm create co1-test --owner-id patch-watcher:session-7f9c
-sudo ltvm cluster create co1 --owner-id patch-watcher:session-7f9c \
+ltvm cluster create co1 --owner-id patch-watcher:session-7f9c \
     mgs+mds:co1-mds:1 oss:co1-oss:1
 ```
 
@@ -32,10 +32,10 @@ export LTVM_OWNER_ID=patch-watcher:session-7f9c
 ltvm create co1-test
 ```
 
-`ltvm install` configures Linux sudo to preserve `LTVM_OWNER_ID`, allowing the
-same environment to reach `sudo ltvm cluster create`. On hosts without that
-sudo configuration, pass `--owner-id` explicitly or preserve the variable in
-the host's sudo policy.
+On a host where VMs still need root, `ltvm install` configures Linux sudo to
+preserve `LTVM_OWNER_ID`, allowing the same environment to reach
+`sudo ltvm cluster create`. On hosts without that sudo configuration, pass
+`--owner-id` explicitly or preserve the variable in the host's sudo policy.
 
 A cluster resolves its owner once in the parent command and passes it
 explicitly to every member create. The cluster and all member VMs therefore

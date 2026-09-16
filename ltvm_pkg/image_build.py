@@ -1288,6 +1288,9 @@ def _export_to_ext4(
                 f"{r_fsck2.stderr.decode(errors='replace').strip()}"
             )
 
+        # A VM's QEMU, running as whoever created it, opens this as its
+        # read-only backing file.
+        os.chmod(tmpfile, 0o644)
         os.rename(tmpfile, str(image_path))
         tmpfile = None
 

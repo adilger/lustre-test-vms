@@ -22,6 +22,19 @@ This installs QEMU (with microvm support), configures the
 network bridge + dnsmasq, sets up SSH keys, and puts `ltvm`
 on your PATH.
 
+It also sets the host up so VMs need no sudo: it creates an
+`ltvm` group, adds you to it (and to `kvm`), and makes QEMU's
+bridge helper usable by that group.  **Log in again** for the
+group to take effect.  Add other users the same way:
+
+```bash
+sudo usermod -aG ltvm,kvm <user>
+```
+
+`ltvm doctor` reports whether VMs can run without sudo for you,
+and what is missing if not.  Where the distro ships no
+`qemu-bridge-helper`, VMs keep working through sudo.
+
 The bridge wants `192.168.100.0/24`. If something on the
 machine already uses that range, install moves to the next free
 `192.168.x` and says so, rather than taking the host's own
@@ -227,20 +240,23 @@ For testing distributed Lustre (separate MDS, OSS, client):
 
 ```bash
 # Create a cluster with named roles
-sudo ltvm cluster create co2 \
+ltvm cluster create co2 \
     mgs+mds:co2-mds:1 \
     oss:co2-oss:3
 
 # Deploy Lustre to all nodes and mount
-sudo ltvm cluster deploy co2 \
+ltvm cluster deploy co2 \
     --build ~/lustre-release --mount
 
 # Run a command on all OSS nodes
-sudo ltvm cluster exec co2 oss 'lctl dl'
+ltvm cluster exec co2 oss 'lctl dl'
 
 # Tear down
-sudo ltvm cluster destroy co2
+ltvm cluster destroy co2
 ```
+
+`cluster create` and `cluster destroy` need `sudo` in front when this
+host cannot run VMs unprivileged; `ltvm doctor` says which applies.
 
 VM names must include the checkout number: `co<N>-<role>`.
 

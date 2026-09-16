@@ -230,6 +230,23 @@ VM names MUST include the checkout number and a descriptive role:
 `co<N>-<role>` (e.g. `co1-single`, `co2-mds`, `co2-oss`). Never bare
 names like `testvm`.
 
+### Running VMs without sudo
+
+`ltvm install` sets a Linux host up so that members of the `ltvm` group
+create, start, stop and destroy VMs -- clusters included -- with no root
+at all.  QEMU runs as the user and attaches to the VM bridge through
+QEMU's setuid `qemu-bridge-helper`; the VM directories under
+`/opt/qemu-vms` belong to the group.  The installing user is added to
+the group (log in again afterwards); add others with
+`sudo usermod -aG ltvm,kvm <user>`.
+
+`ltvm doctor` says whether this works for you.  Without a bridge helper,
+or for a VM with a `passthrough` NIC, ltvm falls back to elevating the
+individual host operations through sudo.  The sticky bit on the VM
+directories stops one member from deleting another's VM files.  A
+passthrough VM still runs QEMU as root, so only trusted users belong in
+the group on a host that uses passthrough.
+
 ### Agent/session ownership
 
 Every new VM records an advisory `owner_id` for lifecycle reconciliation.

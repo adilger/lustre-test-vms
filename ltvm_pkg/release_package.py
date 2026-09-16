@@ -292,6 +292,28 @@ def _untar_zstd(tarball: Path, dest: Path) -> None:
             )
 
 
+def share_base_images(target_dir: Path) -> None:
+    """Make the base images readable by every VM user.
+
+    Published tarballs carry base.ext4 as 0600, and a QEMU running as the
+    user who creates a VM opens it as a read-only backing file.
+    """
+    from .priv import chmod_regular
+
+    for img in _base_images(target_dir):
+        try:
+            chmod_regular(img, img.lstat().st_mode & 0o7777 | 0o044)
+        except OSError:
+            pass
+
+
+def _base_images(target_dir: Path) -> list[Path]:
+    images = target_dir / "images"
+    return sorted(
+        list(images.glob("*/base.ext4")) + list(images.glob("*/*/base.ext4"))
+    )
+
+
 def _zstd_file(src: Path, dst: Path) -> None:
     """Compress a single file (not a directory) to ``dst``.zst.
     Used for the bootable qcow2 asset where wrapping a qcow2 in a
@@ -1466,6 +1488,7 @@ def fetch_target(
         raise RuntimeError(
             f"expected {target_dir} after extraction but not found"
         )
+    share_base_images(target_dir)
 
     # Load the build container into podman storage.
     paths = _variant_paths(target_dir, manifest["kernel"], variant)

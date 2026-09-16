@@ -442,18 +442,43 @@ create time like the disks; `cluster create` applies it to every node.
 
 **Naming:** always include the checkout number: `co<N>-<role>`.
 
-**Root:** only `update`, `cluster create` and `cluster destroy` need the
-whole command under root -- and not `cluster create --dry-run`, which
-only reads.
+**Root:** a host has one of two layouts, and
+[ltvm_pkg/rootless.py](ltvm_pkg/rootless.py) says which applies to the
+current user.
 
+*Shared* (what `ltvm install` sets up now): `/opt/qemu-vms`, its
+`overlays/`, `sockets/` and `hosts.d/` are `root:ltvm` 3775, QEMU's
+bridge helper is setuid root (a `dpkg-statoverride` on apt hosts, so
+package upgrades keep it) and `/etc/qemu/bridge.conf` allows `fcbr0`.
+Members of the `ltvm` group then run the whole VM lifecycle, clusters
+included, with no root: QEMU runs as the user with `-netdev bridge`,
+disks and state files are created directly, and VM names go to
+`hosts.d/`, which dnsmasq watches (`hostsdir=`), instead of
+`/etc/hosts`.  `/etc/hosts` is still updated when that needs no password.
+Root must not create files in a directory every group member can plant
+symlinks in, so under `sudo` a `create` continues as `$SUDO_USER` and a
+`start` as the VM's owner, whose QEMU it is; `stop` and `destroy` only
+signal and unlink, and stay root.  Root code that does write there opens
+files `O_NOFOLLOW` (`priv.chmod_regular`, `priv.ensure_lock_file`,
+`host_setup._write_root_file`).  A VM with a
+`passthrough` NIC still needs a root QEMU, so it takes the classic path
+below; on a shared host that trusts the group with root.
+
+*Classic* (no bridge helper, or the user is not in the group): only
+`update`, `cluster create` and `cluster destroy` need the whole command
+under root -- and not `cluster create --dry-run`, which only reads.
 Single-VM lifecycle -- `create`, `start`, `stop`, `destroy`, `doctor` --
 runs as the invoking user and elevates the individual operations that
 need it.  QEMU itself is launched under sudo, because it writes its
 pidfile and QMP socket into the root-owned `/opt/qemu-vms/sockets`
-(0755, and `doctor` asserts that mode); the log is created there as root
-once and handed to the user, and the pidfile and QMP socket are handed
-over after launch.  Everything the user then touches is theirs: `.info`
-and `.log` 0644, `.pid` and `.qmp` 0600.
+(0755); the log is created there as root once and handed to the user,
+and the pidfile and QMP socket are handed over after launch.
+Everything the user then touches is theirs: `.info` and `.log` 0644,
+`.pid` and `.qmp` 0600.
+
+`doctor` reports which layout applies and why the shared one is
+unavailable.  Once sudo has refused, later elevations in the same
+process use `sudo -n`.
 
 `build *`, `target *`, `deploy-lustre`, `llmount`, `list`, `vm *` and
 the remaining `cluster` actions need nothing.
@@ -734,13 +759,16 @@ Watch for:
 
 - **Subprocess command building.** Never interpolate into
   shell strings (`bash -c f"...{x}"`).  Use argument lists.
-- **Root-required operations.** Single-VM lifecycle commands elevate the
-  individual host operations that need it -- the QEMU launch itself, and
-  the handover of the files QEMU creates as root -- so do not require
-  users to invoke the whole command through sudo.  Cluster
-  create/destroy still require root. Read/observe (console-log,
-  deploy-lustre, llmount, crash-collect, cluster
-  deploy/exec/status, list) don't.  Build commands don't.
+- **Root-required operations.** On a shared host nothing in the VM
+  lifecycle needs root; a new host operation must keep that true or fall
+  back to the classic path through `rootless.readiness()`.  On a classic
+  host, single-VM lifecycle commands elevate the individual host
+  operations that need it, so do not require users to invoke the whole
+  command through sudo; cluster create/destroy still require root.
+  Read/observe (console-log, deploy-lustre, llmount, crash-collect,
+  cluster deploy/exec/status, list) don't.  Build commands don't.
+- **Root in the shared VM directories.** Any root write there must not
+  follow a symlink a group member planted.
 - **`--force-compat`** silences compat *refusals* but not
   hard errors -- only for known WIP branches.
 

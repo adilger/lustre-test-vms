@@ -31,13 +31,15 @@ from .vm_state import (
 
 
 def _sudo_prefix() -> list[str]:
-    """``["sudo"]`` unless we are already root, mirroring priv.sudo_run().
+    """``["sudo"]`` unless we are already root or VMs need no root here.
 
     Used for the per-node ``ltvm create`` / ``ltvm destroy`` children so
     they inherit the outer SUDO_USER rather than having a nested sudo
     overwrite it with "root".
     """
-    return [] if os.geteuid() == 0 else ["sudo"]
+    from . import rootless
+
+    return [] if os.geteuid() == 0 or rootless.ready() else ["sudo"]
 
 
 def parse_node_spec(spec: str) -> ClusterNode:

@@ -7,6 +7,7 @@ import getpass
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -15,10 +16,11 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from . import rootless
 from .deploy import configure_test_disks
 from .host_setup import is_macos
 from .paths import load_meta_safe
-from .priv import sudo_run
+from .priv import SudoUnavailable, chmod_regular, sudo_prime, sudo_run
 from .qemu_run import die, is_running, kill_qemu, launch_qemu, run
 from .vm_net import (
     HOSTS_FILE,
@@ -49,6 +51,7 @@ from .vm_state import (
     ROOT_SIZE_BYTES,
     SOCKETS,
     SSH_TIMEOUT,
+    VM_DIR,
     VMInfo,
     VMNotFound,
     lustre_libdir,
@@ -748,8 +751,8 @@ def _allocate_and_persist_vm(
             kernel_args=getattr(args, "kernel_args", ""),
         )
 
-        _create_disks(vm, image)
-        _chown_disks_to_sudo_user(vm)
+        if _create_disks(vm, image):
+            _chown_disks_to_sudo_user(vm)
 
         vm.save()
     # Lock released; IP is now committed.
@@ -1064,12 +1067,19 @@ def _sudo_checked(cmd: list[str]) -> None:
         raise RuntimeError(f"sudo {cmd[0]} failed (rc={r.returncode})")
 
 
-def _create_disks(vm: VMInfo, image: str) -> None:
+def _user_can_write(directory: Path) -> bool:
+    return os.geteuid() != 0 and os.access(directory, os.W_OK | os.X_OK)
+
+
+def _create_disks(vm: VMInfo, image: str) -> bool:
     """Create overlay + backing disks for *vm*.  On any failure,
     unlink everything already created (best-effort) and re-raise so
     we don't leave orphan files for the next `ltvm create <same name>`
     to trip on.  The .info file isn't written yet so cmd_doctor can't
     see these orphans either, which makes manual recovery awkward.
+
+    Returns True when the files were made as root and belong to the
+    invoking user instead.
     """
     # The overlays/sockets dirs are normally created by `ltvm install`
     # (host_setup.install_scripts).  vm_net._ip_lock() also auto-creates
@@ -1088,12 +1098,17 @@ def _create_disks(vm: VMInfo, image: str) -> None:
                 ["mkdir", "-p", str(vm.overlay_path.parent)],
                 quiet=True,
             )
+    # A shared VM_DIR is group-writable; the classic one is root-owned
+    # and the images are made via sudo.
+    as_user = _user_can_write(vm.overlay_path.parent)
+    if as_user and os.path.exists(image) and not os.access(image, os.R_OK):
+        die(
+            f"{image} is not readable by {getpass.getuser()}; its owner can "
+            f"fix that with `ltvm doctor --fix` or `chmod a+r {image}`"
+        )
+    make = _checked if as_user else _sudo_checked
     try:
-        # Disk-image creation writes into root-owned VM_DIR, so the
-        # qemu-img and truncate calls run via sudo.  After creation we
-        # chown the artifacts to the invoking user so subsequent
-        # snapshot/restore (plain _checked) don't need sudo.
-        _sudo_checked(
+        make(
             [
                 QEMU_IMG,
                 "create",
@@ -1110,31 +1125,32 @@ def _create_disks(vm: VMInfo, image: str) -> None:
         # Grow the qcow2 virtual disk so the VM has room for Lustre
         # modules, logs, etc.  The ext4 filesystem is resized on first
         # boot (rc.local).
-        _sudo_checked(
-            [QEMU_IMG, "resize", str(vm.overlay_path), str(vm.root_size)]
-        )
+        make([QEMU_IMG, "resize", str(vm.overlay_path), str(vm.root_size)])
 
         # Create backing disks
         total = vm.mdt_disks + vm.ost_disks
         for n in range(1, total + 1):
-            _sudo_checked(
+            make(
                 ["truncate", "-s", str(vm.disk_size), str(vm.disk_path(n))],
             )
     except BaseException:
-        # Cleanup also goes through sudo since the artifacts -- if they
-        # exist -- are root-owned at this point.
-        sudo_run(
-            ["rm", "-f", str(vm.overlay_path)],
-            check=False,
-            quiet=True,
-        )
-        for n in range(1, vm.mdt_disks + vm.ost_disks + 1):
+        leftovers = [vm.overlay_path] + [
+            vm.disk_path(n) for n in range(1, vm.mdt_disks + vm.ost_disks + 1)
+        ]
+        stuck: list[Path] = []
+        for f in leftovers:
+            try:
+                f.unlink(missing_ok=True)
+            except PermissionError:
+                stuck.append(f)
+        if stuck:
             sudo_run(
-                ["rm", "-f", str(vm.disk_path(n))],
+                ["rm", "-f", *(str(f) for f in stuck)],
                 check=False,
                 quiet=True,
             )
         raise
+    return not as_user
 
 
 def _chown_disks_to_sudo_user(vm: VMInfo) -> None:
@@ -1359,10 +1375,39 @@ def cmd_create(args: argparse.Namespace) -> None:
     _print_create_report(vm, args)
 
 
+def _require_manageable(vm: VMInfo, verb: str) -> None:
+    """Refuse cleanly when another user's VM is out of reach.
+
+    On a shared host each user's VM files are theirs alone (the VM
+    directories are sticky), so stopping or destroying someone else's VM
+    needs root.  Starting it cannot work even then: its QEMU would run
+    as this user, who cannot write the owner's disks.
+    """
+    try:
+        owner = vm.info_path.stat().st_uid
+    except OSError:
+        return
+    if os.geteuid() in (0, owner) or not rootless.readiness().ok:
+        return
+    import pwd
+
+    try:
+        who = pwd.getpwuid(owner).pw_name
+    except KeyError:
+        who = str(owner)
+    if verb == "start":
+        die(f"{vm.name} belongs to {who}; start it as {who}")
+    try:
+        sudo_prime(f"{vm.name} belongs to {who}; to {verb} it needs root")
+    except SudoUnavailable:
+        die(f"{vm.name} belongs to {who}; only {who} or root can {verb} it")
+
+
 def cmd_start(args: argparse.Namespace) -> None:
     for name in args.names:
         _validate_vm_name_for_lookup(name)
         vm = VMInfo.load(name)
+        _require_manageable(vm, "start")
         # Short-circuit when already running: launch_qemu also detects
         # this and prints "already running" to stderr, but the
         # subsequent provision/seed/"started" calls here would still
@@ -1392,6 +1437,7 @@ def cmd_stop(args: argparse.Namespace) -> None:
             # a no-op, not a traceback.
             print(f"stop: {name} not found")
             continue
+        _require_manageable(vm, "stop")
         kill_qemu(vm)
         print(f"stopped {name}")
 
@@ -1439,6 +1485,7 @@ def cmd_destroy(args: argparse.Namespace) -> None:
         passthrough_rebinds: dict[str, str] = {}
         try:
             vm = VMInfo.load(name)
+            _require_manageable(vm, "destroy")
             # Capture before kill so we still know what to rebind even
             # if the QMP socket is gone or kill_qemu raises partway.
             passthrough_rebinds = dict(vm.passthrough_drivers)
@@ -2683,6 +2730,71 @@ def _check_completion(fix: bool) -> tuple[list[str], list[str], int]:
     return issues, notes, failures
 
 
+def _group_id(name: str) -> int | None:
+    import grp
+
+    try:
+        return grp.getgrnam(name).gr_gid
+    except KeyError:
+        return None
+
+
+def _check_base_images_readable(fix: bool) -> tuple[int, int]:
+    """Base images every VM user can read.  Returns (issues, failures)."""
+    from .release_package import _base_images
+    from .target_config import ARTIFACTS_DIR
+
+    issues = failures = 0
+    for target_dir in sorted(ARTIFACTS_DIR.glob("*/*")):
+        for img in _base_images(target_dir):
+            try:
+                st = img.lstat()
+            except OSError:
+                continue
+            if not stat.S_ISREG(st.st_mode) or st.st_mode & 0o044 == 0o044:
+                continue
+            print(f"base image not readable by other users: {img}")
+            issues += 1
+            if not fix:
+                continue
+            try:
+                chmod_regular(img, st.st_mode & 0o7777 | 0o044)
+                print("  fixed: chmod go+r")
+            except OSError as e:
+                print(f"  FAILED: {e}")
+                failures += 1
+    return issues, failures
+
+
+def _check_unprivileged_vms(
+    shared_gid: int | None, fix: bool
+) -> tuple[int, int]:
+    """Say whether this user can run VMs without sudo.
+
+    Only a host installed for it (VM_DIR in the ltvm group) counts a
+    gap as an issue; on a classic install sudo is the expected path.
+    Returns (issues, failures).
+    """
+    rd = rootless.readiness()
+    if rd.ok:
+        print(f"unprivileged VMs: ready (bridge helper {rd.helper})")
+        return _check_base_images_readable(fix)
+    try:
+        installed = (
+            shared_gid is not None and VM_DIR.stat().st_gid == shared_gid
+        )
+    except OSError:
+        installed = False
+    if not installed:
+        print(
+            "unprivileged VMs: not set up -- `sudo ltvm install` sets them up"
+        )
+        return 0, 0
+    for problem in rd.problems:
+        print(f"unprivileged VMs unavailable: {problem}")
+    return len(rd.problems), 0
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     issues = 0
     # Counts repairs that were attempted and did not work, so --fix
@@ -2690,34 +2802,52 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     fix_failures = 0
 
     # Socket + overlay dir perms: non-root `ltvm list`/`deploy`/`llmount`
-    # need read access, so these are owned root:root but should be 0755.
+    # need read access.  A classic install leaves them root:root 0755; a
+    # shared one root:ltvm 3775, which lets the group run VMs unprivileged.
     # .info files should be 0644 so non-root callers can read VM state.
+    shared_gid = _group_id(rootless.GROUP)
     for d in (SOCKETS, OVERLAYS):
         if d.exists():
-            mode = d.stat().st_mode & 0o777
-            if mode != 0o755:
-                print(f"tight perms: {d} is {oct(mode)} (want 0o755)")
+            st = d.stat()
+            mode = st.st_mode & 0o777
+            if mode not in (0o755, 0o775):
+                want = (
+                    rootless.SHARED_DIR_MODE
+                    if st.st_gid == shared_gid
+                    else 0o755
+                )
+                print(f"tight perms: {d} is {oct(mode)} (want {oct(want)})")
                 issues += 1
                 if args.fix:
                     try:
-                        d.chmod(0o755)
-                        print("  fixed: chmod 0755")
+                        d.chmod(want)
+                        print(f"  fixed: chmod {want:o}")
                     except OSError as e:
                         print(f"  could not chmod: {e}")
     for info in sorted(SOCKETS.glob("*.info")):
         try:
-            mode = info.stat().st_mode & 0o777
+            st = info.lstat()
         except OSError:
             continue
+        # Anyone in a shared group can plant a symlink here; a root
+        # doctor must never chmod through one.
+        if not stat.S_ISREG(st.st_mode):
+            continue
+        mode = st.st_mode & 0o777
         if mode != 0o644:
             print(f"tight perms: {info.name} is {oct(mode)} (want 0o644)")
             issues += 1
             if args.fix:
                 try:
-                    info.chmod(0o644)
+                    chmod_regular(info, 0o644)
                     print("  fixed: chmod 0644")
                 except OSError as e:
                     print(f"  could not chmod: {e}")
+
+    if not is_macos():
+        found, failed = _check_unprivileged_vms(shared_gid, args.fix)
+        issues += found
+        fix_failures += failed
 
     for name in VMInfo.all_names():
         try:
@@ -2852,7 +2982,24 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                         # by `ltvm destroy` so concurrent doctor + create
                         # races don't lose entries.
                         unregister_ssh_name(hname)
-                        print("  fixed: removed from /etc/hosts")
+                        if f"{MARKER}:{hname}" in hosts.read_text():
+                            print("  FAILED: removing it needs root")
+                            fix_failures += 1
+                        else:
+                            print("  fixed: removed from /etc/hosts")
+
+    for hname in rootless.hosts_entries():
+        if (SOCKETS / f"{hname}.info").exists():
+            continue
+        print(f"stale hosts.d entry: {hname}")
+        issues += 1
+        if args.fix:
+            try:
+                rootless.remove_hosts_entry(hname)
+                print(f"  fixed: removed from {rootless.HOSTS_DIR}")
+            except OSError as e:
+                print(f"  FAILED to remove: {e}")
+                fix_failures += 1
 
     # Orphan TAP scan is Linux-only: macOS uses socket_vmnet (Unix
     # sockets, not TAP devices), and `ip` isn't on the PATH there --

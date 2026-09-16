@@ -1362,6 +1362,10 @@ class TestSubnetCollision:
                 return_value=True,
             ),
             patch("ltvm_pkg.host_setup.VM_DIR", Path("/tmp/ltvm-test-vmdir")),
+            patch(
+                "ltvm_pkg.host_setup.DNSMASQ_VM_CONF",
+                Path("/tmp/ltvm-test-vmdir/absent.conf"),
+            ),
         ):
             setup_network(MagicMock(), subnet="192.168.100", force=True)
 

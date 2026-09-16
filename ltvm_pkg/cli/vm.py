@@ -16,7 +16,10 @@ from typing import Any
 from ltvm_pkg.cli.util import (
     EXIT_ERROR,
     EXIT_OK,
+    _drop_to_vm_owner,
     _error,
+    _uses_passthrough,
+    _vm_privileges,
 )
 
 
@@ -39,22 +42,15 @@ def _vm_call(fn: Any, ns: argparse.Namespace, use_json: bool) -> int:
         return _error(str(e), use_json)
 
 
-def _maybe_prime_sudo(reason: str, use_json: bool) -> int | None:
-    """Prime sudo; return an exit code when sudo refuses."""
-    if use_json:
-        return None
-    from ltvm_pkg.priv import SudoUnavailable, sudo_prime
-
-    try:
-        sudo_prime(reason)
-    except SudoUnavailable as e:
-        return _error(str(e), use_json)
-    return None
-
-
 def cmd_vm_start(args: argparse.Namespace) -> int:
     use_json = args.json
-    err = _maybe_prime_sudo("ltvm start needs root for tap setup", use_json)
+    names = list(args.names)
+    err = _vm_privileges(
+        "ltvm start needs root for tap setup",
+        use_json,
+        passthrough=_uses_passthrough(names),
+        drop=lambda: _drop_to_vm_owner(names),
+    )
     if err is not None:
         return err
     from ltvm_pkg.vm_commands import cmd_start as _start
@@ -64,7 +60,11 @@ def cmd_vm_start(args: argparse.Namespace) -> int:
 
 def cmd_vm_stop(args: argparse.Namespace) -> int:
     use_json = args.json
-    err = _maybe_prime_sudo("ltvm stop needs root for tap teardown", use_json)
+    err = _vm_privileges(
+        "ltvm stop needs root for tap teardown",
+        use_json,
+        passthrough=_uses_passthrough(list(args.names)),
+    )
     if err is not None:
         return err
     from ltvm_pkg.vm_commands import cmd_stop as _stop

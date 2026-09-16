@@ -16,6 +16,7 @@ import os
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -225,6 +226,7 @@ def _run_quiet(
 # qemu_run, image_export, and vm_cluster can import them without
 # pulling in the rest of host_setup.  The module-private aliases
 # below keep host_setup's existing call sites stable.
+from ltvm_pkg.priv import chmod_regular  # noqa: E402
 from ltvm_pkg.priv import sudo_prime as _sudo_prime  # noqa: E402
 from ltvm_pkg.priv import sudo_run as _sudo_run  # noqa: E402
 
@@ -1828,6 +1830,48 @@ def choose_subnet(requested: str | None) -> str:
     )
 
 
+DNSMASQ_VM_CONF = Path("/etc/dnsmasq.d/qemu-vms.conf")
+
+
+def _write_root_file(path: Path, text: str, mode: int = 0o644) -> None:
+    """Write *path* as root in a directory other users can write to.
+
+    Anything there that root does not own -- a planted symlink above
+    all -- is removed first rather than written through.
+    """
+    try:
+        st: os.stat_result | None = path.lstat()
+    except FileNotFoundError:
+        st = None
+    if st is not None and (not stat.S_ISREG(st.st_mode) or st.st_uid != 0):
+        path.unlink()
+    fd = os.open(
+        path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, mode
+    )
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+
+
+def _ensure_dnsmasq_hostsdir() -> bool:
+    """Have ltvm's dnsmasq serve VM names from hosts.d.
+
+    dnsmasq watches the directory itself, so a VM registered by an
+    unprivileged user resolves without a reload.  Returns True when the
+    config file changed.
+    """
+    hosts_dir = VM_DIR / "hosts.d"
+    hosts_dir.mkdir(parents=True, exist_ok=True)
+    if not DNSMASQ_VM_CONF.exists():
+        return False
+    text = DNSMASQ_VM_CONF.read_text()
+    if any(ln.startswith("hostsdir=") for ln in text.splitlines()):
+        return False
+    if text and not text.endswith("\n"):
+        text += "\n"
+    DNSMASQ_VM_CONF.write_text(text + f"hostsdir={hosts_dir}\n")
+    return True
+
+
 def setup_network(
     host: HostInfo, subnet: str = DEFAULT_SUBNET, force: bool = False
 ) -> None:
@@ -1853,7 +1897,9 @@ def setup_network(
         # Still persist the subnet file so vm_state.SUBNET reads the
         # right value at import time even when we skip everything else.
         VM_DIR.mkdir(parents=True, exist_ok=True)
-        (VM_DIR / "subnet").write_text(subnet + "\n")
+        _write_root_file(VM_DIR / "subnet", subnet + "\n")
+        if _ensure_dnsmasq_hostsdir():
+            _run(["systemctl", "restart", "dnsmasq"])
         return
 
     log.info("Configuring network bridge (fcbr0) on %s.0/24", subnet)
@@ -1863,7 +1909,7 @@ def setup_network(
     # Without this, --subnet would only configure the host side and
     # vm_net.alloc_ip would still hand out 192.168.100.x addresses.
     VM_DIR.mkdir(parents=True, exist_ok=True)
-    (VM_DIR / "subnet").write_text(subnet + "\n")
+    _write_root_file(VM_DIR / "subnet", subnet + "\n")
 
     # WSL2: ensure iptables-legacy is used.
     # iptables-nft can misbehave in WSL2 kernels lacking full nftables support.
@@ -1942,8 +1988,9 @@ def setup_network(
     # Generate dnsmasq config
     dns_tmpl = (HOST_CONFIG_DIR / "qemu-dnsmasq.conf").read_text()
     dns_text = dns_tmpl.replace("192.168.100", subnet)
-    Path("/etc/dnsmasq.d").mkdir(exist_ok=True)
-    Path("/etc/dnsmasq.d/qemu-vms.conf").write_text(dns_text)
+    DNSMASQ_VM_CONF.parent.mkdir(exist_ok=True)
+    DNSMASQ_VM_CONF.write_text(dns_text)
+    _ensure_dnsmasq_hostsdir()
 
     # Some distros (e.g. Rocky 9) ship /etc/dnsmasq.conf with bind-interfaces
     # set, which conflicts with bind-dynamic in our drop-in config.  Comment it
@@ -1982,23 +2029,117 @@ def setup_network(
 # ------------------------------------------------------------------
 
 
+def _setup_shared_vm_dirs() -> None:
+    """Give the ltvm group the VM directories (see ltvm_pkg.rootless)."""
+    import grp
+    import pwd
+
+    from ltvm_pkg import rootless
+
+    _run(["groupadd", "-f", rootless.GROUP])
+    gid = grp.getgrnam(rootless.GROUP).gr_gid
+    for d in (
+        VM_DIR,
+        VM_DIR / "overlays",
+        VM_DIR / "sockets",
+        VM_DIR / "hosts.d",
+    ):
+        d.mkdir(parents=True, exist_ok=True)
+        if d.is_symlink():
+            raise RuntimeError(f"{d} is a symlink; refusing to share it")
+        os.chown(d, 0, gid, follow_symlinks=False)
+        d.chmod(rootless.SHARED_DIR_MODE)
+
+    name = os.environ.get("SUDO_USER")
+    if not name or name == "root":
+        return
+    try:
+        user = pwd.getpwnam(name)
+    except KeyError:
+        return
+    groups = [rootless.GROUP]
+    with contextlib.suppress(KeyError):
+        grp.getgrnam("kvm")
+        groups.append("kvm")
+    before = set(os.getgrouplist(name, user.pw_gid))
+    _run(["usermod", "-aG", ",".join(groups), name])
+    added = [g for g in groups if grp.getgrnam(g).gr_gid not in before]
+    if added:
+        log.info(
+            "Added %s to %s -- log in again before running VMs without sudo",
+            name,
+            ", ".join(added),
+        )
+
+
+def _setup_bridge_helper(host: HostInfo) -> None:
+    """Let an unprivileged QEMU attach to the VM bridge."""
+    from ltvm_pkg import rootless
+
+    helper = rootless.installed_helper()
+    if helper is None:
+        log.warning("qemu-bridge-helper not found: VMs will keep needing sudo")
+        return
+    if not rootless.is_setuid_root(helper):
+        if host.pkg_mgr == "apt" and shutil.which("dpkg-statoverride"):
+            listed = _run_quiet(
+                ["dpkg-statoverride", "--list", str(helper)], check=False
+            )
+            if listed.returncode == 0:
+                log.warning(
+                    "%s has a statoverride that is not setuid root (%s): "
+                    "VMs will keep needing sudo",
+                    helper,
+                    listed.stdout.strip(),
+                )
+                return
+            # A statoverride survives upgrades of the qemu package.
+            _run(
+                [
+                    "dpkg-statoverride",
+                    "--update",
+                    "--add",
+                    "root",
+                    "root",
+                    "4755",
+                    str(helper),
+                ]
+            )
+        else:
+            os.chown(helper, 0, 0)
+            helper.chmod(0o4755)
+        log.info("Made %s setuid root", helper)
+
+    acl = rootless.BRIDGE_ACL
+    if rootless.bridge_allowed(rootless.BRIDGE, acl):
+        return
+    if rootless.bridge_denied(rootless.BRIDGE, acl):
+        log.warning(
+            "%s denies %s: VMs will keep needing sudo", acl, rootless.BRIDGE
+        )
+        return
+    acl.parent.mkdir(parents=True, exist_ok=True)
+    text = acl.read_text() if acl.exists() else ""
+    if text and not text.endswith("\n"):
+        text += "\n"
+    acl.write_text(text + f"allow {rootless.BRIDGE}\n")
+    acl.chmod(0o644)
+    log.info("Allowed %s in %s", rootless.BRIDGE, acl)
+
+
 def install_scripts(host: HostInfo) -> None:
     """Install dk-filter and VM dirs."""
     log.info("Installing scripts and VM directories")
 
-    for d in ("overlays", "sockets"):
-        p = VM_DIR / d
-        p.mkdir(parents=True, exist_ok=True)
-        p.chmod(0o755)
+    _setup_shared_vm_dirs()
+    _setup_bridge_helper(host)
 
     # Heal existing .info files from installs predating the 0644 default
     # (non-root `ltvm list` would PermissionError otherwise).
     sockets = VM_DIR / "sockets"
     for info in sockets.glob("*.info"):
-        try:
-            info.chmod(0o644)
-        except OSError:
-            pass
+        with contextlib.suppress(OSError):
+            chmod_regular(info, 0o644)
 
     # dk-filter
     dk = PKG_DIR / "dk-filter"
@@ -2221,6 +2362,17 @@ def verify(subnet: str = DEFAULT_SUBNET) -> dict[str, Any]:
         for r in shell_completion.status()
     }
 
+    if not macos:
+        from ltvm_pkg import rootless
+
+        rd = rootless.readiness()
+        # Informational: sudo remains a working path without it.
+        results["unprivileged_vms"] = {
+            "ready": rd.ok,
+            "helper": str(rd.helper) if rd.helper else None,
+            "problems": rd.problems,
+        }
+
     # Overall
     checks = [
         results["qemu"]["installed"],
@@ -2347,6 +2499,13 @@ def print_verify(results: dict[str, Any]) -> None:
         ok("SSH config: configured")
     else:
         fail("SSH config: not configured")
+
+    uv = results.get("unprivileged_vms")
+    if uv is not None:
+        if uv["ready"]:
+            ok(f"unprivileged VMs: ready (bridge helper {uv['helper']})")
+        else:
+            ok("unprivileged VMs: unavailable -- " + "; ".join(uv["problems"]))
 
     sv = results.get("socket_vmnet")
     if sv is not None:
@@ -2716,7 +2875,7 @@ def run_setup(
         # Some distros (Rocky 9, RHEL) ship sudoers with secure_path that
         # excludes /usr/local/bin, so `sudo ltvm` would fail with "command
         # not found".  Also preserve the session-scoped VM owner through
-        # `sudo ltvm cluster create`, which still requires root as a whole.
+        # `sudo ltvm cluster create` on hosts where VMs still need root.
         # Drop in a sudoers fragment for both settings.
         sudoers_d = Path("/etc/sudoers.d")
         if sudoers_d.is_dir():
@@ -2766,6 +2925,6 @@ def run_setup(
         log.info("Next:")
         log.info("  ltvm target fetch rocky9")
         log.info(
-            "  sudo ltvm create co1-test --target rocky9 --vcpus 2 --mdt-disks 1 --ost-disks 2"
+            "  ltvm create co1-test --target rocky9 --vcpus 2 --mdt-disks 1 --ost-disks 2"
         )
         log.info("  ltvm llmount co1-test")

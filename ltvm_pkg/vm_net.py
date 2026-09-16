@@ -15,9 +15,10 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import IO
 
+from . import rootless
 from .priv import atomic_write as _priv_atomic_write
 from .priv import ensure_lock_file as _ensure_lock_file
-from .priv import sudo_run
+from .priv import sudo_ready, sudo_run
 from .qemu_run import die, run
 from .vm_state import (
     GATEWAY,
@@ -477,13 +478,36 @@ def _real_user_ssh_dir() -> tuple[str, Path]:
     return real_user, Path(f"~{real_user}").expanduser() / ".ssh"
 
 
+def _may_edit_etc_hosts() -> bool:
+    """Can /etc/hosts be rewritten without asking for a password?"""
+    return os.access(HOSTS_FILE, os.W_OK) or sudo_ready()
+
+
 def register_ssh_name(name: str, ip: str) -> None:
-    """Add /etc/hosts and ~/.ssh/config entries for a VM."""
+    """Add DNS and ~/.ssh/config entries for a VM.
+
+    On a shared host dnsmasq takes the name from ``hosts.d``; /etc/hosts
+    is updated as well when that needs no password prompt.
+    """
     with _hosts_lock():
         _register_ssh_name_locked(name, ip)
 
 
 def _register_ssh_name_locked(name: str, ip: str) -> None:
+    shared = rootless.hosts_dir_writable()
+    if shared:
+        try:
+            rootless.write_hosts_entry(name, ip, MARKER)
+        except OSError as e:
+            log.warning(
+                "could not publish %s in %s: %s", name, rootless.HOSTS_DIR, e
+            )
+    if not shared or _may_edit_etc_hosts():
+        _register_etc_hosts(name, ip)
+    _register_ssh_config(name, ip)
+
+
+def _register_etc_hosts(name: str, ip: str) -> None:
     hosts = HOSTS_FILE
     marker_line = f"{MARKER}:{name}"
 
@@ -533,6 +557,9 @@ def _register_ssh_name_locked(name: str, ip: str) -> None:
             e,
         )
 
+
+def _register_ssh_config(name: str, ip: str) -> None:
+    marker_line = f"{MARKER}:{name}"
     # ~/.ssh/config — read existing content, strip any old block for this
     # host, then append the (possibly updated) block atomically.
     real_user, ssh_dir = _real_user_ssh_dir()
@@ -588,8 +615,23 @@ def _unregister_ssh_name_locked(name: str) -> None:
     # SSH host key and the user's ssh hits "WARNING: REMOTE HOST
     # IDENTIFICATION HAS CHANGED" instead of just connecting.
     hosts = HOSTS_FILE
-    ip: str | None = None
-    if hosts.exists():
+    shared = rootless.hosts_dir_writable()
+    ip: str | None = rootless.read_hosts_ip(name) if shared else None
+    if shared:
+        try:
+            rootless.remove_hosts_entry(name)
+        except PermissionError:
+            # Another user's entry in the sticky hosts.d.
+            sudo_run(
+                ["rm", "-f", str(rootless.hosts_file(name))],
+                check=False,
+                quiet=True,
+            )
+        except OSError as e:
+            log.warning(
+                "could not remove %s from %s: %s", name, rootless.HOSTS_DIR, e
+            )
+    if ip is None and hosts.exists():
         for line in hosts.read_text().splitlines():
             stripped = line.rstrip("\r\n")
             if stripped.endswith(marker):
@@ -601,12 +643,21 @@ def _unregister_ssh_name_locked(name: str) -> None:
     # /etc/hosts (atomic write to avoid races with parallel destroys).
     # Anchor the marker match to end-of-line: see the prefix-collision
     # comment in _register_ssh_name_locked above.
-    if hosts.exists():
-        lines = [
-            line
-            for line in hosts.read_text().splitlines(keepends=True)
-            if not line.rstrip("\r\n").endswith(marker)
-        ]
+    hosts_text = hosts.read_text() if hosts.exists() else ""
+    lines = [
+        line
+        for line in hosts_text.splitlines(keepends=True)
+        if not line.rstrip("\r\n").endswith(marker)
+    ]
+    stale = "".join(lines) != hosts_text
+    if stale and shared and not _may_edit_etc_hosts():
+        log.warning(
+            "left %s in %s: removing it needs root "
+            "(`ltvm doctor --fix` as a sudoer)",
+            name,
+            hosts,
+        )
+    elif stale:
         _atomic_write(hosts, "".join(lines))
         # Teardown must not stop here.  reload_dns() raises when
         # dnsmasq isn't running (e.g. host rebooted without it coming

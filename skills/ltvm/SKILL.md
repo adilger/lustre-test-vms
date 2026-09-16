@@ -150,18 +150,28 @@ and targets were used. No paths, names or error text.
 
 ## Root
 
-- **Needs root:** `update`, `cluster create`, `cluster destroy`.
-- **Does not:** the single-VM lifecycle -- `create`, `start`, `stop`,
-  `destroy`, `doctor`. They run as the invoking user and elevate only
-  the operations that need it, prompting once for sudo. QEMU is launched
-  under sudo because it writes into a root-owned directory; the files it
-  leaves behind are handed back to the user.
-- **Nor does anything else** -- `list`, `build *`, `target *`,
-  `deploy-lustre`, `llmount`, `vm *`, `cluster deploy/exec/status/ssh`.
+- **None, on a host set up for it.** Members of the `ltvm` group run
+  `create`, `start`, `stop`, `destroy`, `doctor` and `cluster
+  create/destroy` as themselves: QEMU runs as the user and joins the
+  bridge through QEMU's bridge helper. `ltvm doctor` says whether the
+  host is ready and, if not, what is missing. There, `sudo ltvm create`
+  runs as the user who typed it, and `sudo ltvm start` as the VM's
+  owner.
+- **Otherwise** the single-VM lifecycle runs as the invoking user and
+  prompts once for sudo, and `cluster create/destroy` need root.
+- **Always root:** `install`, `update`, and any VM with a `passthrough`
+  NIC.
+- **Never:** `list`, `build *`, `target *`, `deploy-lustre`, `llmount`,
+  `vm *`, `cluster deploy/exec/status/ssh`.
+
+If `doctor` reports that this user is not in the `ltvm` group, that is
+for the human to fix (`sudo usermod -aG ltvm <user>`, then a new login);
+do not try to work around it.
 
 ## Talking to a VM
 
-Names resolve through `/etc/hosts`, so plain `ssh` and `scp` work:
+Every VM gets an entry in your `~/.ssh/config`, so plain `ssh` and
+`scp` work by name:
 
 ```bash
 ssh co1-single 'lctl dl'
@@ -180,12 +190,18 @@ it costs nothing.
 ## Clusters
 
 ```bash
-sudo ltvm cluster create co2 mgs+mds:co2-mds:1 oss:co2-oss:3
+ltvm cluster create co2 mgs+mds:co2-mds:1 oss:co2-oss:3
 ltvm cluster deploy co2 --build <tree> --mount
 ltvm cluster exec co2 oss 'lctl dl'        # every node with the role
 ltvm cluster exec co2 co2-oss2 'lctl dl'   # one node by name
 ltvm cluster status co2
-sudo ltvm cluster destroy co2
+ltvm cluster destroy co2
+```
+
+`cluster create` and `cluster destroy` need `sudo` in front on a host
+that is not set up for unprivileged VMs (see Root).
+
+```bash
 ```
 
 `cluster exec <role>` fans out and exits non-zero if any node did.

@@ -27,6 +27,7 @@ from __future__ import annotations
 import errno
 import logging
 import os
+import stat
 import subprocess
 import tempfile
 from pathlib import Path
@@ -205,6 +206,20 @@ def chown_to_invoking_user(path: Path) -> None:
         pass
 
 
+def chmod_regular(path: Path, mode: int) -> None:
+    """chmod *path* only if it is a regular file, never through a link.
+
+    For root working in a directory other users can write to.
+    """
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(errno.EINVAL, "not a regular file", str(path))
+        os.fchmod(fd, mode)
+    finally:
+        os.close(fd)
+
+
 def ensure_lock_file(path: Path, *, noninteractive: bool = False) -> None:
     """Create *path* as a 0666 lock file if it is not there yet.
 
@@ -226,15 +241,24 @@ def ensure_lock_file(path: Path, *, noninteractive: bool = False) -> None:
     """
     if path.exists():
         return
+    chmod_as_root = ["chmod", "666", str(path)]
+    # O_NOFOLLOW: in a group-writable VM_DIR a planted symlink would
+    # otherwise have a root ltvm chmod its target 0666.
     try:
-        fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o666)
-        os.close(fd)
+        fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o666)
     except PermissionError:
         if noninteractive and not sudo_ready():
             raise
         sudo_run(
             ["touch", str(path)], quiet=True, noninteractive=noninteractive
         )
+        sudo_run(
+            chmod_as_root,
+            check=False,
+            quiet=True,
+            noninteractive=noninteractive,
+        )
+        return
     except OSError:
         return
     # O_CREAT's mode is masked by umask, and the point of 0666 is that
@@ -242,14 +266,16 @@ def ensure_lock_file(path: Path, *, noninteractive: bool = False) -> None:
     # is already there and owned by root; that is fine, it means some
     # earlier call already set the mode.
     try:
-        os.chmod(path, 0o666)
+        os.fchmod(fd, 0o666)
     except OSError:
         sudo_run(
-            ["chmod", "666", str(path)],
+            chmod_as_root,
             check=False,
             quiet=True,
             noninteractive=noninteractive,
         )
+    finally:
+        os.close(fd)
 
 
 def atomic_write(
@@ -291,39 +317,51 @@ def atomic_write(
 
     owns = _ltvm_owned(path)
     prev_owner: tuple[int, int] | None = None
-    if not owns:
-        try:
-            st = path.stat()
-            prev_owner = (st.st_uid, st.st_gid)
-        except OSError:
-            prev_owner = None
+    try:
+        st = path.stat()
+        prev_owner = (st.st_uid, st.st_gid)
+    except OSError:
+        prev_owner = None
+    # System files keep their owner.  So does ltvm state that already
+    # belongs to a user: root working on someone's VM must not take it
+    # over.  New or root-owned state goes to the invoking user.
+    keep = prev_owner
+    if owns and (prev_owner is None or prev_owner[0] == 0):
+        keep = None
 
     if os.access(str(parent), os.W_OK):
         fd, tmp = tempfile.mkstemp(dir=str(parent), prefix=f".{path.name}.")
+        replaced = False
         try:
             with os.fdopen(fd, "w") as f:
                 f.write(text)
             os.chmod(tmp, mode)
-            # Preserve the destination's existing ownership for files
-            # ltvm doesn't own (see _ltvm_owned): the tempfile we are
-            # about to rename over it was created by us, so without
-            # this a root-run ltvm would turn /etc/hosts root-owned
-            # into whatever we happen to be.
-            if not owns and prev_owner is not None:
+            # The tempfile we are about to rename over the destination
+            # is ours, so without this a root-run ltvm would turn
+            # /etc/hosts into whatever we happen to be.
+            if keep is not None:
                 try:
-                    os.chown(tmp, prev_owner[0], prev_owner[1])
+                    os.chown(tmp, keep[0], keep[1])
                 except OSError:
                     pass
-            os.rename(tmp, str(path))
-            if owns:
-                chown_to_invoking_user(path)
-        except BaseException:
             try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            raise
-        return
+                os.rename(tmp, str(path))
+                replaced = True
+            except PermissionError:
+                # A sticky shared directory: only the file's owner or
+                # root may replace it, so this goes through sudo below.
+                if os.geteuid() == 0:
+                    raise
+            if replaced and owns and keep is None:
+                chown_to_invoking_user(path)
+        finally:
+            if not replaced:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+        if replaced:
+            return
 
     if noninteractive and not sudo_ready():
         raise PermissionError(
@@ -339,15 +377,9 @@ def atomic_write(
             f.write(text)
         owner = invoking_user() if owns else None
         own_args = ["-o", owner[0], "-g", owner[1]] if owner is not None else []
-        if not owns and prev_owner is not None:
-            # Keep the system file's existing owner rather than letting
-            # `install` default it to whoever sudo runs as.
-            own_args = [
-                "-o",
-                str(prev_owner[0]),
-                "-g",
-                str(prev_owner[1]),
-            ]
+        if keep is not None:
+            # Rather than letting `install` default to whoever sudo runs as.
+            own_args = ["-o", str(keep[0]), "-g", str(keep[1])]
         sudo_run(
             [
                 "install",

@@ -155,6 +155,27 @@ def _neutralize_container_preflight() -> object:
         yield
 
 
+@pytest.fixture(autouse=True)
+def _classic_privileges() -> object:
+    """Pin the sudo path, whatever the test host's own setup.
+
+    A host installed for unprivileged VMs would otherwise switch launch,
+    DNS and CLI code to it.  tests/test_rootless.py opts back in.
+    """
+    from ltvm_pkg import rootless
+
+    with (
+        patch.object(
+            rootless,
+            "readiness",
+            return_value=rootless.Readiness(problems=["disabled in tests"]),
+        ),
+        patch.object(rootless, "hosts_dir_writable", return_value=False),
+        patch.object(rootless, "hosts_entries", return_value=[]),
+    ):
+        yield
+
+
 @pytest.fixture
 def tmp_targets(tmp_path: Path) -> Path:
     """Create a minimal targets/ tree for TargetConfig tests."""

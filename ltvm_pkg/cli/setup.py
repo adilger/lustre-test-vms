@@ -23,6 +23,8 @@ from ltvm_pkg.cli.util import (
     EXIT_OK,
     _error,
     _output,
+    _uses_passthrough,
+    _vm_privileges,
 )
 
 log = logging.getLogger("ltvm.setup")
@@ -60,28 +62,22 @@ def _vm_call(*a: Any, **kw: Any) -> int:
 # ------------------------------------------------------------------
 
 
-def _maybe_prime_sudo(reason: str, use_json: bool) -> int | None:
-    """Prime sudo; return an exit code when sudo refuses."""
-    if use_json:
-        return None
-    from ltvm_pkg.priv import SudoUnavailable, sudo_prime
-
-    try:
-        sudo_prime(reason)
-    except SudoUnavailable as e:
-        return _error(str(e), use_json)
-    return None
-
-
 def cmd_create(args: argparse.Namespace) -> int:
     use_json = args.json
     # A dry run only reads, so priming sudo would prompt for a password
     # that nothing is going to spend -- the one thing guaranteed to stop
     # people using --dry-run.
     if not getattr(args, "dry_run", False):
-        err = _maybe_prime_sudo(
+        nics = getattr(args, "nic", None) or []
+        from ltvm_pkg import rootless
+
+        err = _vm_privileges(
             "ltvm create needs root for bridge/tap/qemu-img writes",
             use_json,
+            passthrough=any(
+                str(n).split(":", 1)[0] == "passthrough" for n in nics
+            ),
+            drop=rootless.drop_to_sudo_user,
         )
         if err is not None:
             return err
@@ -92,9 +88,10 @@ def cmd_create(args: argparse.Namespace) -> int:
 
 def cmd_destroy(args: argparse.Namespace) -> int:
     use_json = args.json
-    err = _maybe_prime_sudo(
+    err = _vm_privileges(
         "ltvm destroy needs root for tap teardown and VM_DIR cleanup",
         use_json,
+        passthrough=_uses_passthrough(list(args.names)),
     )
     if err is not None:
         return err
