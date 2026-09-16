@@ -39,17 +39,24 @@ def _vm_call(fn: Any, ns: argparse.Namespace, use_json: bool) -> int:
         return _error(str(e), use_json)
 
 
-def _maybe_prime_sudo(reason: str, use_json: bool) -> None:
+def _maybe_prime_sudo(reason: str, use_json: bool) -> int | None:
+    """Prime sudo; return an exit code when sudo refuses."""
     if use_json:
-        return
-    from ltvm_pkg.priv import sudo_prime
+        return None
+    from ltvm_pkg.priv import SudoUnavailable, sudo_prime
 
-    sudo_prime(reason)
+    try:
+        sudo_prime(reason)
+    except SudoUnavailable as e:
+        return _error(str(e), use_json)
+    return None
 
 
 def cmd_vm_start(args: argparse.Namespace) -> int:
     use_json = args.json
-    _maybe_prime_sudo("ltvm start needs root for tap setup", use_json)
+    err = _maybe_prime_sudo("ltvm start needs root for tap setup", use_json)
+    if err is not None:
+        return err
     from ltvm_pkg.vm_commands import cmd_start as _start
 
     return _vm_call(_start, args, use_json)
@@ -57,7 +64,9 @@ def cmd_vm_start(args: argparse.Namespace) -> int:
 
 def cmd_vm_stop(args: argparse.Namespace) -> int:
     use_json = args.json
-    _maybe_prime_sudo("ltvm stop needs root for tap teardown", use_json)
+    err = _maybe_prime_sudo("ltvm stop needs root for tap teardown", use_json)
+    if err is not None:
+        return err
     from ltvm_pkg.vm_commands import cmd_stop as _stop
 
     return _vm_call(_stop, args, use_json)

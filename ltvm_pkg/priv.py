@@ -33,6 +33,15 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
+# Set once `sudo -v` has been refused.  Every later sudo_run() in the
+# process then uses `sudo -n`, so a user without sudo is told no once
+# rather than prompted again for each host operation.
+_sudo_refused = False
+
+
+class SudoUnavailable(RuntimeError):
+    """sudo would not grant root to this user."""
+
 
 def _run(
     cmd: list[str],
@@ -75,7 +84,7 @@ def sudo_run(
     """
     if os.geteuid() == 0:
         return _run(cmd, check=check, quiet=quiet)
-    if noninteractive:
+    if noninteractive or _sudo_refused:
         return _run(["sudo", "-n", *cmd], check=check, quiet=quiet)
     return _run(["sudo", *cmd], check=check, quiet=quiet)
 
@@ -100,11 +109,17 @@ def sudo_prime(reason: str) -> None:
     in those cases ``sudo -v`` would still try to authenticate and
     fail in non-tty contexts (subshells, hooks, CI), aborting even
     though every later ``sudo`` would have worked.
+
+    Raises ``SudoUnavailable`` when sudo refuses.
     """
+    global _sudo_refused
     if sudo_ready():
         return
     log.info("%s -- prompting for sudo credentials now.", reason)
-    _run(["sudo", "-v"])
+    r = _run(["sudo", "-v"], check=False)
+    if r.returncode != 0:
+        _sudo_refused = True
+        raise SudoUnavailable(f"{reason}, and sudo refused")
 
 
 def invoking_user() -> tuple[str, str] | None:

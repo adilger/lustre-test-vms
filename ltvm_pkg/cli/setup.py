@@ -60,12 +60,17 @@ def _vm_call(*a: Any, **kw: Any) -> int:
 # ------------------------------------------------------------------
 
 
-def _maybe_prime_sudo(reason: str, use_json: bool) -> None:
+def _maybe_prime_sudo(reason: str, use_json: bool) -> int | None:
+    """Prime sudo; return an exit code when sudo refuses."""
     if use_json:
-        return
-    from ltvm_pkg.priv import sudo_prime
+        return None
+    from ltvm_pkg.priv import SudoUnavailable, sudo_prime
 
-    sudo_prime(reason)
+    try:
+        sudo_prime(reason)
+    except SudoUnavailable as e:
+        return _error(str(e), use_json)
+    return None
 
 
 def cmd_create(args: argparse.Namespace) -> int:
@@ -74,10 +79,12 @@ def cmd_create(args: argparse.Namespace) -> int:
     # that nothing is going to spend -- the one thing guaranteed to stop
     # people using --dry-run.
     if not getattr(args, "dry_run", False):
-        _maybe_prime_sudo(
+        err = _maybe_prime_sudo(
             "ltvm create needs root for bridge/tap/qemu-img writes",
             use_json,
         )
+        if err is not None:
+            return err
     from ltvm_pkg.vm_commands import cmd_create as _create
 
     return _vm_call(_create, args, use_json)
@@ -85,10 +92,12 @@ def cmd_create(args: argparse.Namespace) -> int:
 
 def cmd_destroy(args: argparse.Namespace) -> int:
     use_json = args.json
-    _maybe_prime_sudo(
+    err = _maybe_prime_sudo(
         "ltvm destroy needs root for tap teardown and VM_DIR cleanup",
         use_json,
     )
+    if err is not None:
+        return err
     from ltvm_pkg.vm_commands import cmd_destroy as _destroy
 
     return _vm_call(_destroy, args, use_json)
@@ -96,10 +105,15 @@ def cmd_destroy(args: argparse.Namespace) -> int:
 
 def cmd_doctor(args: argparse.Namespace) -> int:
     use_json = args.json
-    _maybe_prime_sudo(
-        "ltvm doctor needs root for tap/bridge inspection",
-        use_json,
-    )
+    # Every check is a read.  Only a repair can need root, and a user
+    # without sudo still gets the report.
+    if args.fix and not use_json:
+        from ltvm_pkg.priv import SudoUnavailable, sudo_prime
+
+        try:
+            sudo_prime("ltvm doctor --fix needs root for some repairs")
+        except SudoUnavailable as e:
+            log.warning("%s -- repairs that need root will fail", e)
     from ltvm_pkg.vm_commands import cmd_doctor as _doctor
 
     return _vm_call(_doctor, args, use_json)
