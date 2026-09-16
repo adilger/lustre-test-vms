@@ -64,6 +64,23 @@ VM's own OS disk (default 8G). Both are fixed at create time, so a VM
 that needs room for a debug build or a vmcore wants `--root-size 20G`
 when it is created, not after.
 
+`--kernel-args` adds kernel boot parameters, also fixed at create time.
+The target kernels have no KASAN, but they build in SLUB debugging (and
+the Rocky ones page owner tracking), off until booted with them:
+
+```bash
+ltvm create co1-single --kernel-args 'slub_debug=FZPU page_owner=on'
+```
+
+`slub_debug=FZPU` turns on sanity checks, red zones, poisoning and
+allocation tracking in every slab cache. A use-after-free or overrun in
+Lustre code is then reported when the object is freed or reused, with
+its allocation and free stacks, rather than surfacing as unrelated
+corruption.
+
+ltvm refuses `root=`, `console=` and `fc_*`, which it sets itself.
+`cluster create` takes the same flag for every node.
+
 `create` is idempotent: it starts a stopped VM and no-ops on a running
 one. Name VMs `co<N>-<role>` after the checkout they serve -- `co1-single`,
 `co2-mds`, `co5-ec-dom`. Never a bare `testvm`: the number is what tells a

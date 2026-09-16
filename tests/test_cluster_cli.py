@@ -259,6 +259,7 @@ class TestClusterCreateArgs:
         assert ns.disk_size is None
         assert ns.root_size is None
         assert ns.nic == []
+        assert ns.kernel_args is None
 
     def test_vcpus_and_mem_flags_parsed(self) -> None:
         cmd_cluster(
@@ -351,6 +352,20 @@ class TestClusterCreateArgs:
         assert ns.root_size == "16G"
         # --nic is repeatable; both values land in the list in order.
         assert ns.nic == ["nat", "softroce"]
+
+    def test_kernel_args_parsed(self) -> None:
+        cmd_cluster(
+            _ns(
+                "create",
+                "co1",
+                "--kernel-args",
+                "slub_debug=FZPU page_owner=on",
+                "mgs+mds:co1-mds:1",
+            )
+        )
+        assert (
+            self._captured_ns().kernel_args == "slub_debug=FZPU page_owner=on"
+        )
 
     def test_unknown_flag_errors(self) -> None:
         err = _expect_usage_error(
@@ -1112,6 +1127,46 @@ class TestClusterNodeDiskArgs:
             )
         argv = run.call_args.args[0]
         assert argv[argv.index("--root-size") + 1] == "16G"
+
+    def test_kernel_args_reach_each_node_as_one_word(self) -> None:
+        from ltvm_pkg import vm_cluster
+
+        node = vm_cluster.parse_node_spec("oss:co9-oss:3")
+        with patch.object(vm_cluster.subprocess, "run") as run:
+            run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            vm_cluster._create_one_node(
+                node, vcpus=2, mem=None, kernel_args="slub_debug=FZPU quiet"
+            )
+        assert "--kernel-args=slub_debug=FZPU quiet" in run.call_args.args[0]
+
+    def test_kernel_args_omitted_when_not_asked_for(self) -> None:
+        from ltvm_pkg import vm_cluster
+
+        node = vm_cluster.parse_node_spec("oss:co9-oss:3")
+        with patch.object(vm_cluster.subprocess, "run") as run:
+            run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            vm_cluster._create_one_node(node, vcpus=2, mem=None)
+        assert not any(
+            a.startswith("--kernel-args") for a in run.call_args.args[0]
+        )
+
+    def test_refused_kernel_args_create_no_node(self, tmp_path: Path) -> None:
+        from ltvm_pkg import vm_cluster
+
+        args = argparse.Namespace(
+            name="co9k",
+            nodes=["mgs+mds:co9k-mds:1"],
+            vcpus=2,
+            mem=None,
+            kernel_args="console=tty0",
+        )
+        with (
+            patch.object(vm_cluster, "SOCKETS", tmp_path),
+            patch.object(vm_cluster, "_create_one_node") as create,
+            pytest.raises(SystemExit),
+        ):
+            vm_cluster.cmd_cluster_create(args)
+        assert not create.called
 
     def test_root_size_omitted_when_not_asked_for(self) -> None:
         from ltvm_pkg import vm_cluster

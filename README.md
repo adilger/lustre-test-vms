@@ -106,7 +106,8 @@ ltvm vm         <action> ...    VM inspection / crash / snapshot (see below);
                                 `ltvm vm create` == `ltvm create`
 ltvm cluster    <action> ...    Multi-node cluster management (see below)
 ltvm create     <name>          Create a VM (idempotent; --root-size sets
-                                the OS disk, --disk-size the MDT/OST ones)
+                                the OS disk, --disk-size the MDT/OST ones,
+                                --kernel-args adds boot parameters)
 ltvm start|stop|destroy <name>  VM power / removal
 ltvm list                       Show all VMs
 ltvm deploy-lustre <vm>         Deploy Lustre into a running VM

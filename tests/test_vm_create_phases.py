@@ -224,6 +224,21 @@ class TestCreateDiskAllocation:
             )
         assert VMInfo.load("co1-big-root").root_size == 20 * (1 << 30)
 
+    def test_kernel_args_persisted_on_vm(self, tmp_vmdir: Path) -> None:
+        with _create_env(tmp_vmdir):
+            vm_commands.cmd_create(
+                _create_args(name="co1-kargs", kernel_args=" slub_debug=FZPU ")
+            )
+        assert VMInfo.load("co1-kargs").kernel_args == "slub_debug=FZPU"
+
+    def test_refused_kernel_args_write_nothing(self, tmp_vmdir: Path) -> None:
+        with _create_env(tmp_vmdir) as env, pytest.raises(SystemExit):
+            vm_commands.cmd_create(
+                _create_args(name="co1-badargs", kernel_args="root=/dev/vdb")
+            )
+        assert not (tmp_vmdir / "sockets" / "co1-badargs.info").exists()
+        assert not env["alloc_ip"].called
+
     def test_root_size_reaches_qemu_img_resize(self, tmp_vmdir: Path) -> None:
         """The overlay has to actually be grown -- persisting the number
         alone would leave an 8G VM claiming 20G."""
@@ -734,6 +749,21 @@ class TestCreateDryRun:
         assert plan["already_exists"] is False
         # Not claimed, so not reported as a specific address.
         assert plan["ip"] is None
+
+    def test_kernel_args_are_reported(
+        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with _create_env(tmp_vmdir):
+            vm_commands.cmd_create(
+                _create_args(
+                    name="co1-dry6",
+                    dry_run=True,
+                    json=True,
+                    kernel_args="page_owner=on",
+                )
+            )
+        plan = json.loads(capsys.readouterr().out)
+        assert plan["kernel_args"] == "page_owner=on"
 
     def test_an_explicit_ip_is_reported(
         self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]

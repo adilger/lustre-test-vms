@@ -328,6 +328,10 @@ def launch_qemu(vm: VMInfo) -> None:
         f"{fc_nics_fragment}"
         f"{fc_nic_ips_fragment}"
     )
+    # Last, so that a parameter whose last occurrence wins
+    # (crashkernel=, panic=) takes the user's value.
+    if vm.kernel_args:
+        boot_args += f" {vm.kernel_args}"
 
     # Recreate TAP and flush any stale ARP entry for this IP.  Also
     # tear down any extra-NIC TAPs from a previous launch so ``ltvm

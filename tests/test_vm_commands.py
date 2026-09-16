@@ -319,6 +319,50 @@ class TestSizeLabel:
         assert vm_commands._size_label(500 * (1 << 20)) == "500M"
 
 
+# ── _validate_kernel_args ────────────────────────────────
+
+
+class TestValidateKernelArgs:
+    @pytest.mark.parametrize("raw", [None, ""])
+    def test_absent_is_empty(self, raw: str | None) -> None:
+        assert vm_commands._validate_kernel_args(raw) == ""
+
+    def test_accepted_and_stripped(self) -> None:
+        got = vm_commands._validate_kernel_args(
+            " slub_debug=FZPU page_owner=on "
+        )
+        assert got == "slub_debug=FZPU page_owner=on"
+
+    def test_names_that_only_start_like_ltvms_are_accepted(self) -> None:
+        raw = "rootwait consoleblank=0 kasan.fault=panic"
+        assert vm_commands._validate_kernel_args(raw) == raw
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "root=/dev/vdb",
+            "console=tty0",
+            "quiet fc_ip=10.0.0.1",
+            "fc_nics=tcp",
+        ],
+    )
+    def test_parameters_ltvm_sets_are_refused(self, raw: str) -> None:
+        with pytest.raises(SystemExit):
+            vm_commands._validate_kernel_args(raw)
+
+    @pytest.mark.parametrize("raw", ["a\nb", "a\tb", "a\x7fb"])
+    def test_control_characters_are_refused(self, raw: str) -> None:
+        """A newline would end the value in the .info file."""
+        with pytest.raises(SystemExit):
+            vm_commands._validate_kernel_args(raw)
+
+    def test_too_long_is_refused(self) -> None:
+        with pytest.raises(SystemExit):
+            vm_commands._validate_kernel_args(
+                "x" * (vm_commands.KERNEL_ARGS_MAX + 1)
+            )
+
+
 # ── _warn_ignored_resource_flags ─────────────────────────
 
 
@@ -362,6 +406,38 @@ class TestWarnIgnoredResourceFlags:
             self._vm(),
             args,
             argv=["ltvm", "create", "co1-exists", "--disk-size", "500M"],
+        )
+        assert capsys.readouterr().err == ""
+
+    def test_differing_kernel_args_warn(self, capsys: Any) -> None:
+        args = argparse.Namespace(kernel_args="slub_debug=FZPU")
+        vm_commands._warn_ignored_resource_flags(
+            self._vm(),
+            args,
+            argv=[
+                "ltvm",
+                "create",
+                "co1-exists",
+                "--kernel-args=slub_debug=FZPU",
+            ],
+        )
+        err = capsys.readouterr().err
+        assert "--kernel-args: requested slub_debug=FZPU, VM has (none)" in err
+
+    def test_matching_kernel_args_are_silent(self, capsys: Any) -> None:
+        vm = self._vm()
+        vm.kernel_args = "slub_debug=FZPU"
+        args = argparse.Namespace(kernel_args="slub_debug=FZPU")
+        vm_commands._warn_ignored_resource_flags(
+            vm,
+            args,
+            argv=[
+                "ltvm",
+                "create",
+                "co1-exists",
+                "--kernel-args",
+                "slub_debug=FZPU",
+            ],
         )
         assert capsys.readouterr().err == ""
 

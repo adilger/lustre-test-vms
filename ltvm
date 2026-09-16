@@ -1247,6 +1247,17 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     _vm_create_args.add_argument(
+        "--kernel-args",
+        dest="kernel_args",
+        default=None,
+        metavar="ARGS",
+        help=(
+            "Extra kernel command-line arguments, appended after ltvm's "
+            "own on every boot (e.g. 'slub_debug=FZPU page_owner=on').  "
+            "Fixed at create time."
+        ),
+    )
+    _vm_create_args.add_argument(
         "--owner",
         "--owner-id",
         dest="owner_id",
@@ -1848,6 +1859,14 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="TYPE[:ARG]",
         help="Extra NIC applied to every node; repeat for multiple. "
         "Same types as `ltvm create --nic`.",
+    )
+    ccp.add_argument(
+        "--kernel-args",
+        dest="kernel_args",
+        default=None,
+        metavar="ARGS",
+        help="Extra kernel command-line arguments for every node, as "
+        "`ltvm create --kernel-args`",
     )
     ccp.add_argument(
         "--owner",

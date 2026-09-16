@@ -518,9 +518,38 @@ def _validate_vm_name_for_lookup(name: str) -> None:
         die(f"invalid VM name {name!r}")
 
 
-# create flags that describe VM hardware: settable only at create
-# time, because the overlay, data disks and QEMU cmdline are all
-# built from them.
+KERNEL_ARGS_MAX = 1024
+
+# Boot parameters ltvm sets and depends on: root= and console= make the
+# VM boot and log, and rc.local configures the guest from fc_*.
+_RESERVED_KERNEL_ARGS = ("root", "console")
+
+
+def _validate_kernel_args(raw: str | None) -> str:
+    """Check --kernel-args and return it stripped ("" when not given)."""
+    if not raw:
+        return ""
+    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in raw):
+        die("--kernel-args must be one line of printable characters")
+    args = raw.strip()
+    if len(args) > KERNEL_ARGS_MAX:
+        die(
+            f"--kernel-args is {len(args)} characters; the limit is "
+            f"{KERNEL_ARGS_MAX}, which keeps the whole command line "
+            f"inside the kernel's 2048 bytes"
+        )
+    for word in args.split():
+        key = word.split("=", 1)[0]
+        if key in _RESERVED_KERNEL_ARGS or key.startswith("fc_"):
+            die(
+                f"--kernel-args may not set {key}=: ltvm sets it, and "
+                f"the VM depends on ltvm's value"
+            )
+    return args
+
+
+# create flags fixed at create time: the overlay, data disks and QEMU
+# cmdline are all built from them.
 _RESOURCE_FLAGS = {
     "vcpus": "--vcpus",
     "mem": "--mem",
@@ -528,6 +557,7 @@ _RESOURCE_FLAGS = {
     "ost_disks": "--ost-disks",
     "disk_size": "--disk-size",
     "root_size": "--root-size",
+    "kernel_args": "--kernel-args",
 }
 
 # Size flags are typed as "500M" and stored as bytes, so they have to be
@@ -582,8 +612,9 @@ def _warn_ignored_resource_flags(
             )
         elif str(current) != str(requested):
             ignored.append(
-                f"{_RESOURCE_FLAGS[dest]}: requested {requested}, "
-                f"VM has {current}"
+                f"{_RESOURCE_FLAGS[dest]}: requested "
+                f"{requested if requested != '' else '(none)'}, "
+                f"VM has {current if current != '' else '(none)'}"
             )
     if not ignored:
         return
@@ -594,8 +625,8 @@ def _warn_ignored_resource_flags(
     for line in ignored:
         print(f"  {line}", file=sys.stderr)
     print(
-        f"  hardware is fixed at create time -- "
-        f"`ltvm destroy {vm.name}` first to change it",
+        f"  these are fixed at create time -- "
+        f"`ltvm destroy {vm.name}` first to change them",
         file=sys.stderr,
     )
 
@@ -714,6 +745,7 @@ def _allocate_and_persist_vm(
             # passthrough_drivers is filled in below, inside the launch
             # umbrella, after we've actually bound each BDF to vfio-pci.
             passthrough_drivers={},
+            kernel_args=getattr(args, "kernel_args", ""),
         )
 
         _create_disks(vm, image)
@@ -785,6 +817,7 @@ def _print_create_plan(
         "tap": tap,
         "mac": mac,
         "extra_nics": list(extra_nic_types),
+        "kernel_args": getattr(args, "kernel_args", ""),
         "owner_id": getattr(args, "owner_id", None),
     }
     if args.json:
@@ -813,6 +846,8 @@ def _print_create_plan(
     print(f"  tap/mac: {tap} / {mac}")
     if extra_nic_types:
         print(f"  nics:    eth0 (mgmt) + {', '.join(extra_nic_types)}")
+    if getattr(args, "kernel_args", ""):
+        print(f"  cmdline: + {args.kernel_args}")
     print(f"  owner:   {getattr(args, 'owner_id', None)}")
     print("Nothing was written.  Re-run without --dry-run to create it.")
 
@@ -1226,6 +1261,7 @@ def cmd_create(args: argparse.Namespace) -> None:
         args.owner_id = resolve_owner_id(getattr(args, "owner_id", None))
     except ValueError as e:
         die(str(e))
+    args.kernel_args = _validate_kernel_args(getattr(args, "kernel_args", None))
 
     dry_run = getattr(args, "dry_run", False)
     info_path = SOCKETS / f"{name}.info"

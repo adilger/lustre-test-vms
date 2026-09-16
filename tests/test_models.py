@@ -85,6 +85,7 @@ class TestVMInfoMetadata:
         # Pre-ROOT_SIZE .info files describe VMs whose overlay was
         # grown to the old hardcoded 8G, which is what the default is.
         assert vm.root_size == ROOT_SIZE_BYTES
+        assert vm.kernel_args == ""
 
     def test_root_size_round_trip(self, tmp_sockets: Path) -> None:
         vm = VMInfo(
@@ -92,6 +93,12 @@ class TestVMInfoMetadata:
         )
         vm.save()
         assert VMInfo.load("root-size").root_size == 20 * (1 << 30)
+
+    def test_kernel_args_round_trip(self, tmp_sockets: Path) -> None:
+        args = 'slub_debug=FZPU page_owner=on dyndbg="file foo.c +p"'
+        vm = VMInfo(name="kargs", ip="192.168.100.61", kernel_args=args)
+        vm.save()
+        assert VMInfo.load("kargs").kernel_args == args
 
     def test_update_field_adds_missing(self, tmp_sockets: Path) -> None:
         """_update_field adds a field that doesn't exist yet."""

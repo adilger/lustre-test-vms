@@ -370,6 +370,26 @@ class TestLaunchQemuCommand:
         append = h.qemu_args[h.qemu_args.index("-append") + 1]
         assert "fc_nics=tcp,tcp" in append
 
+    def test_kernel_args_come_last(self, tmp_vmdir: Path) -> None:
+        """After ltvm's own, so crashkernel= and the like take the
+        user's value."""
+        vm = _make_vm(tmp_vmdir)
+        vm.nics = ["tcp"]
+        vm.kernel_args = "crashkernel=1G kasan_multi_shot"
+        h = _LaunchHarness()
+        _run_launch(vm, h)
+        append = h.qemu_args[h.qemu_args.index("-append") + 1]
+        assert append.endswith(" fc_nics=tcp crashkernel=1G kasan_multi_shot")
+
+    def test_no_kernel_args_leaves_cmdline_as_before(
+        self, tmp_vmdir: Path
+    ) -> None:
+        vm = _make_vm(tmp_vmdir)
+        h = _LaunchHarness()
+        _run_launch(vm, h)
+        append = h.qemu_args[h.qemu_args.index("-append") + 1]
+        assert append.endswith(" fc_name=co1-single")
+
     def test_data_disks_emit_device_and_drive(self, tmp_vmdir: Path) -> None:
         """mdt+ost disks produce paired -device/-drive args, 1-indexed."""
         vm = _make_vm(tmp_vmdir, mdt_disks=1, ost_disks=2)

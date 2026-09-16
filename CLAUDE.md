@@ -432,6 +432,14 @@ mechanism.  Both are fixed at create time -- `ltvm create` against an
 existing VM warns that a differing value was ignored.  `cluster create`
 takes `--root-size` too and applies it to every node.
 
+**Kernel arguments:** `--kernel-args 'slub_debug=FZPU page_owner=on'`
+is stored in the `.info` file as `KERNEL_ARGS` and appended after
+ltvm's own parameters on every boot, so a parameter whose last
+occurrence wins (`crashkernel=`) takes the user's value.  `root=`,
+`console=` and `fc_*` are refused: the VM boots and logs through
+ltvm's values, and rc.local configures the guest from `fc_*`.  Fixed at
+create time like the disks; `cluster create` applies it to every node.
+
 **Naming:** always include the checkout number: `co<N>-<role>`.
 
 **Root:** only `update`, `cluster create` and `cluster destroy` need the

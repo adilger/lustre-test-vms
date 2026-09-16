@@ -261,6 +261,7 @@ def _create_one_node(
     disk_size: str | None = None,
     root_size: str | None = None,
     nics: list[str] | None = None,
+    kernel_args: str = "",
     owner_id: str | None = None,
 ) -> tuple[str, int, str]:
     """Create a single cluster VM via ltvm subprocess.
@@ -319,6 +320,9 @@ def _create_one_node(
     cmd += ["--ost-disks", str(node.ost_disks)]
     for nic in nics or []:
         cmd += ["--nic", nic]
+    if kernel_args:
+        # One argv word, so a value starting with '-' is not an option.
+        cmd += [f"--kernel-args={kernel_args}"]
 
     try:
         r = subprocess.run(
@@ -366,6 +370,7 @@ def _print_cluster_plan(
     disk_size: str | None,
     root_size: str | None,
     nics: list[str],
+    kernel_args: str,
     owner_id: str | None,
 ) -> None:
     """Report what `cluster create` would do, for --dry-run.
@@ -397,6 +402,8 @@ def _print_cluster_plan(
         print(f"  root:    {root_size} each")
     if nics:
         print(f"  nics:    eth0 (mgmt) + {', '.join(nics)}")
+    if kernel_args:
+        print(f"  cmdline: + {kernel_args}")
     print(f"  owner:   {owner_id}")
     print("Nothing was written.  Re-run without --dry-run to create it.")
 
@@ -405,7 +412,7 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
     cluster_name = args.name
     # Cluster name flows into filesystem paths (SOCKETS/<name>.cluster)
     # so it needs the same character whitelist as VM names.
-    from .vm_commands import _validate_vm_name
+    from .vm_commands import _validate_kernel_args, _validate_vm_name
 
     _validate_vm_name(cluster_name)
     if (SOCKETS / f"{cluster_name}.cluster").exists():
@@ -475,6 +482,7 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
     # args.nic; older call sites that don't know about --nic land here
     # with the attr unset, in which case we pass an empty list through.
     nics: list[str] = list(getattr(args, "nic", None) or [])
+    kernel_args = _validate_kernel_args(getattr(args, "kernel_args", None))
     try:
         owner_id = resolve_owner_id(getattr(args, "owner_id", None))
     except ValueError as e:
@@ -495,6 +503,7 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
             disk_size=disk_size,
             root_size=root_size,
             nics=nics,
+            kernel_args=kernel_args,
             owner_id=owner_id,
         )
         return
@@ -517,6 +526,7 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
                 disk_size,
                 root_size,
                 nics,
+                kernel_args,
                 owner_id,
             ): node
             for node in node_specs

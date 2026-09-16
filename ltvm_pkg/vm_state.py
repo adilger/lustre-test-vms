@@ -450,6 +450,10 @@ class VMInfo:
     # .info file.  Empty when no passthrough NICs are attached.
     passthrough_drivers: dict[str, str] = field(default_factory=dict)
 
+    # Extra kernel command-line arguments from --kernel-args, appended
+    # after ltvm's own on every boot.  Empty on older .info files.
+    kernel_args: str = ""
+
     @property
     def info_path(self) -> Path:
         return SOCKETS / f"{self.name}.info"
@@ -542,6 +546,7 @@ class VMInfo:
             # rebind.  Empty unless the VM has passthrough NICs.
             f"PASSTHROUGH_DRIVERS="
             f"{'|'.join(f'{bdf}={drv}' for bdf, drv in self.passthrough_drivers.items())}\n"
+            f"KERNEL_ARGS={self.kernel_args}\n"
         )
         _atomic_write(self.info_path, text)
 
@@ -717,6 +722,7 @@ class VMInfo:
             nics=nics_list,
             nic_ips=nic_ips_list,
             passthrough_drivers=pt_drivers,
+            kernel_args=vals.get("KERNEL_ARGS", ""),
         )
 
     @staticmethod
