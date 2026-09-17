@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -832,12 +833,26 @@ def cmd_target_export(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def gce_image_name(target: str, kernel_name: str) -> str:
+    """Derive a legal GCE image name from a target and kernel name.
+
+    GCE requires ``[a-z]([-a-z0-9]*[a-z0-9])?`` and at most 63
+    characters.  Kernel names carry both dots and underscores --
+    ``6.12-rhel10.2-6.12.0-211.47.1.el10_2`` -- and only the dots used
+    to be replaced, so the command this prints was rejected as given.
+    """
+    name = f"ltvm-{target}-{kernel_name}".lower()
+    name = re.sub(r"[^a-z0-9-]", "-", name)
+    name = re.sub(r"-{2,}", "-", name)
+    return name[:63].rstrip("-")
+
+
 def _print_gce_next_steps(
     asset: Path, target: str, kernel_name: str, have_ssh_key: bool
 ) -> None:
     """Print the upload/import commands, plus the one caveat that
     bites people: no guest agent means no metadata key injection."""
-    image_name = f"ltvm-{target}-{kernel_name}".lower().replace(".", "-")
+    image_name = gce_image_name(target, kernel_name)
     print()
     print("Next steps (GCE):")
     print(f"  gcloud storage cp {asset} gs://YOUR_BUCKET/")

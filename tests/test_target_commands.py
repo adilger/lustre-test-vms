@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -46,6 +47,7 @@ from ltvm_pkg.cli import (
     cmd_targets,
     cmd_validate,
 )
+from ltvm_pkg.cli.targets import gce_image_name
 from ltvm_pkg.cli.util import host_arch as _host_arch_real
 from ltvm_pkg.lustre_compat import ValidationResult
 from ltvm_pkg.target_config import LustreMode
@@ -1374,3 +1376,43 @@ class TestCmdTargetsKernelPresenceFilter:
         out = capsys.readouterr().out
         assert "5.14-rhel9.7" in out
         assert "5.14-rhel9.5" in out
+
+
+class TestGceImageName:
+    """`ltvm target export --format gce` prints a `gcloud compute images
+    create` line for the user to run.  GCE image names must match
+    ``[a-z]([-a-z0-9]*[a-z0-9])?`` and be at most 63 characters, and
+    kernel names carry both dots and underscores.  Only the dots were
+    replaced, so the printed command was rejected as given.
+    """
+
+    GCE_RE = re.compile(r"^[a-z]([-a-z0-9]*[a-z0-9])?$")
+
+    def test_underscores_are_replaced(self) -> None:
+        """The el10_2 underscore is what broke the printed command."""
+        name = gce_image_name("rocky10", "6.12-rhel10.2-6.12.0-211.47.1.el10_2")
+        assert "_" not in name
+        assert name == "ltvm-rocky10-6-12-rhel10-2-6-12-0-211-47-1-el10-2"
+        assert self.GCE_RE.match(name)
+
+    def test_dots_are_still_replaced(self) -> None:
+        name = gce_image_name("rocky9", "5.14-rhel9.7-5.14.0-611.55.1.el9_7")
+        assert "." not in name
+        assert self.GCE_RE.match(name)
+
+    def test_truncated_to_63_and_never_ends_in_a_hyphen(self) -> None:
+        """Truncation must not leave a trailing hyphen, which GCE rejects."""
+        name = gce_image_name("rocky10", "x" * 80)
+        assert len(name) <= 63
+        assert not name.endswith("-")
+        assert self.GCE_RE.match(name)
+
+    def test_trailing_separator_is_trimmed(self) -> None:
+        name = gce_image_name("ubuntu2404", "6.8.0-generic_")
+        assert not name.endswith("-")
+        assert self.GCE_RE.match(name)
+
+    def test_runs_of_separators_collapse(self) -> None:
+        name = gce_image_name("rocky10", "6.12..0__1")
+        assert "--" not in name
+        assert self.GCE_RE.match(name)
