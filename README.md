@@ -321,13 +321,16 @@ anyone is using it, and which parts. It carries:
 | the ltvm version | so we know when an old code path can go |
 | host facts | OS + version, arch, WSL or not, Python, QEMU, and RAM as a *bucket* rather than an exact number |
 | usage counts | which commands ran, against which targets, with which options, and how many of each succeeded or failed |
+| who ran them | how many runs came from a terminal (`human`), an AI coding agent (`agent`), or neither (`script`) |
 
 No hostnames, usernames, paths, VM or cluster names, Lustre tree
 identity, git branches, environment variables, command lines, or IP
 addresses. No error messages and no failure *reasons* -- only counts,
 because a reason is a string built where the paths live. Target and
 variant names outside the shipped set arrive as `other`, so a target
-you added yourself does not name your site.
+you added yourself does not name your site. An agent is recognised by
+the variables Claude Code, Codex and Gemini CLI set for the commands
+they run; only whether they are present is used, never their values.
 
 The server records a *hash* of the source address so distinct networks
 can be counted; the address itself is never stored.

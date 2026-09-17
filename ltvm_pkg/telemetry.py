@@ -34,6 +34,11 @@ names from outside the shipped target and variant lists, which are
 replaced with "other" -- a target someone added themselves identifies
 their site far better than an install ID does.
 
+Who ran each command is sent as one of three words -- human, agent,
+script -- worked out from whether a terminal is attached and whether
+an AI agent's marker variables are set.  Only their presence is read;
+no environment value is sent.
+
 Nothing here may ever fail a user's command.  Every entry point
 swallows its own exceptions, and the ltvm hook wraps the lot again.
 """
@@ -52,6 +57,7 @@ import tempfile
 import urllib.error
 import urllib.request
 import uuid
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -61,7 +67,7 @@ log = logging.getLogger("ltvm.telemetry")
 ENDPOINT = os.environ.get(
     "LTVM_TELEMETRY_URL", "https://ltvm.mulberrytree.cc/v1/checkin"
 )
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 # Every counter key is drawn from a closed set already (our own command
 # function names, the shipped target list, a fixed option list), so this
 # is a backstop against a bug rather than against a user.
@@ -69,6 +75,16 @@ MAX_COUNTER_KEYS = 64
 # Variants ship with the targets; anything else is somebody's local
 # experiment and its name is not ours to send.
 KNOWN_VARIANTS = frozenset({"base", "mofed"})
+# Set by AI coding agents in the environment of the commands they run:
+# AI_AGENT is a cross-vendor convention, the rest are Claude Code, Codex
+# and Gemini CLI.
+AGENT_ENV_VARS = (
+    "AI_AGENT",
+    "CLAUDECODE",
+    "CODEX_THREAD_ID",
+    "CODEX_CI",
+    "GEMINI_CLI",
+)
 SEND_INTERVAL = timedelta(days=7)
 # Long enough that a stalled network never delays the child past the
 # point of being noticed; short enough to cross an ocean.
@@ -441,6 +457,7 @@ def _empty_counters() -> dict[str, Any]:
         "targets": {},
         "commands": {},
         "options": {},
+        "callers": {},
     }
 
 
@@ -452,7 +469,7 @@ def _load_counters() -> dict[str, Any]:
         return out
     if not isinstance(data, dict):
         return out
-    for key in ("targets", "commands", "options"):
+    for key in ("targets", "commands", "options", "callers"):
         if isinstance(data.get(key), dict):
             out[key] = data[key]
     if isinstance(data.get("since"), str):
@@ -488,6 +505,58 @@ def _command_label(args: Any) -> str | None:
     if group and not label.startswith(group):
         label = f"{group}.{label}"
     return label[:MAX_STR_LEN]
+
+
+def _agent_env(env: Mapping[str, str]) -> bool:
+    return any(env.get(name) for name in AGENT_ENV_VARS)
+
+
+def _agent_above_sudo(depth: int = 3) -> bool:
+    """True if the sudo that started us was run by an agent.
+
+    sudo resets the environment, so `sudo ltvm` run by an agent arrives
+    without its variables; the sudo process itself still has them.
+    Only sudo processes are read: past them is the user's own shell,
+    which may sit under an agent without being driven by one.
+    """
+    pid = os.getppid()
+    for _ in range(depth):
+        proc = Path("/proc") / str(pid)
+        try:
+            if (proc / "comm").read_text().strip() != "sudo":
+                return False
+            raw = (proc / "environ").read_bytes()
+            stat = (proc / "stat").read_text()
+            # The comm field may itself contain ") ", so split at the last.
+            ppid = int(stat.rsplit(")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            return False
+        env: dict[str, str] = {}
+        for item in raw.split(b"\0"):
+            name, sep, value = item.decode(errors="replace").partition("=")
+            if sep:
+                env[name] = value
+        if _agent_env(env):
+            return True
+        pid = ppid
+    return False
+
+
+def _caller() -> str:
+    """Who most likely ran this command: "agent", "human" or "script".
+
+    Agents are checked first: Codex and Gemini CLI run commands in a
+    pty, so a terminal alone does not mean a person is at it.
+    """
+    if _agent_env(os.environ) or _agent_above_sudo():
+        return "agent"
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        try:
+            if stream is not None and stream.isatty():
+                return "human"
+        except (OSError, ValueError):
+            continue
+    return "script"
 
 
 def _bump(table: dict[str, Any], key: str, amount: int = 1) -> None:
@@ -539,6 +608,8 @@ def record(args: Any, rc: int) -> None:
         name = variant if variant in KNOWN_VARIANTS else "other"
         _bump(counters["options"], f"variant:{name}")
 
+    _bump(counters["callers"], _caller())
+
     _save_counters(counters)
 
 
@@ -566,6 +637,7 @@ def _payload() -> dict[str, Any]:
         "targets": counters["targets"],
         "commands": counters["commands"],
         "options": counters["options"],
+        "callers": counters["callers"],
     }
 
 

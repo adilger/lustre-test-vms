@@ -8,6 +8,9 @@ does and does not contain.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -189,6 +192,7 @@ def test_payload_is_a_closed_list(_home: Path) -> None:
         "targets",
         "commands",
         "options",
+        "callers",
     }
     assert set(t._payload()["host"]) == {
         "os",
@@ -556,6 +560,168 @@ def test_payload_carries_the_counters(_home: Path) -> None:
     assert payload["targets"] == {"rocky9": 1}
     assert payload["options"] == {"zfs": 1}
     assert payload["since"]
+
+
+# ---------------------------------------------------------------------------
+# Caller
+# ---------------------------------------------------------------------------
+
+
+class _Stream:
+    def __init__(self, tty: bool) -> None:
+        self._tty = tty
+
+    def isatty(self) -> bool:
+        return self._tty
+
+
+@pytest.fixture
+def _no_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The test suite itself is often run by an agent."""
+    import ltvm_pkg.telemetry as t
+
+    for name in t.AGENT_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(t, "_agent_above_sudo", lambda: False)
+
+
+def _streams(monkeypatch: pytest.MonkeyPatch, tty: bool) -> None:
+    for name in ("stdin", "stdout", "stderr"):
+        monkeypatch.setattr(sys, name, _Stream(tty))
+
+
+def test_terminal_is_a_human(
+    _home: Path, _no_agent: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import ltvm_pkg.telemetry as t
+
+    _streams(monkeypatch, True)
+    assert t._caller() == "human"
+    # `ltvm list --json | jq` at a prompt still has a terminal on stdin.
+    monkeypatch.setattr(sys, "stdout", _Stream(False))
+    assert t._caller() == "human"
+
+
+def test_no_terminal_is_a_script(
+    _home: Path, _no_agent: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import ltvm_pkg.telemetry as t
+
+    _streams(monkeypatch, False)
+    assert t._caller() == "script"
+    monkeypatch.setattr(sys, "stdin", None)
+    assert t._caller() == "script"
+
+
+def test_agent_wins_over_a_terminal(
+    _home: Path, _no_agent: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex and Gemini CLI give their commands a pty."""
+    import ltvm_pkg.telemetry as t
+
+    _streams(monkeypatch, True)
+    monkeypatch.setenv("CODEX_CI", "1")
+    assert t._caller() == "agent"
+
+
+def test_empty_agent_marker_is_not_an_agent(
+    _home: Path, _no_agent: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import ltvm_pkg.telemetry as t
+
+    _streams(monkeypatch, False)
+    monkeypatch.setenv("AI_AGENT", "")
+    assert t._caller() == "script"
+
+
+@pytest.mark.skipif(
+    not Path("/proc/self/environ").exists(), reason="needs /proc"
+)
+@pytest.mark.parametrize(
+    ("parent_name", "parent_agent", "expected"),
+    [
+        ("sudo", True, "agent"),
+        ("sudo", False, "script"),
+        ("python3", True, "script"),
+    ],
+)
+def test_agent_is_found_above_sudo(
+    _home: Path,
+    tmp_path: Path,
+    parent_name: str,
+    parent_agent: bool,
+    expected: str,
+) -> None:
+    """sudo clears the agent's variables; its own process keeps them.
+
+    A real process chain stands in for agent -> sudo -> ltvm: a parent
+    run through a link named `sudo` (so that is its comm) carries the
+    marker, and the child gets a scrubbed environment, as sudo would
+    give it.  The pytest process above them may well be under an agent
+    itself, which is what the second case checks is not looked at.
+    """
+    repo = Path(__file__).resolve().parent.parent
+    link = tmp_path / parent_name
+    link.symlink_to(sys.executable)
+    child_env = {"PATH": os.environ.get("PATH", ""), "PYTHONPATH": str(repo)}
+    parent_env = dict(child_env)
+    if parent_agent:
+        parent_env["CLAUDECODE"] = "1"
+    child = "import ltvm_pkg.telemetry as t; print(t._caller())"
+    parent = (
+        "import json, subprocess, sys;"
+        "r = subprocess.run([sys.argv[1], '-c', sys.argv[2]],"
+        " env=json.loads(sys.argv[3]), stdin=subprocess.DEVNULL,"
+        " capture_output=True, text=True);"
+        "print(r.stdout.strip() or r.stderr)"
+    )
+    out = subprocess.run(
+        [
+            str(link),
+            "-c",
+            parent,
+            sys.executable,
+            child,
+            json.dumps(child_env),
+        ],
+        env=parent_env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert out.stdout.strip() == expected, out.stdout + out.stderr
+
+
+def test_record_counts_callers(_home: Path) -> None:
+    import ltvm_pkg.telemetry as t
+
+    # As an ltvm from before the split wrote it.
+    t._save_counters(
+        {
+            "since": t._now_iso(),
+            "targets": {},
+            "commands": {"list": {"ok": 3, "fail": 0}},
+            "options": {},
+        }
+    )
+    for who in ("agent", "agent", "human"):
+        with patch.object(t, "_caller", return_value=who):
+            t.record(_Args("cmd_list"), 0)
+    assert t._load_counters()["callers"] == {"agent": 2, "human": 1}
+    assert t._payload()["callers"] == {"agent": 2, "human": 1}
+
+
+def test_caller_carries_no_environment_value(
+    _home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import ltvm_pkg.telemetry as t
+
+    monkeypatch.setenv("AI_AGENT", "ZZ-SENTINEL-AGENT-ZZ")
+    t.record(_Args("cmd_list"), 0)
+    blob = json.dumps(t._payload())
+    assert "ZZ-SENTINEL-AGENT-ZZ" not in blob
+    assert t._payload()["callers"] == {"agent": 1}
 
 
 # ---------------------------------------------------------------------------
