@@ -518,12 +518,22 @@ def _package_gce(raw: Path, output: Path) -> None:
         raise RuntimeError(
             f"GCE tarball member must be named {_GCE_DISK_NAME}, got {raw.name}"
         )
+    # tar's built-in -z is single-threaded gzip, and on a multi-GiB
+    # rootfs it is the export: 89s of a 90s run, ~46 MiB/s of input.
+    # pigz emits an ordinary gzip stream, which is all GCE requires, and
+    # uses every core -- 16x on a 28-core host for the same output size.
+    pigz = shutil.which("pigz")
+    compress = ["-I", pigz] if pigz else ["-z"]
+    if not pigz:
+        log.info("pigz not found; falling back to single-threaded gzip")
     log.info("Packing %s -> %s (oldgnu tar.gz)", raw.name, output)
     subprocess.run(
         [
             "tar",
             "--format=oldgnu",
-            "-Sczf",
+            "-S",
+            *compress,
+            "-cf",
             str(output),
             "-C",
             str(raw.parent),

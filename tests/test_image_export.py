@@ -842,9 +842,50 @@ class TestPackageGce:
         argv = run.call_args.args[0]
         assert argv[0] == "tar"
         assert "--format=oldgnu" in argv
-        assert "-Sczf" in argv
+        assert "-S" in argv
+        assert "-cf" in argv
+        # compression is pigz when available, plain gzip otherwise
+        assert ("-z" in argv) or ("-I" in argv)
         assert argv[-3:] == ["-C", str(tmp_path), "disk.raw"]
         assert str(out) in argv
+
+    def test_uses_pigz_when_available(self, tmp_path: Path) -> None:
+        """tar's built-in gzip is single-threaded and dominates the
+        export, so prefer pigz; it emits an ordinary gzip stream."""
+        import ltvm_pkg.image_export as ie
+
+        raw = tmp_path / "disk.raw"
+        raw.write_bytes(b"")
+        out = tmp_path / "img.tar.gz"
+
+        with (
+            patch.object(ie.shutil, "which", return_value="/usr/bin/pigz"),
+            patch.object(ie.subprocess, "run") as run,
+        ):
+            ie._package_gce(raw, out)
+
+        argv = run.call_args.args[0]
+        assert "-I" in argv
+        assert argv[argv.index("-I") + 1] == "/usr/bin/pigz"
+        assert "-z" not in argv
+
+    def test_falls_back_to_gzip_without_pigz(self, tmp_path: Path) -> None:
+        """A host without pigz still produces a valid tarball."""
+        import ltvm_pkg.image_export as ie
+
+        raw = tmp_path / "disk.raw"
+        raw.write_bytes(b"")
+        out = tmp_path / "img.tar.gz"
+
+        with (
+            patch.object(ie.shutil, "which", return_value=None),
+            patch.object(ie.subprocess, "run") as run,
+        ):
+            ie._package_gce(raw, out)
+
+        argv = run.call_args.args[0]
+        assert "-z" in argv
+        assert "-I" not in argv
 
     def test_rejects_wrong_member_name(self, tmp_path: Path) -> None:
         import ltvm_pkg.image_export as ie
