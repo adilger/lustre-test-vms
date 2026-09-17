@@ -33,6 +33,7 @@ def tmp_vmdir(tmp_path: Path) -> Iterator[Path]:
     overlays.mkdir()
     with (
         patch("ltvm_pkg.vm_state.VM_DIR", tmp_path),
+        patch("ltvm_pkg.vm_commands.VM_DIR", tmp_path),
         patch("ltvm_pkg.vm_state.SOCKETS", sockets),
         patch("ltvm_pkg.vm_state.OVERLAYS", overlays),
         patch("ltvm_pkg.vm_commands.SOCKETS", sockets),

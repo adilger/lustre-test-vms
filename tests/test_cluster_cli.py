@@ -93,8 +93,16 @@ def _expect_usage_error(action: str, *cargs: str) -> str:
 
 @pytest.fixture
 def tmp_sockets(tmp_path: Path) -> Path:
-    """Redirect SOCKETS so ClusterInfo round-trips on a tmp dir."""
-    with patch("ltvm_pkg.vm_state.SOCKETS", tmp_path):
+    """Redirect SOCKETS so ClusterInfo round-trips on a tmp dir.
+
+    vm_cluster holds its own binding, which the create path's "already
+    exists" checks read -- unpatched, a host with a real cluster of the
+    same name failed the dry-run tests.
+    """
+    with (
+        patch("ltvm_pkg.vm_state.SOCKETS", tmp_path),
+        patch("ltvm_pkg.vm_cluster.SOCKETS", tmp_path),
+    ):
         yield tmp_path
 
 
