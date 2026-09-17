@@ -28,29 +28,29 @@ from ltvm_pkg.target_config import TargetConfig
 GOLDEN = [
     ("rocky8", "container", None, None, "4220fc23dca0f512"),
     ("rocky8", "kernel", None, None, "2fc26cb838a21c93"),
-    ("rocky8", "image", None, None, "eb25bed2b8d736cb"),
+    ("rocky8", "image", None, None, "ea81bfc1ef51beea"),
     ("rocky9", "container", None, None, "53ff92f0c29a2c1a"),
     ("rocky9", "kernel", None, None, "54e1f16b54b180b3"),
-    ("rocky9", "image", None, None, "446a4ffd0b5a7c9d"),
+    ("rocky9", "image", None, None, "9e7c7895ccd25eb6"),
     ("rocky9-64k", "container", None, None, "2b44594e1b246688"),
     ("rocky9-64k", "kernel", None, None, "3650a25517ffed13"),
-    ("rocky9-64k", "image", None, None, "3ff60ca267f08b89"),
+    ("rocky9-64k", "image", None, None, "e290e03c0f44d169"),
     ("rocky10", "container", None, None, "a8b1c88bcad5e635"),
     ("rocky10", "kernel", None, None, "d12f8b2e1233413a"),
-    ("rocky10", "image", None, None, "e6c2f40a0588fc5e"),
+    ("rocky10", "image", None, None, "b82d23e06807921b"),
     ("mainline", "container", None, None, "3e5f339a82347536"),
     ("mainline", "kernel", None, None, "8a48d68aa12f941b"),
-    ("mainline", "image", None, None, "1a9b6b740f679ab7"),
+    ("mainline", "image", None, None, "5b3a5c8d95dbbf12"),
     ("ubuntu2404", "container", None, None, "eebd5c4d9d582ce5"),
     ("ubuntu2404", "kernel", None, None, "955f58eda24d55d4"),
-    ("ubuntu2404", "image", None, None, "484dc30417ae8725"),
+    ("ubuntu2404", "image", None, None, "e0897611d216c1bf"),
     # A variant must not perturb the base hashes above, and must differ
     # from them.
     ("rocky9", "container", None, "mofed-24", "388eb197f85522fe"),
-    ("rocky9", "image", None, "mofed-24", "c3899bb4fe5bb76a"),
+    ("rocky9", "image", None, "mofed-24", "e9b54d54b2c649d8"),
     # An explicitly named kernel.
     ("rocky9", "kernel", "5.14-rhel9.5", None, "da5d0ef496a45b25"),
-    ("rocky9", "image", "5.14-rhel9.5", None, "c40338473697a3a4"),
+    ("rocky9", "image", "5.14-rhel9.5", None, "f9957859b5dfccb0"),
 ]
 
 

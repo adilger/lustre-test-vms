@@ -59,6 +59,14 @@ krb5-workstation
 #               pjdfstest from source in build-tools.sh, so the suite
 #               is otherwise ready to run.
 perl-Test-Harness
+# lz4, lzop     sanity-compr 1007 and 1008 probe for lz4, lzop and gzip
+#               and only test the compression types whose userspace
+#               tool is present (lzop is the CLI for lzo).  Without
+#               them the run narrows to gzip, whose estimate-vs-actual
+#               margin is the worst of the four, and the tests fail on
+#               "failed > 50% of total estimates" rather than skipping.
+lz4
+lzop
 
 # Filesystem / block utilities
 nfs-utils
