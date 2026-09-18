@@ -433,6 +433,19 @@ def _invoked_parser(
         parser = subs[0].choices[name]
 
 
+def _wait_seconds(value: str) -> int:
+    """argparse type for --wait: a whole, non-negative number of seconds."""
+    try:
+        seconds = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"not a whole number of seconds: {value!r}"
+        ) from None
+    if seconds < 0:
+        raise argparse.ArgumentTypeError(f"cannot wait {seconds}s")
+    return seconds
+
+
 def build_parser() -> argparse.ArgumentParser:
     # Common flags accepted by all subcommands
     common = argparse.ArgumentParser(add_help=False)
@@ -1309,6 +1322,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Resolve and validate everything, print what would be "
         "created, and write nothing.  Needs no root.",
     )
+    sp.add_argument(
+        "--wait",
+        type=_wait_seconds,
+        default=0,
+        metavar="SECONDS",
+        help=(
+            "When the host's VM memory budget is full, wait up to SECONDS "
+            "for running VMs to free it instead of failing at once "
+            "(default: 0)"
+        ),
+    )
     sp.set_defaults(func=cmd_create)
 
     # -- VM lifecycle: destroy --
@@ -1340,6 +1364,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _start_names = sp.add_argument("names", nargs="+", help="VM name(s)")
     _start_names.completer = complete_vms  # type: ignore[attr-defined]
+    sp.add_argument(
+        "--wait",
+        type=_wait_seconds,
+        default=0,
+        metavar="SECONDS",
+        help=(
+            "When the host's VM memory budget is full, wait up to SECONDS "
+            "for running VMs to free it instead of failing at once "
+            "(default: 0)"
+        ),
+    )
     sp.set_defaults(func=cmd_vm_start)
 
     # -- VM lifecycle: stop --
@@ -1909,6 +1944,17 @@ def build_parser() -> argparse.ArgumentParser:
         dest="dry_run",
         action="store_true",
         help="Print the node plan and create nothing.  Needs no root.",
+    )
+    ccp.add_argument(
+        "--wait",
+        type=_wait_seconds,
+        default=0,
+        metavar="SECONDS",
+        help=(
+            "When the host's VM memory budget is full, each node waits up "
+            "to SECONDS for running VMs to free it instead of failing at "
+            "once (default: 0)"
+        ),
     )
     ccp.set_defaults(func=cmd_cluster_create)
 

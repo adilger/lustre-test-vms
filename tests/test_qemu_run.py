@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import fcntl
+import itertools
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -211,7 +215,7 @@ def _run_launch(vm: VMInfo, harness: _LaunchHarness) -> None:
         # Skip the host-memory budget check so command-construction
         # tests don't depend on the test host's RAM.  See
         # TestMemoryBudgetCheck for direct coverage of the check.
-        patch("ltvm_pkg.qemu_run._check_memory_for_launch"),
+        patch("ltvm_pkg.qemu_run._memory_shortfall", return_value=None),
         patch("ltvm_pkg.qemu_run.time.time", return_value=1700000000),
         patch.object(VMInfo, "update_pid"),
         patch.object(VMInfo, "update_last_boot"),
@@ -414,7 +418,7 @@ class TestLaunchQemuCommand:
                 "ltvm_pkg.qemu_run.subprocess.run", side_effect=h.subprocess_run
             ),
             patch("ltvm_pkg.qemu_run.is_running", return_value=False),
-            patch("ltvm_pkg.qemu_run._check_memory_for_launch"),
+            patch("ltvm_pkg.qemu_run._memory_shortfall", return_value=None),
         ):
             with pytest.raises(SystemExit):
                 qemu_run.launch_qemu(vm)
@@ -438,7 +442,7 @@ class TestLaunchQemuCommand:
                 "ltvm_pkg.qemu_run.subprocess.run", side_effect=h.subprocess_run
             ),
             patch("ltvm_pkg.qemu_run.is_running", return_value=False),
-            patch("ltvm_pkg.qemu_run._check_memory_for_launch"),
+            patch("ltvm_pkg.qemu_run._memory_shortfall", return_value=None),
         ):
             with pytest.raises(SystemExit):
                 qemu_run.launch_qemu(vm)
@@ -486,7 +490,7 @@ class TestLaunchQemuCommand:
             patch("ltvm_pkg.qemu_run.run", side_effect=h.run),
             patch("ltvm_pkg.qemu_run.subprocess.run", side_effect=bad_qemu),
             patch("ltvm_pkg.qemu_run.is_running", return_value=False),
-            patch("ltvm_pkg.qemu_run._check_memory_for_launch"),
+            patch("ltvm_pkg.qemu_run._memory_shortfall", return_value=None),
         ):
             with pytest.raises(SystemExit):
                 qemu_run.launch_qemu(vm)
@@ -521,7 +525,7 @@ class TestLaunchQemuCommand:
                 "ltvm_pkg.qemu_run.subprocess.run", side_effect=h.subprocess_run
             ),
             patch("ltvm_pkg.qemu_run.is_running", return_value=False),
-            patch("ltvm_pkg.qemu_run._check_memory_for_launch"),
+            patch("ltvm_pkg.qemu_run._memory_shortfall", return_value=None),
             patch("ltvm_pkg.qemu_run.time.sleep", side_effect=fake_sleep),
             patch("ltvm_pkg.qemu_run.time.time", return_value=1700000000),
             patch.object(VMInfo, "update_pid"),
@@ -606,7 +610,7 @@ class TestLaunchQemuMacos:
                 side_effect=h.subprocess_run,
             ),
             patch("ltvm_pkg.qemu_run.is_running", return_value=False),
-            patch("ltvm_pkg.qemu_run._check_memory_for_launch"),
+            patch("ltvm_pkg.qemu_run._memory_shortfall", return_value=None),
             patch("ltvm_pkg.qemu_run.time.time", return_value=1700000000),
             patch.object(VMInfo, "update_pid"),
             patch.object(VMInfo, "update_last_boot"),
@@ -670,7 +674,7 @@ class TestLaunchQemuMacos:
 
 
 class TestMemoryBudgetCheck:
-    """_check_memory_for_launch refuses launches that would exceed the host."""
+    """_memory_shortfall says when a launch would exceed the host."""
 
     def test_passes_when_budget_has_room(self, tmp_vmdir: Path) -> None:
         """Plenty of host RAM, no other VMs -> check returns silently."""
@@ -679,16 +683,16 @@ class TestMemoryBudgetCheck:
             patch("ltvm_pkg.qemu_run._read_meminfo_mb", return_value=16384),
             patch.object(VMInfo, "all_names", return_value=[]),
         ):
-            qemu_run._check_memory_for_launch(vm)  # no raise
+            assert qemu_run._memory_shortfall(vm) is None
 
     def test_skips_when_meminfo_unreadable(self, tmp_vmdir: Path) -> None:
         """If MemTotal can't be read (e.g. non-Linux test host), don't block."""
         vm = _make_vm(tmp_vmdir, mem=999999)
         with patch("ltvm_pkg.qemu_run._read_meminfo_mb", return_value=0):
-            qemu_run._check_memory_for_launch(vm)  # no raise
+            assert qemu_run._memory_shortfall(vm) is None
 
     def test_refuses_when_request_exceeds_empty_host(
-        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+        self, tmp_vmdir: Path
     ) -> None:
         """No other VMs running, but the request alone busts the budget."""
         vm = _make_vm(tmp_vmdir, name="big", mem=8192)
@@ -697,18 +701,18 @@ class TestMemoryBudgetCheck:
             patch("ltvm_pkg.qemu_run._read_meminfo_mb", return_value=8192),
             patch.object(VMInfo, "all_names", return_value=[]),
         ):
-            with pytest.raises(SystemExit):
-                qemu_run._check_memory_for_launch(vm)
-        err = capsys.readouterr().err
+            shortfall = qemu_run._memory_shortfall(vm)
+        assert shortfall is not None
+        # No amount of waiting makes room for it.
+        assert not shortfall.fits_when_idle
+        err = shortfall.message
         assert "not enough host memory" in err
         assert "big" in err
         # No running VMs -> guidance is the smaller-mem hint, not the stop list
         assert "no other VMs are running" in err
         assert "ltvm stop" not in err
 
-    def test_refuses_and_lists_running_vms(
-        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_refuses_and_lists_running_vms(self, tmp_vmdir: Path) -> None:
         """Other VMs are eating the budget; the error lists them largest-first."""
         # Build three sibling VMInfo files on disk so all_names() finds them.
         sib_a = _make_vm(tmp_vmdir, name="co1-mds", mem=4096)
@@ -731,10 +735,12 @@ class TestMemoryBudgetCheck:
             patch("ltvm_pkg.qemu_run._read_meminfo_mb", return_value=10240),
             patch("ltvm_pkg.qemu_run.is_running", side_effect=fake_is_running),
         ):
-            with pytest.raises(SystemExit):
-                qemu_run._check_memory_for_launch(new_vm)
+            shortfall = qemu_run._memory_shortfall(new_vm)
 
-        err = capsys.readouterr().err
+        assert shortfall is not None
+        # Stopping the running VMs would make room, so it is worth waiting.
+        assert shortfall.fits_when_idle
+        err = shortfall.message
         assert "not enough host memory" in err
         assert "co1-new" in err
         # Running VMs are listed
@@ -761,7 +767,7 @@ class TestMemoryBudgetCheck:
             patch("ltvm_pkg.qemu_run._read_meminfo_mb", return_value=8192),
             patch("ltvm_pkg.qemu_run.is_running", return_value=True),
         ):
-            qemu_run._check_memory_for_launch(vm)  # no raise
+            assert qemu_run._memory_shortfall(vm) is None
 
     def test_read_meminfo_parses_memtotal(self, tmp_path: Path) -> None:
         """_read_meminfo_mb returns kB-from-meminfo // 1024 for the named key."""
@@ -782,6 +788,149 @@ class TestMemoryBudgetCheck:
             assert qemu_run._read_meminfo_mb("MemTotal") == 16384
             assert qemu_run._read_meminfo_mb("MemAvailable") == 4096
             assert qemu_run._read_meminfo_mb("Bogus") == 0
+
+
+class TestLaunchWaitsForMemory:
+    """launch_qemu refuses a full host at once, or with a wait waits for it."""
+
+    FULL = qemu_run._Shortfall(
+        "not enough host memory to start VM 'co1-single'\n  requested: 2048 MiB",
+        fits_when_idle=True,
+    )
+
+    def _launch(
+        self, vm: VMInfo, answers: Any, *, wait_seconds: int = 0
+    ) -> None:
+        """Run launch_qemu against a run of budget answers, on a fake clock.
+
+        What it started and how long it slept are left in ``self.started``
+        and ``self.slept``, so a test can read them after a refusal too.
+        """
+        clock = [1000.0]
+        self.slept: list[float] = []
+        self.started: list[VMInfo] = []
+
+        def sleep(seconds: float) -> None:
+            self.slept.append(seconds)
+            clock[0] += seconds
+
+        answers = iter(answers)
+        with (
+            patch("ltvm_pkg.qemu_run.is_running", return_value=False),
+            patch("ltvm_pkg.qemu_run.is_macos", return_value=False),
+            patch(
+                "ltvm_pkg.qemu_run._memory_shortfall",
+                side_effect=lambda _vm: next(answers),
+            ),
+            patch(
+                "ltvm_pkg.qemu_run._start_qemu", side_effect=self.started.append
+            ),
+            patch(
+                "ltvm_pkg.qemu_run.time.monotonic", side_effect=lambda: clock[0]
+            ),
+            patch("ltvm_pkg.qemu_run.time.sleep", side_effect=sleep),
+        ):
+            qemu_run.launch_qemu(vm, wait_seconds=wait_seconds)
+
+    def test_a_full_host_is_refused_at_once(
+        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit):
+            self._launch(_make_vm(tmp_vmdir), [self.FULL])
+        assert self.slept == []
+        err = capsys.readouterr().err
+        assert "not enough host memory" in err
+        assert "--wait SECONDS" in err
+
+    def test_a_wait_launches_once_the_memory_frees(
+        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        vm = _make_vm(tmp_vmdir)
+        self._launch(vm, [self.FULL, self.FULL, None], wait_seconds=60)
+        assert self.started == [vm]
+        assert self.slept == [qemu_run._MEMORY_POLL_SECONDS] * 2
+        err = capsys.readouterr().err
+        assert "waiting up to 60s" in err
+        assert err.count("waiting up to") == 1
+
+    def test_a_wait_gives_up_at_its_deadline(
+        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit):
+            self._launch(
+                _make_vm(tmp_vmdir),
+                itertools.repeat(self.FULL),
+                wait_seconds=12,
+            )
+        assert self.started == []
+        # The last sleep is cut short so the give-up lands on the deadline.
+        assert self.slept == [5, 5, 2]
+        err = capsys.readouterr().err
+        assert "gave up after waiting 12s" in err
+        assert "--wait SECONDS" not in err
+
+    def test_a_vm_no_idle_host_could_hold_is_not_waited_for(
+        self, tmp_vmdir: Path
+    ) -> None:
+        hopeless = qemu_run._Shortfall(
+            "not enough host memory", fits_when_idle=False
+        )
+        with pytest.raises(SystemExit):
+            self._launch(_make_vm(tmp_vmdir), [hopeless], wait_seconds=600)
+        assert self.slept == []
+
+    def test_the_check_and_launch_hold_the_lock_and_the_wait_does_not(
+        self, tmp_vmdir: Path
+    ) -> None:
+        events: list[tuple[str, bool]] = []
+        held = [False]
+
+        @contextmanager
+        def lock() -> Iterator[None]:
+            held[0] = True
+            try:
+                yield
+            finally:
+                held[0] = False
+
+        answers = iter([self.FULL, None])
+
+        def shortfall(_vm: VMInfo) -> Any:
+            events.append(("check", held[0]))
+            return next(answers)
+
+        with (
+            patch("ltvm_pkg.qemu_run._launch_lock", lock),
+            patch("ltvm_pkg.qemu_run.is_running", return_value=False),
+            patch("ltvm_pkg.qemu_run.is_macos", return_value=False),
+            patch("ltvm_pkg.qemu_run._memory_shortfall", side_effect=shortfall),
+            patch(
+                "ltvm_pkg.qemu_run._start_qemu",
+                side_effect=lambda _vm: events.append(("start", held[0])),
+            ),
+            patch(
+                "ltvm_pkg.qemu_run.time.sleep",
+                side_effect=lambda _s: events.append(("sleep", held[0])),
+            ),
+        ):
+            qemu_run.launch_qemu(_make_vm(tmp_vmdir), wait_seconds=60)
+        assert events == [
+            ("check", True),
+            ("sleep", False),
+            ("check", True),
+            ("start", True),
+        ]
+
+    def test_the_launch_lock_is_one_file_in_the_vm_dir(
+        self, tmp_vmdir: Path
+    ) -> None:
+        path = tmp_vmdir / ".launch.lock"
+        with qemu_run._launch_lock():
+            with open(path) as other:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with open(path) as other:
+            fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
 # ── kill_qemu ────────────────────────────────────────────
@@ -982,7 +1131,7 @@ class TestLaunchQemuSocketPerms:
                 side_effect=h.subprocess_run,
             ),
             patch("ltvm_pkg.qemu_run.is_running", return_value=False),
-            patch("ltvm_pkg.qemu_run._check_memory_for_launch"),
+            patch("ltvm_pkg.qemu_run._memory_shortfall", return_value=None),
             patch("ltvm_pkg.qemu_run.time.time", return_value=1700000000),
             patch.object(VMInfo, "update_pid"),
             patch.object(VMInfo, "update_last_boot"),

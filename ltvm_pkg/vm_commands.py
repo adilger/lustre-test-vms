@@ -661,7 +661,7 @@ def _handle_existing_vm(name: str, args: argparse.Namespace) -> bool:
         else:
             print(f"{name}: already running")
         return True
-    launch_qemu(vm)
+    launch_qemu(vm, wait_seconds=getattr(args, "wait", 0))
     provision_vm_ssh(vm, SSH_TIMEOUT)
     _seed_kdump_boot(vm)
     if args.json:
@@ -1178,7 +1178,9 @@ def _chown_disks_to_sudo_user(vm: VMInfo) -> None:
     )
 
 
-def _launch_and_wait(vm: VMInfo, passthrough_bdfs: list[str]) -> None:
+def _launch_and_wait(
+    vm: VMInfo, passthrough_bdfs: list[str], wait_seconds: int = 0
+) -> None:
     """Bind any passthrough devices to vfio-pci, launch QEMU, wait
     for SSH and seed the kdump boot.  The caller wraps this in an
     except/_rollback_launch_failure block so a launch failure restores
@@ -1197,7 +1199,7 @@ def _launch_and_wait(vm: VMInfo, passthrough_bdfs: list[str]) -> None:
                 die(f"passthrough {bdf}: {e}")
             vm.passthrough_drivers[bdf] = from_drv or ""
         vm.save()
-    launch_qemu(vm)
+    launch_qemu(vm, wait_seconds=wait_seconds)
     provision_vm_ssh(vm, SSH_TIMEOUT)
     _seed_kdump_boot(vm)
 
@@ -1367,7 +1369,7 @@ def cmd_create(args: argparse.Namespace) -> None:
     # the VM running with no obvious indication.  Catch SystemExit too
     # so we can re-raise after cleanup.
     try:
-        _launch_and_wait(vm, passthrough_bdfs)
+        _launch_and_wait(vm, passthrough_bdfs, getattr(args, "wait", 0))
     except BaseException:
         _rollback_launch_failure(vm)
         raise
@@ -1416,7 +1418,7 @@ def cmd_start(args: argparse.Namespace) -> None:
         if is_running(vm):
             print(f"{name}: already running")
             continue
-        launch_qemu(vm)
+        launch_qemu(vm, wait_seconds=getattr(args, "wait", 0))
         # register_before_wait: populate /etc/hosts BEFORE waiting for
         # SSH so a wait_for_ssh timeout doesn't leave a zombie VM
         # running with no DNS entry. deploy_ssh_key is idempotent and

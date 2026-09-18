@@ -1158,6 +1158,34 @@ class TestClusterNodeDiskArgs:
             a.startswith("--kernel-args") for a in run.call_args.args[0]
         )
 
+    def test_wait_reaches_each_node_and_extends_its_budget(self) -> None:
+        from ltvm_pkg import vm_cluster
+
+        node = vm_cluster.parse_node_spec("oss:co9-oss:3")
+        with patch.object(vm_cluster.subprocess, "run") as run:
+            run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            vm_cluster._create_one_node(
+                node, vcpus=2, mem=None, wait_seconds=600
+            )
+        argv = run.call_args.args[0]
+        assert argv[argv.index("--wait") + 1] == "600"
+        # A node that waits for memory must not be killed for waiting.
+        assert run.call_args.kwargs["timeout"] == (
+            vm_cluster._node_create_timeout() + 600
+        )
+
+    def test_wait_omitted_when_not_asked_for(self) -> None:
+        from ltvm_pkg import vm_cluster
+
+        node = vm_cluster.parse_node_spec("oss:co9-oss:3")
+        with patch.object(vm_cluster.subprocess, "run") as run:
+            run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            vm_cluster._create_one_node(node, vcpus=2, mem=None)
+        assert "--wait" not in run.call_args.args[0]
+        assert (
+            run.call_args.kwargs["timeout"] == vm_cluster._node_create_timeout()
+        )
+
     def test_refused_kernel_args_create_no_node(self, tmp_path: Path) -> None:
         from ltvm_pkg import vm_cluster
 

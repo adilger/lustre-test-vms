@@ -265,6 +265,7 @@ def _create_one_node(
     nics: list[str] | None = None,
     kernel_args: str = "",
     owner_id: str | None = None,
+    wait_seconds: int = 0,
 ) -> tuple[str, int, str]:
     """Create a single cluster VM via ltvm subprocess.
 
@@ -325,10 +326,15 @@ def _create_one_node(
     if kernel_args:
         # One argv word, so a value starting with '-' is not an option.
         cmd += [f"--kernel-args={kernel_args}"]
+    if wait_seconds:
+        cmd += ["--wait", str(wait_seconds)]
 
     try:
         r = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=_node_create_timeout()
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=_node_create_timeout() + wait_seconds,
         )
     except subprocess.TimeoutExpired as e:
         # See _write_cluster_local_sh: don't propagate out of the parallel
@@ -485,6 +491,7 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
     # with the attr unset, in which case we pass an empty list through.
     nics: list[str] = list(getattr(args, "nic", None) or [])
     kernel_args = _validate_kernel_args(getattr(args, "kernel_args", None))
+    wait_seconds: int = getattr(args, "wait", 0)
     try:
         owner_id = resolve_owner_id(getattr(args, "owner_id", None))
     except ValueError as e:
@@ -530,6 +537,7 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
                 nics,
                 kernel_args,
                 owner_id,
+                wait_seconds=wait_seconds,
             ): node
             for node in node_specs
         }

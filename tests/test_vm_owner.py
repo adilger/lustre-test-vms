@@ -256,7 +256,7 @@ class TestClusterOwnerPropagation:
     def test_every_member_and_cluster_state_share_environment_owner(
         self, tmp_vm_state
     ) -> None:
-        def fake_create(node, *args):
+        def fake_create(node, *args, **kwargs):
             owner_id = args[-1]
             VMInfo(name=node.name, ip="192.0.2.20", owner_id=owner_id).save()
             return node.name, 0, ""

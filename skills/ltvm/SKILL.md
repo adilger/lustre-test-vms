@@ -64,6 +64,17 @@ VM's own OS disk (default 8G). Both are fixed at create time, so a VM
 that needs room for a debug build or a vmcore wants `--root-size 20G`
 when it is created, not after.
 
+Running guests may commit at most the host's RAM less a reserve.
+`create` and `start` refuse a VM that would go over it and list the
+guests using it; with `--wait SECONDS` they wait up to that long for
+the memory to free instead, and `cluster create --wait` gives every
+node the same wait. On a host other sessions share, where their guests
+are not yours to stop, that is how to wait for room -- not a retry loop:
+
+```bash
+ltvm create co1-single --mem 4096 --wait 1800
+```
+
 `--kernel-args` adds kernel boot parameters, also fixed at create time.
 The target kernels have no KASAN, but they build in SLUB debugging (and
 the Rocky ones page owner tracking), off until booted with them:

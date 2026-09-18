@@ -1577,6 +1577,24 @@ class TestCmdStart:
         for call in mock_prov.call_args_list:
             assert call.kwargs.get("register_before_wait") is True
 
+    def test_the_wait_reaches_every_launch(self, tmp_vmdir: Path) -> None:
+        _seed_vm_files(tmp_vmdir, "a")
+        _seed_vm_files(tmp_vmdir, "b")
+        args = argparse.Namespace(names=["a", "b"], wait=300)
+        with (
+            patch("ltvm_pkg.vm_commands.is_running", return_value=False),
+            patch("ltvm_pkg.vm_commands.launch_qemu") as mock_launch,
+            patch("ltvm_pkg.vm_commands.provision_vm_ssh"),
+            patch("ltvm_pkg.vm_commands._seed_kdump_boot"),
+        ):
+            vm_commands.cmd_start(args)
+        assert [
+            c.kwargs["wait_seconds"] for c in mock_launch.call_args_list
+        ] == [
+            300,
+            300,
+        ]
+
     def test_already_running_short_circuits(
         self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:

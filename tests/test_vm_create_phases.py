@@ -612,7 +612,7 @@ class TestCreateRollback:
 
         run_ok = MagicMock(returncode=0, stdout="", stderr="")
 
-        def seed_log_then_fail(vm: Any) -> None:
+        def seed_log_then_fail(vm: Any, **_kwargs: Any) -> None:
             vm.log_path.write_text("fake qemu stderr\n")
             raise RuntimeError("launch failed")
 

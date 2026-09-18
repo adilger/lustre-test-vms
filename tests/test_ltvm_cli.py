@@ -2253,3 +2253,27 @@ class TestUnknownArgument:
         assert f"{prog}: error: unrecognized arguments: --bogus" in err
         # Not the top-level usage, which lists subcommands and no flags.
         assert "{install," not in err
+
+
+class TestWaitFlag:
+    """--wait lets create, start and cluster create wait for host memory."""
+
+    def test_the_commands_that_launch_take_it(self) -> None:
+        p = ltvm.build_parser()
+        assert p.parse_args(["create", "co1-x", "--wait", "600"]).wait == 600
+        assert p.parse_args(["start", "co1-x", "--wait", "30"]).wait == 30
+        cluster = p.parse_args(
+            ["cluster", "create", "co2", "mgs+mds:co2-mds:1", "--wait", "90"]
+        )
+        assert cluster.wait == 90
+        assert p.parse_args(["create", "co1-x"]).wait == 0
+
+    def test_it_is_whole_non_negative_seconds(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        p = ltvm.build_parser()
+        for bad in ("-1", "1.5", "soon"):
+            with pytest.raises(SystemExit):
+                p.parse_args(["create", "co1-x", "--wait", bad])
+        err = capsys.readouterr().err
+        assert "not a whole number of seconds: 'soon'" in err

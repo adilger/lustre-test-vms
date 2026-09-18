@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+import fcntl
 import os
 import signal
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn
 
-from . import rootless
+from . import rootless, vm_state
 from .host_setup import is_macos, socket_vmnet_socket_path
-from .priv import invoking_user, sudo_run
+from .priv import ensure_lock_file, invoking_user, sudo_run
 from .vm_state import (
     BRIDGE,
     EXIT_ERROR,
@@ -73,9 +77,19 @@ def _read_meminfo_mb(key: str) -> int:
 # killer fires on the host instead of refusing the launch up front.
 _HOST_MEM_RESERVE_FLOOR_MB = 1024
 
+# How often a launch waiting for host memory looks again.
+_MEMORY_POLL_SECONDS = 5
 
-def _check_memory_for_launch(vm: VMInfo) -> None:
-    """Refuse to launch ``vm`` if the host can't accommodate its RAM.
+
+@dataclass(frozen=True)
+class _Shortfall:
+    message: str
+    # Whether stopping the running VMs would make room at all.
+    fits_when_idle: bool
+
+
+def _memory_shortfall(vm: VMInfo) -> _Shortfall | None:
+    """Why the host can't accommodate ``vm``'s RAM now, or None if it can.
 
     /proc/meminfo's MemAvailable alone is not a safe signal: QEMU
     allocates guest RAM lazily, so a 4 GiB VM that just booted may
@@ -92,7 +106,7 @@ def _check_memory_for_launch(vm: VMInfo) -> None:
     if host_total_mb <= 0:
         # Can't read /proc/meminfo (non-Linux test host?); skip the
         # check rather than block legitimate launches.
-        return
+        return None
 
     reserve_mb = max(_HOST_MEM_RESERVE_FLOOR_MB, host_total_mb // 10)
     budget_mb = host_total_mb - reserve_mb
@@ -126,7 +140,7 @@ def _check_memory_for_launch(vm: VMInfo) -> None:
 
     committed_mb = sum(m for _, m in running)
     if committed_mb + needed_mb <= budget_mb:
-        return
+        return None
 
     lines = [
         f"not enough host memory to start VM '{vm.name}'",
@@ -151,7 +165,34 @@ def _check_memory_for_launch(vm: VMInfo) -> None:
             "no other VMs are running -- try a smaller --mem value, "
             "or free host memory."
         )
-    die("\n".join(lines))
+    return _Shortfall("\n".join(lines), needed_mb <= budget_mb)
+
+
+@contextmanager
+def _launch_lock() -> Iterator[None]:
+    """Serialise the memory check with the launch it lets through.
+
+    Two launches that each find room in the same free memory would
+    otherwise both start and overcommit the host, and memory freed by a
+    stopping VM wakes every waiting ``--wait`` at once.  Held until the
+    new QEMU's pid is recorded, which is when ``is_running`` counts it.
+    """
+    path = vm_state.VM_DIR / ".launch.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        ensure_lock_file(path)
+    except (OSError, RuntimeError):
+        pass
+    try:
+        fh = open(path, "a")
+    except PermissionError:
+        fh = open(path)
+    with fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
 
 
 def is_running(vm: VMInfo) -> bool:
@@ -282,8 +323,12 @@ def _prepare_log(vm: Any) -> None:
     sudo_run(["chmod", "644", str(vm.log_path)], quiet=True)
 
 
-def launch_qemu(vm: VMInfo) -> None:
-    """Launch QEMU for an existing VM. Recreates TAP device."""
+def launch_qemu(vm: VMInfo, *, wait_seconds: int = 0) -> None:
+    """Launch QEMU for an existing VM. Recreates TAP device.
+
+    A host whose memory budget cannot take the VM is refused at once, or
+    with ``wait_seconds`` waited on for up to that long.
+    """
     if is_running(vm):
         print(f"VM '{vm.name}' is already running", file=sys.stderr)
         return
@@ -299,8 +344,35 @@ def launch_qemu(vm: VMInfo) -> None:
         except RuntimeError as e:
             die(str(e))
 
-    _check_memory_for_launch(vm)
+    deadline = time.monotonic() + wait_seconds
+    waited = False
+    while True:
+        with _launch_lock():
+            shortfall = _memory_shortfall(vm)
+            if shortfall is None:
+                _start_qemu(vm)
+                return
+        if not shortfall.fits_when_idle:
+            die(shortfall.message)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            if waited:
+                die(
+                    f"{shortfall.message}\n\ngave up after waiting {wait_seconds}s"
+                )
+            die(f"{shortfall.message}\nor wait for them: --wait SECONDS")
+        if not waited:
+            print(
+                f"{shortfall.message.splitlines()[0]}; waiting up to "
+                f"{wait_seconds}s for running VMs to free it",
+                file=sys.stderr,
+            )
+            waited = True
+        time.sleep(min(_MEMORY_POLL_SECONDS, remaining))
 
+
+def _start_qemu(vm: VMInfo) -> None:
+    """Launch QEMU for ``vm``, under the launch lock, its memory admitted."""
     # aarch64 virt uses PL011 UART (ttyAMA0); x86 uses 8250 (ttyS0)
     console = "ttyAMA0" if vm.arch == "aarch64" else "ttyS0"
 
