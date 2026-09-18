@@ -2212,3 +2212,44 @@ class TestFetchPrefersTheDefaultKernel:
         tag = "rocky9-x86_64-5.14.0-503.26.1.el9_5_lustre"
         assert _fetched_kernel_name("rocky9", tag, "x86_64") == "5.14-rhel9.5"
         assert _fetched_kernel_name("rocky9", "", "x86_64") is None
+
+
+# ---------------------------------------------------------------------------
+# Flags a user reaches for out of habit, and where a wrong one is reported
+# ---------------------------------------------------------------------------
+
+
+class TestDestroyFlags:
+    @pytest.mark.parametrize("flag", ["--force", "-f", "--yes", "-y"])
+    def test_destroy_accepts_a_confirmation_flag_it_does_not_need(
+        self, flag: str
+    ) -> None:
+        for command in (["destroy"], ["vm", "destroy"]):
+            for argv in (
+                command + ["co9-a", "co9-b", flag],
+                command + [flag, "co9-a", "co9-b"],
+            ):
+                args = ltvm.build_parser().parse_args(argv)
+                assert args.names == ["co9-a", "co9-b"], argv
+
+
+class TestUnknownArgument:
+    @pytest.mark.parametrize(
+        ("argv", "prog"),
+        [
+            (["destroy", "co9-a", "--bogus"], "ltvm destroy"),
+            (["vm", "destroy", "co9-a", "--bogus"], "ltvm destroy"),
+            (["cluster", "destroy", "co9", "--bogus"], "ltvm cluster destroy"),
+        ],
+    )
+    def test_is_reported_by_the_subcommand_that_got_it(
+        self, argv: list[str], prog: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit) as exc_info:
+            _run_main(argv, capsys)
+        assert exc_info.value.code == 2
+        err = capsys.readouterr().err
+        assert f"usage: {prog} " in err
+        assert f"{prog}: error: unrecognized arguments: --bogus" in err
+        # Not the top-level usage, which lists subcommands and no flags.
+        assert "{install," not in err

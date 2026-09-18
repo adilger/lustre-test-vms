@@ -417,6 +417,22 @@ def _alias_subcommands(src: Any, dst: Any, names: tuple[str, ...]) -> None:
         )
 
 
+def _invoked_parser(
+    parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> argparse.ArgumentParser:
+    """The deepest subcommand parser this command line reached."""
+    while True:
+        subs = [
+            a
+            for a in parser._actions
+            if isinstance(a, argparse._SubParsersAction)
+        ]
+        name = getattr(args, subs[0].dest, None) if subs else None
+        if not subs or name not in subs[0].choices:
+            return parser
+        parser = subs[0].choices[name]
+
+
 def build_parser() -> argparse.ArgumentParser:
     # Common flags accepted by all subcommands
     common = argparse.ArgumentParser(add_help=False)
@@ -1303,6 +1319,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _destroy_names = sp.add_argument("names", nargs="+", help="VM name(s)")
     _destroy_names.completer = complete_vms  # type: ignore[attr-defined]
+    # destroy never prompts, so these change nothing; accepting them saves the
+    # retry a habitual `--force` or `--yes` would otherwise cost.
+    sp.add_argument(
+        "--force",
+        "-f",
+        "--yes",
+        "-y",
+        dest="force",
+        action="store_true",
+        help="Accepted and ignored: destroy never asks for confirmation",
+    )
     sp.set_defaults(func=cmd_destroy)
 
     # -- VM lifecycle: start --
@@ -2168,9 +2195,15 @@ def main() -> int:
         argcomplete.autocomplete(parser)
     except ImportError:
         pass
-    args = parser.parse_args(
+    args, extras = parser.parse_known_args(
         _join_dash_valued_options(sys.argv[1:], _known_option_strings(parser))
     )
+    if extras:
+        # Reported by the subcommand that got them: its usage line names the
+        # flags it does take, where the top-level one names only subcommands.
+        _invoked_parser(parser, args).error(
+            "unrecognized arguments: " + " ".join(extras)
+        )
 
     level = logging.DEBUG if getattr(args, "verbose", False) else logging.INFO
     logging.basicConfig(level=level, format="%(name)s: %(message)s")
