@@ -335,6 +335,26 @@ def build_container_tag(
     return tag
 
 
+def container_variant_for(
+    name: str, variant: str, arch: str | None = None
+) -> str:
+    """The variant whose build container *variant* of *name* builds in.
+
+    Module-level for callers holding only names -- chiefly the Lustre
+    staging path, which is keyed on the build container because that is
+    what Lustre is compiled in: an image-only variant's Lustre is the
+    base's, byte for byte.  An unknown target or variant is returned
+    unchanged, so a synthetic name keeps its old behaviour.
+    """
+    if variant == DEFAULT_VARIANT:
+        return variant
+    try:
+        tc = TargetConfig(name, arch=arch, variant=variant)
+    except ValueError:
+        return variant
+    return tc.container_variant()
+
+
 def _component_label(path: Path) -> str:
     """Name a hashed file the way `build status --why` should print it.
 
@@ -683,7 +703,21 @@ class TargetConfig:
     @property
     def container_tag(self) -> str:
         """Podman tag for this target's build container (bound variant)."""
-        return build_container_tag(self.name, self.arch, self.variant_name)
+        return build_container_tag(
+            self.name, self.arch, self.container_variant()
+        )
+
+    def container_variant(self, variant: str | None = None) -> str:
+        """The variant whose build container *variant* builds in.
+
+        A variant with no container_overlay changes only the VM image, so
+        it builds in the base container and shares its tag and input hash
+        -- otherwise every lookup names a container nothing ever builds.
+        """
+        v = self.variant_name if variant is None else variant
+        if v != DEFAULT_VARIANT and self.variant(v).container_overlay is None:
+            return DEFAULT_VARIANT
+        return v
 
     @property
     def status(self) -> str:
@@ -1223,6 +1257,8 @@ class TargetConfig:
         # Kernel artifacts ignore variant (kernel is shared across
         # variants; see image_build for module injection).
         v_name = self.variant_name if variant is None else variant
+        if artifact == "container":
+            v_name = self.container_variant(v_name)
         if v_name != DEFAULT_VARIANT and artifact in ("container", "image"):
             # Not `v`: the kernel_config_overrides loop above binds that
             # name to a str, and mypy scopes a name to one type per

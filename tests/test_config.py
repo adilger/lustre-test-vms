@@ -813,10 +813,22 @@ class TestVariants:
             "declaring a variant must not change the base input hash"
         )
 
+    # A variant only has a container of its own when it declares a
+    # container_overlay -- that is the one thing that can make its build
+    # container differ from the base's.  Real variants that fork the
+    # container (MOFED) always carry one, so these fixtures do too.
+    _MOFED_CONTAINER = "rocky9/variants/mofed.container.Dockerfile"
+
     def test_variant_hash_differs_from_base(self, tmp_targets: Path) -> None:
+        self._write_overlay(tmp_targets, self._MOFED_CONTAINER, "RUN true\n")
         self._yaml_with_variant(
             tmp_targets,
-            {"mofed": {"params": {"mofed_version": "24.10-1.1.4.0"}}},
+            {
+                "mofed": {
+                    "container_overlay": self._MOFED_CONTAINER,
+                    "params": {"mofed_version": "24.10-1.1.4.0"},
+                }
+            },
         )
         tc = _make_config(tmp_targets)
         assert tc.input_hash("container") != tc.input_hash(
@@ -827,9 +839,15 @@ class TestVariants:
     def test_variant_params_change_invalidates_variant_only(
         self, tmp_targets: Path
     ) -> None:
+        self._write_overlay(tmp_targets, self._MOFED_CONTAINER, "RUN true\n")
         self._yaml_with_variant(
             tmp_targets,
-            {"mofed": {"params": {"mofed_version": "24.10-1.1.4.0"}}},
+            {
+                "mofed": {
+                    "container_overlay": self._MOFED_CONTAINER,
+                    "params": {"mofed_version": "24.10-1.1.4.0"},
+                }
+            },
         )
         tc = _make_config(tmp_targets)
         h_variant_before = tc.input_hash("container", variant="mofed")
@@ -837,11 +855,67 @@ class TestVariants:
 
         self._yaml_with_variant(
             tmp_targets,
-            {"mofed": {"params": {"mofed_version": "23.10-2.1.3.0"}}},
+            {
+                "mofed": {
+                    "container_overlay": self._MOFED_CONTAINER,
+                    "params": {"mofed_version": "23.10-2.1.3.0"},
+                }
+            },
         )
         tc2 = _make_config(tmp_targets)
         assert tc2.input_hash("container") == h_base
         assert tc2.input_hash("container", variant="mofed") != h_variant_before
+
+    def test_image_only_variant_shares_base_container(
+        self, tmp_targets: Path
+    ) -> None:
+        """No container_overlay: nothing can make its build container
+        differ, so it must not name one of its own.  Naming one sent
+        `build image --variant` looking for a container that nothing
+        ever builds ("build container ltvm-build-rocky9-gce not found").
+        """
+        self._write_overlay(
+            tmp_targets, "rocky9/variants/gce.image.Dockerfile", "RUN true\n"
+        )
+        self._yaml_with_variant(
+            tmp_targets,
+            {"gce": {"image_overlay": "rocky9/variants/gce.image.Dockerfile"}},
+        )
+        base = _make_config(tmp_targets)
+        gce = _make_config(tmp_targets, variant="gce")
+
+        assert gce.container_tag == base.container_tag
+        assert gce.container_variant() == "base"
+        assert gce.input_hash("container") == base.input_hash("container")
+        # ...but the image it produces is its own
+        assert gce.input_hash("image") != base.input_hash("image")
+
+    def test_image_only_variant_params_touch_image_only(
+        self, tmp_targets: Path
+    ) -> None:
+        """Params reach a container build only as build args to its
+        container_overlay.  Without one they change the image alone."""
+        self._write_overlay(
+            tmp_targets, "rocky9/variants/gce.image.Dockerfile", "RUN true\n"
+        )
+
+        def hashes(ver: str) -> tuple[str, str]:
+            self._yaml_with_variant(
+                tmp_targets,
+                {
+                    "gce": {
+                        "image_overlay": "rocky9/variants/gce.image.Dockerfile",
+                        "params": {"agent": ver},
+                    }
+                },
+            )
+            tc = _make_config(tmp_targets, variant="gce")
+            return tc.input_hash("container"), tc.input_hash("image")
+
+        c1, i1 = hashes("1")
+        c2, i2 = hashes("2")
+        assert c1 == c2
+        assert i1 != i2
 
     def test_base_change_invalidates_variant(self, tmp_targets: Path) -> None:
         """Bumping a base input must cascade to the variant."""

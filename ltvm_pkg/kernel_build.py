@@ -873,9 +873,12 @@ def _ensure_container_image(target_config: TargetConfig) -> str:
 
     v = target_config.variant(variant)
     overlay = v.container_overlay
-    if overlay is None or not overlay.exists():
+    if overlay is None:
+        # Image-only variant: it builds in the base container.
+        return base_tag
+    if not overlay.exists():
         raise RuntimeError(
-            f"variant {variant!r}: container_overlay is required but "
+            f"variant {variant!r}: container_overlay is declared but "
             f"missing (checked {overlay})"
         )
     variant_tag = target_config.container_tag  # variant-suffixed

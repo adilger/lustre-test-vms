@@ -168,10 +168,13 @@ def staging_path(
     clobber each other's userland.
 
     ``variant`` gets a *sibling* directory (``<kernel>__<variant>``)
-    for non-base variants so a MOFED-linked Lustre build (``ko2iblnd``
-    against ``mlx_compat``) can coexist with a base build for the same
-    kernel instead of clobbering it.  Base-variant paths are left
-    unchanged to match the pre-variant layout.
+    for variants with their own build container, so a MOFED-linked
+    Lustre build (``ko2iblnd`` against ``mlx_compat``) can coexist with
+    a base build for the same kernel instead of clobbering it.  A
+    variant that only changes the VM image builds in the base container,
+    so its Lustre is the base's and it shares the base directory.
+    Base-variant paths are left unchanged to match the pre-variant
+    layout.
 
     The variant directory used to nest *inside* the base one, which
     defeated the coexistence it was there for: the build script clears
@@ -181,7 +184,10 @@ def staging_path(
     lustre_status had to filter variant subdirs back out of the base
     tree's .ko count.  As siblings, neither can reach the other.
     """
+    from .target_config import container_variant_for
+
     base = Path(lustre_tree) / ".ltvm-staging" / target / arch / kernel
+    variant = container_variant_for(target, variant, arch)
     if variant == "base":
         return base
     return base.parent / f"{kernel}__{variant}"

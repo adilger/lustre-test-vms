@@ -40,7 +40,9 @@ def _write_targets_yaml(targets_dir: Path, data: dict | None = None) -> None:
     )
 
 
-def _make_config(tmp_targets: Path, arch: str | None = None) -> TargetConfig:
+def _make_config(
+    tmp_targets: Path, arch: str | None = None, variant: str | None = None
+) -> TargetConfig:
     """Instantiate a TargetConfig with patched paths."""
     import ltvm_pkg.target_config as cfg
 
@@ -53,7 +55,9 @@ def _make_config(tmp_targets: Path, arch: str | None = None) -> TargetConfig:
             tmp_targets / "targets" / "targets.yaml",
         ),
     ):
-        return cfg.TargetConfig("rocky9", arch=arch)
+        if variant is None:
+            return cfg.TargetConfig("rocky9", arch=arch)
+        return cfg.TargetConfig("rocky9", arch=arch, variant=variant)
 
 
 def _make_kernel_outputs(tc, kernel: str | None = None) -> Path:
