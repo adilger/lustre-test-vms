@@ -1502,3 +1502,22 @@ class TestBuildAllTiming:
         assert "snapshot took" not in out
         assert "kernel took" in out
         assert "image took" in out
+
+
+def test_image_only_variant_shares_base_lustre_staging(tmp_path: Path) -> None:
+    """Lustre is compiled in the build container, so the staging dir is
+    keyed on it.  rocky10's gce variant only changes the VM image and
+    builds in the base container: looking for a `<kernel>__gce` staging
+    dir sent `build image --variant gce` hunting for a Lustre build that
+    no command produces.  MOFED, which has a container of its own, keeps
+    its sibling directory.
+    """
+    from ltvm_pkg.lustre_build import staging_path
+
+    def at(target: str, variant: str) -> Path:
+        return staging_path(
+            tmp_path, target, arch="x86_64", kernel="K", variant=variant
+        )
+
+    assert at("rocky10", "gce") == at("rocky10", "base")
+    assert at("rocky9", "mofed-24").name == "K__mofed-24"

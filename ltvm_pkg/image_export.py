@@ -456,6 +456,17 @@ def _harden_gce_ssh(dst_mnt: Path) -> None:
     )
 
 
+# The binary google-guest-agent-manager.service runs.  Present only in
+# images built from a variant that installs the agent (rocky10's `gce`).
+_GUEST_AGENT_BIN = "usr/bin/google_guest_agent_manager"
+
+
+def _has_guest_agent(dst_mnt: Path) -> bool:
+    """Whether the image carries the Google guest agent, which is what
+    lets GCE install SSH keys from project and instance metadata."""
+    return (dst_mnt / _GUEST_AGENT_BIN).exists()
+
+
 def _apply_gce_guest_config(dst_mnt: Path) -> None:
     """Make the rootfs usable as a GCE custom image.
 
@@ -551,6 +562,7 @@ def export_image(
     force: bool = False,
     disk_size_gb: int | None = None,
     ssh_key: Path | None = None,
+    info: dict[str, object] | None = None,
 ) -> Path:
     """Build a self-contained bootable disk for the given target.
 
@@ -567,6 +579,9 @@ def export_image(
                 as the rootfs needs.
         ssh_key: public key file to append to root's authorized_keys
                 inside the image.
+        info: if given, filled with facts about the exported image --
+                for gce, ``guest_agent``: whether GCE can inject SSH keys
+                from metadata.
 
     Returns:
         The final written path.
@@ -726,6 +741,13 @@ def export_image(
         if image_format == "gce":
             _apply_gce_guest_config(dst_mnt)
             _harden_gce_ssh(dst_mnt)
+            agent = _has_guest_agent(dst_mnt)
+            log.info(
+                "Google guest agent: %s",
+                "present" if agent else "absent (no metadata SSH keys)",
+            )
+            if info is not None:
+                info["guest_agent"] = agent
         if ssh_key is not None:
             _inject_ssh_key(dst_mnt, ssh_key)
 

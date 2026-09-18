@@ -803,6 +803,7 @@ def cmd_target_export(args: argparse.Namespace) -> int:
         out = tc.image_output_dir(kernel) / f"{stem}-{kernel_name}.{ext}"
 
     ssh_key = getattr(args, "ssh_key", None)
+    info: dict[str, object] = {}
     try:
         result = export_image(
             tc,
@@ -812,6 +813,7 @@ def cmd_target_export(args: argparse.Namespace) -> int:
             force=args.force,
             disk_size_gb=getattr(args, "disk_size_gb", None),
             ssh_key=Path(ssh_key).expanduser() if ssh_key else None,
+            info=info,
         )
     except FileExistsError as e:
         return _error(str(e), use_json, hint="Re-run with --force to overwrite")
@@ -825,10 +827,16 @@ def cmd_target_export(args: argparse.Namespace) -> int:
         "path": str(result),
         "size_mb": round(result.stat().st_size / (1024 * 1024), 1),
     }
+    if fmt == "gce":
+        payload["guest_agent"] = bool(info.get("guest_agent", False))
     _output(payload, use_json)
     if fmt == "gce" and not use_json:
         _print_gce_next_steps(
-            result, tc.name, kernel_name, have_ssh_key=ssh_key is not None
+            result,
+            tc.name,
+            kernel_name,
+            have_ssh_key=ssh_key is not None,
+            has_agent=bool(info.get("guest_agent", False)),
         )
     return EXIT_OK
 
@@ -848,10 +856,15 @@ def gce_image_name(target: str, kernel_name: str) -> str:
 
 
 def _print_gce_next_steps(
-    asset: Path, target: str, kernel_name: str, have_ssh_key: bool
+    asset: Path,
+    target: str,
+    kernel_name: str,
+    have_ssh_key: bool,
+    has_agent: bool = False,
 ) -> None:
-    """Print the upload/import commands, plus the one caveat that
-    bites people: no guest agent means no metadata key injection."""
+    """Print the upload/import commands, then how you will get in: via
+    the guest agent's metadata keys if the image has it, else only a
+    key baked in with --ssh-key."""
     image_name = gce_image_name(target, kernel_name)
     print()
     print("Next steps (GCE):")
@@ -866,7 +879,16 @@ def _print_gce_next_steps(
         "  root over to GCE.  Key-based root SSH and the serial console "
         "still work."
     )
-    if not have_ssh_key:
+    if has_agent:
+        print()
+        print(
+            "  The Google guest agent is installed, so `gcloud compute ssh "
+            "<instance>`\n"
+            "  works: it puts your key in metadata, and the agent creates "
+            "your\n"
+            "  account and makes it a sudoer.  Log in as yourself, not root."
+        )
+    elif not have_ssh_key:
         print()
         print(
             "  WARNING: no --ssh-key was given, and this image ships no "
@@ -874,8 +896,9 @@ def _print_gce_next_steps(
             "  agent, so GCE cannot inject your keys either -- with "
             "password auth\n"
             "  off you will only reach it over the serial console.  "
-            "Re-export with\n"
-            "  --ssh-key ~/.ssh/id_ed25519.pub to bake one in."
+            "Build with\n"
+            "  --variant gce for the agent, or re-export with\n"
+            "  --ssh-key ~/.ssh/id_ed25519.pub to bake a key in."
         )
 
 

@@ -1278,3 +1278,22 @@ class TestGceSshHardening:
         idx = src.splitlines().index(harden[0])
         preceding = "\n".join(src.splitlines()[max(0, idx - 4) : idx])
         assert 'image_format == "gce"' in preceding, preceding
+
+
+class TestGuestAgentDetection:
+    """The export decides what to tell the user from whether the image
+    really carries the agent, not from which variant was asked for."""
+
+    def test_present_when_manager_binary_exists(self, tmp_path: Path) -> None:
+        import ltvm_pkg.image_export as ie
+
+        b = tmp_path / "usr" / "bin" / "google_guest_agent_manager"
+        b.parent.mkdir(parents=True)
+        b.write_bytes(b"")
+        assert ie._has_guest_agent(tmp_path)
+
+    def test_absent_in_a_base_rootfs(self, tmp_path: Path) -> None:
+        import ltvm_pkg.image_export as ie
+
+        (tmp_path / "usr" / "bin").mkdir(parents=True)
+        assert not ie._has_guest_agent(tmp_path)

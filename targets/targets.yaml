@@ -145,6 +145,11 @@ targets:
       mode: server_ldiskfs
     os_name: rocky
     os_version: '10.1'
+    variants:
+      # GCE guest agent, for images exported with --format gce.  Image
+      # only: the kernel and Lustre are the base target's, unchanged.
+      gce:
+        image_overlay: rocky10/variants/gce.image.Dockerfile
     srpm_url: https://dl.rockylinux.org/pub/rocky/10/BaseOS/source/tree/Packages/k
     status: working
     zfs:

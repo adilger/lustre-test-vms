@@ -1416,3 +1416,35 @@ class TestGceImageName:
         name = gce_image_name("rocky10", "6.12..0__1")
         assert "--" not in name
         assert self.GCE_RE.match(name)
+
+
+class TestGceNextStepsAdvice:
+    """What the export tells you about getting in must match the image."""
+
+    def _out(self, capsys: pytest.CaptureFixture[str], **kw: bool) -> str:
+        from ltvm_pkg.cli.targets import _print_gce_next_steps
+
+        _print_gce_next_steps(
+            Path("/tmp/gce-x.tar.gz"), "rocky10", "6.12-rhel10.2", **kw
+        )
+        return capsys.readouterr().out
+
+    def test_agent_means_gcloud_ssh_and_no_warning(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        out = self._out(capsys, have_ssh_key=False, has_agent=True)
+        assert "gcloud compute ssh" in out
+        assert "WARNING" not in out
+
+    def test_no_agent_no_key_warns_and_points_at_the_variant(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        out = self._out(capsys, have_ssh_key=False, has_agent=False)
+        assert "WARNING" in out
+        assert "--variant gce" in out
+
+    def test_no_agent_with_key_is_quiet(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        out = self._out(capsys, have_ssh_key=True, has_agent=False)
+        assert "WARNING" not in out
