@@ -92,6 +92,9 @@ def deploy_to_vm(
     if not staging.is_dir():
         raise RuntimeError(f"Staging directory not found: {staging}")
 
+    if not userspace_only:
+        unload_lustre(vm)
+
     # ZFS first: osd_zfs.ko depends on zfs.ko, and the single depmod
     # below only resolves that if both are already on disk.
     if zfs_staging is not None and not userspace_only:
@@ -142,6 +145,74 @@ def deploy_to_vm(
 
     if fstype is not None:
         configure_fstype(vm.ip, fstype, os_family=os_family)
+
+
+# A client, or a target mounted with -t lustre, is type lustre; newer
+# test frameworks mount their targets as lustre_tgt.
+_LUSTRE_MOUNTS = (
+    'awk \'$3 == "lustre" || $3 == "lustre_tgt" {print $2}\' /proc/mounts'
+)
+
+# libcfs is under every Lustre and LNet module; ldiskfs is the one that
+# is not, and lustre_rmmod unloads it too.
+_UNLOAD_SCRIPT = (
+    "[ -d /sys/module/libcfs ] || [ -d /sys/module/ldiskfs ] || exit 0; "
+    # Reverse mount order, so a client goes before the targets under it.
+    # Forced, as llmountcleanup.sh does: on a cluster the servers may be
+    # going down on another node at the same time.
+    f"mnts=$({_LUSTRE_MOUNTS} | tac); "
+    'for m in $mnts; do umount -f "$m"; done; '
+    "lustre_rmmod >/dev/null 2>&1; "
+    'echo "unmounted" $mnts; '
+    f'echo "mounted" $({_LUSTRE_MOUNTS}); '
+    'echo "loaded" $(cd /sys/module && ls -d libcfs ldiskfs 2>/dev/null)'
+)
+
+
+def unload_lustre(vm: VMInfo) -> None:
+    """Unmount every Lustre filesystem on the VM and unload its modules.
+
+    New modules on disk change nothing while the old ones stay loaded,
+    so skipping this leaves the VM running the previous build -- however
+    its targets were mounted, by llmount.sh or by hand.  Raises when
+    anything is still mounted or loaded afterwards.
+    """
+    restart = f"ltvm stop {vm.name} && ltvm start {vm.name}"
+    try:
+        r = run_ssh(vm.ip, _UNLOAD_SCRIPT, timeout=180)
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(
+            f"unmounting Lustre on {vm.name} timed out after {e.timeout}s; "
+            f"restart it ({restart}) and deploy again"
+        )
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"could not unload Lustre on {vm.name} (rc={r.returncode}): "
+            f"{(r.stderr or '').strip()}"
+        )
+    state: dict[str, list[str]] = {}
+    for line in (r.stdout or "").splitlines():
+        key, _, rest = line.partition(" ")
+        state[key] = rest.split()
+    if not state:
+        return
+    mounted, loaded = state.get("mounted", []), state.get("loaded", [])
+    if mounted or loaded:
+        still = (
+            f"still mounted on {', '.join(mounted)}"
+            if mounted
+            else f"still loaded ({', '.join(loaded)})"
+        )
+        raise RuntimeError(
+            f"Lustre on {vm.name} is {still} after umount and lustre_rmmod, "
+            f"so the new modules would not take effect.  Restart it "
+            f"({restart}) and deploy again."
+        )
+    unmounted = state.get("unmounted", [])
+    detail = f"; unmounted {', '.join(unmounted)}" if unmounted else ""
+    print(
+        f"  Unloaded the running Lustre on {vm.name}{detail}", file=sys.stderr
+    )
 
 
 def verify_deployed_modules(vm: VMInfo, staging: Path) -> None:

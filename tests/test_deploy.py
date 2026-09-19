@@ -254,9 +254,14 @@ class TestDeployToVm:
     def test_tar_failure_raises(self, staging: Path) -> None:
         """subprocess nonzero rc surfaces as RuntimeError with output."""
         vm = _make_vm()
-        with patch(
-            "ltvm_pkg.deploy.subprocess.run",
-            return_value=MagicMock(returncode=2, stdout="", stderr="tar: boom"),
+        with (
+            patch(
+                "ltvm_pkg.deploy.subprocess.run",
+                return_value=MagicMock(
+                    returncode=2, stdout="", stderr="tar: boom"
+                ),
+            ),
+            patch("ltvm_pkg.deploy.run_ssh", return_value=_ok()),
         ):
             with pytest.raises(RuntimeError, match="tar deploy failed"):
                 deploy.deploy_to_vm(vm, staging)
@@ -374,7 +379,78 @@ class TestDeployToVm:
             patch("ltvm_pkg.deploy.run_ssh", side_effect=fake_ssh),
         ):
             deploy.deploy_to_vm(vm, staging)
-        assert ssh_cmds == ["depmod -a && ldconfig"]
+        assert ssh_cmds == [deploy._UNLOAD_SCRIPT, "depmod -a && ldconfig"]
+
+    def test_a_lustre_that_will_not_unload_stops_the_deploy(
+        self, staging: Path
+    ) -> None:
+        """Nothing is streamed: the new files would not take effect."""
+        vm = _make_vm()
+        with (
+            patch("ltvm_pkg.deploy.subprocess.run") as tar,
+            patch(
+                "ltvm_pkg.deploy.run_ssh",
+                return_value=_ok(stdout="unmounted\nmounted\nloaded libcfs\n"),
+            ),
+        ):
+            with pytest.raises(RuntimeError, match="still loaded"):
+                deploy.deploy_to_vm(vm, staging)
+        tar.assert_not_called()
+
+
+class TestUnloadLustre:
+    """deploy unloads whatever Lustre is running, however it was mounted."""
+
+    def _unload(self, **ssh: Any) -> None:
+        with patch("ltvm_pkg.deploy.run_ssh", **ssh):
+            deploy.unload_lustre(_make_vm(name="co9-a"))
+
+    def test_nothing_loaded_is_quiet(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        self._unload(return_value=_ok(stdout=""))
+        assert capsys.readouterr().err == ""
+
+    def test_says_what_it_took_down(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        self._unload(
+            return_value=_ok(
+                stdout="unmounted /mnt/lustre /mnt/ost /mnt/mdt\n"
+                "mounted\nloaded\n"
+            )
+        )
+        err = capsys.readouterr().err
+        assert "Unloaded the running Lustre on co9-a" in err
+        assert "/mnt/lustre, /mnt/ost, /mnt/mdt" in err
+
+    def test_still_mounted_is_an_error(self) -> None:
+        with pytest.raises(RuntimeError) as exc:
+            self._unload(
+                return_value=_ok(
+                    stdout="unmounted /mnt/mdt\nmounted /mnt/mdt\n"
+                    "loaded libcfs\n"
+                )
+            )
+        assert "still mounted on /mnt/mdt" in str(exc.value)
+        assert "ltvm stop co9-a && ltvm start co9-a" in str(exc.value)
+
+    def test_timeout_is_an_error(self) -> None:
+        with pytest.raises(RuntimeError, match="timed out"):
+            self._unload(side_effect=subprocess.TimeoutExpired("ssh", 180))
+
+    def test_unreachable_vm_is_an_error(self) -> None:
+        with pytest.raises(RuntimeError, match="rc=255"):
+            self._unload(return_value=_fail(rc=255, stderr="no route"))
+
+    def test_script_unmounts_by_hand_mounts_too(self) -> None:
+        """Every lustre mount in /proc/mounts, not llmount.sh's own."""
+        script = deploy._UNLOAD_SCRIPT
+        assert "/proc/mounts" in script
+        # llmount.sh's own targets, which a filter on "lustre" alone missed.
+        assert '"lustre_tgt"' in script
+        assert "llmountcleanup" not in script
+        assert script.index("umount -f") < script.index("lustre_rmmod")
 
 
 # ── lustre_mount_vm ──────────────────────────────────────

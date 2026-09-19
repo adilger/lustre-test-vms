@@ -99,7 +99,11 @@ later session which tree the VM belongs to.
 
 `deploy-lustre` is idempotent: it unmounts and unloads first, builds the
 tree if the staging is stale, pushes it over ssh, and mounts with
-`--mount`. **The tree flag is never positional** -- `--lustre-tree <path>`
+`--mount`. The unload takes down every Lustre mount on the VM, however it
+was made -- llmount.sh or a hand `mount -t lustre` -- and if Lustre will
+not unload, the deploy stops before copying anything rather than leave
+the old modules running; `cluster deploy` does the same on every node.
+`--userspace-only` leaves a running Lustre alone. **The tree flag is never positional** -- `--lustre-tree <path>`
 (`cluster deploy` also accepts `--build`).
 
 Do not use host `make` or `fullbuild` to produce something for a VM. The
