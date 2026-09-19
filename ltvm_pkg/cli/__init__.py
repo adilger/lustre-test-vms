@@ -98,8 +98,11 @@ from ltvm_pkg.cli.cluster import (  # noqa: E402
     cmd_cluster_destroy,
     cmd_cluster_exec,
     cmd_cluster_list,
+    cmd_cluster_llmount,
     cmd_cluster_ssh,
+    cmd_cluster_start,
     cmd_cluster_status,
+    cmd_cluster_stop,
 )
 from ltvm_pkg.cli.deploy import (  # noqa: E402
     cmd_deploy,
@@ -225,8 +228,11 @@ __all__ = [
     "cmd_cluster_destroy",
     "cmd_cluster_exec",
     "cmd_cluster_list",
+    "cmd_cluster_llmount",
     "cmd_cluster_ssh",
+    "cmd_cluster_start",
     "cmd_cluster_status",
+    "cmd_cluster_stop",
     "cmd_completion",
     "cmd_console_log",
     "cmd_crash_collect",

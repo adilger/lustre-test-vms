@@ -164,6 +164,7 @@ class TestCmdClusterDispatch:
             "cmd_cluster_exec",
             "cmd_cluster_list",
             "cmd_cluster_ssh",
+            "cmd_cluster_llmount",
         ]
         with contextlib.ExitStack() as stack:
             mocks = {
@@ -214,6 +215,18 @@ class TestCmdClusterDispatch:
         rc = cmd_cluster(_ns("ssh", "co1", "oss"))
         assert rc == EXIT_OK
         self._assert_only("cmd_cluster_ssh")
+
+    def test_llmount_routes_to_llmount(self) -> None:
+        rc = cmd_cluster(_ns("llmount", "co1"))
+        assert rc == EXIT_OK
+        self._assert_only("cmd_cluster_llmount")
+        assert not self.mocks["cmd_cluster_llmount"].call_args.args[0].cleanup
+
+    def test_llumount_routes_to_llmount_with_cleanup(self) -> None:
+        rc = cmd_cluster(_ns("llumount", "co1"))
+        assert rc == EXIT_OK
+        self._assert_only("cmd_cluster_llmount")
+        assert self.mocks["cmd_cluster_llmount"].call_args.args[0].cleanup
 
     def test_unknown_action_is_rejected_by_the_parser(self) -> None:
         err = _expect_usage_error("bogus")
@@ -268,6 +281,28 @@ class TestClusterCreateArgs:
         assert ns.root_size is None
         assert ns.nic == []
         assert ns.kernel_args is None
+        assert ns.kernel is None
+        assert ns.variant == "base"
+        assert ns.wait == 0
+
+    def test_kernel_variant_and_wait_reach_the_handler(self) -> None:
+        cmd_cluster(
+            _ns(
+                "create",
+                "co1",
+                "--kernel",
+                "5.14-rhel9.3",
+                "--variant",
+                "mofed",
+                "--wait",
+                "600",
+                "mgs+mds:co1-mds:1",
+            )
+        )
+        ns = self._captured_ns()
+        assert ns.kernel == "5.14-rhel9.3"
+        assert ns.variant == "mofed"
+        assert ns.wait == 600
 
     def test_vcpus_and_mem_flags_parsed(self) -> None:
         cmd_cluster(
@@ -635,6 +670,88 @@ class TestClusterDestroyArgs:
             _expect_usage_error("destroy")
         assert not m.called
 
+    @pytest.mark.parametrize("flag", ["--force", "-f", "--yes", "-y"])
+    def test_accepts_a_confirmation_flag_it_does_not_need(
+        self, as_root: Any, flag: str
+    ) -> None:
+        """As `ltvm destroy` does: destroy never prompts, and a habitual
+        --force must not cost a retry."""
+        for argv in (("co2", flag), (flag, "co2")):
+            with patch("ltvm_pkg.vm_cluster.cmd_cluster_destroy") as m:
+                rc = cmd_cluster(_ns("destroy", *argv))
+            assert rc == EXIT_OK
+            assert m.call_args.args[0].names == ["co2"]
+
+    def test_takes_several_names(self, as_root: Any) -> None:
+        with patch("ltvm_pkg.vm_cluster.cmd_cluster_destroy") as m:
+            cmd_cluster(_ns("destroy", "co2", "co3"))
+        assert m.call_args.args[0].names == ["co2", "co3"]
+
+
+class TestClusterStartStop:
+    """start/stop hand the cluster's nodes to `ltvm start` / `ltvm stop`."""
+
+    def test_start_passes_every_node_and_wait(self, tmp_sockets: Path) -> None:
+        _save_cluster(name="co1")
+        with patch("ltvm_pkg.cli.vm.cmd_vm_start", return_value=0) as start:
+            rc = cmd_cluster(_ns("start", "co1", "--wait", "60"))
+        assert rc == EXIT_OK
+        ns = start.call_args.args[0]
+        assert ns.names == ["co1-mds", "co1-oss"]
+        assert ns.wait == 60
+
+    def test_stop_passes_the_nodes_of_every_cluster_named(
+        self, tmp_sockets: Path
+    ) -> None:
+        _save_cluster(name="co1")
+        _save_cluster(
+            name="co2",
+            nodes=[
+                {"name": "co2-a", "roles": ["mgs", "mds"], "ip": "10.0.0.2"}
+            ],
+        )
+        with patch("ltvm_pkg.cli.vm.cmd_vm_stop", return_value=0) as stop:
+            rc = cmd_cluster(_ns("stop", "co1", "co2"))
+        assert rc == EXIT_OK
+        assert stop.call_args.args[0].names == ["co1-mds", "co1-oss", "co2-a"]
+
+    @pytest.mark.parametrize("action", ["start", "stop"])
+    def test_missing_cluster_is_an_error_and_touches_nothing(
+        self, tmp_sockets: Path, action: str
+    ) -> None:
+        with (
+            patch("ltvm_pkg.cli.vm.cmd_vm_start") as start,
+            patch("ltvm_pkg.cli.vm.cmd_vm_stop") as stop,
+        ):
+            rc = cmd_cluster(_ns(action, "phantom"))
+        assert rc == EXIT_ERROR
+        assert not start.called and not stop.called
+
+    def test_start_rc_is_the_single_vm_starts(self, tmp_sockets: Path) -> None:
+        _save_cluster(name="co1")
+        with patch("ltvm_pkg.cli.vm.cmd_vm_start", return_value=4):
+            assert cmd_cluster(_ns("start", "co1")) == 4
+
+
+class TestClusterLlmountArgs:
+    def test_server_only_with_cleanup_is_refused(self) -> None:
+        with patch("ltvm_pkg.vm_cluster.cmd_cluster_llmount") as m:
+            rc = cmd_cluster(
+                _ns("llmount", "co1", "--cleanup", "--server-only")
+            )
+        assert rc == EXIT_ERROR
+        assert not m.called
+
+    def test_flags_reach_the_handler(self) -> None:
+        with patch("ltvm_pkg.vm_cluster.cmd_cluster_llmount") as m:
+            cmd_cluster(
+                _ns("llmount", "co1", "--server-only", "--timeout", "9")
+            )
+        ns = m.call_args.args[0]
+        assert ns.name == "co1"
+        assert ns.server_only and not ns.cleanup
+        assert ns.timeout == 9
+
 
 class TestClusterListArgs:
     def test_list_takes_no_args(self) -> None:
@@ -880,48 +997,211 @@ class TestCmdClusterStatusBehavior:
 
 
 class TestCmdClusterDestroyBehavior:
-    """cmd_cluster_destroy removes the .cluster file and processes nodes."""
+    """cmd_cluster_destroy removes the .cluster file and its nodes."""
 
-    def test_missing_cluster_raises(self, tmp_sockets: Path) -> None:
-        with pytest.raises(ClusterNotFound):
-            vm_cluster.cmd_cluster_destroy(argparse.Namespace(name="phantom"))
-
-    def test_destroy_unlinks_cluster_file(
+    def test_missing_cluster_is_not_an_error(
         self, tmp_sockets: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """As `ltvm destroy` treats a missing VM, so a cleanup script can
+        run it unconditionally."""
+        with patch("ltvm_pkg.vm_commands.cmd_destroy") as destroy:
+            vm_cluster.cmd_cluster_destroy(
+                argparse.Namespace(names=["phantom"])
+            )
+        assert not destroy.called
+        assert "destroy: cluster phantom not found" in capsys.readouterr().out
+
+    def test_nodes_go_through_the_single_vm_destroy(
+        self, tmp_sockets: Path
     ) -> None:
         _save_cluster(name="co1")
         cluster_file = tmp_sockets / "co1.cluster"
         assert cluster_file.exists()
-
-        with (
-            patch.object(vm_cluster, "VMInfo") as mock_vm,
-            patch.object(vm_cluster, "kill_qemu"),
-            patch.object(vm_cluster, "unregister_ssh_name"),
-            patch("ltvm_pkg.vm_commands._destroy_vm_artifacts") as mock_destroy,
-        ):
-            mock_vm.load.return_value = MagicMock()
-            vm_cluster.cmd_cluster_destroy(argparse.Namespace(name="co1"))
-
+        with patch("ltvm_pkg.vm_commands.cmd_destroy") as destroy:
+            vm_cluster.cmd_cluster_destroy(argparse.Namespace(names=["co1"]))
+        assert destroy.call_args.args[0].names == ["co1-mds", "co1-oss"]
         assert not cluster_file.exists()
-        # Per-node destroy invoked once per node (2 nodes).
-        assert mock_destroy.call_count == 2
 
-    def test_destroy_continues_when_vm_already_gone(
+    def test_several_clusters_and_a_missing_one(
         self, tmp_sockets: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """A missing VM during destroy must not abort cluster cleanup."""
+        _save_cluster(name="co1")
+        _save_cluster(
+            name="co2",
+            nodes=[
+                {"name": "co2-a", "roles": ["mgs", "mds"], "ip": "10.0.0.2"}
+            ],
+        )
+        with patch("ltvm_pkg.vm_commands.cmd_destroy") as destroy:
+            vm_cluster.cmd_cluster_destroy(
+                argparse.Namespace(names=["co1", "gone", "co2"])
+            )
+        assert [c.args[0].names for c in destroy.call_args_list] == [
+            ["co1-mds", "co1-oss"],
+            ["co2-a"],
+        ]
+        assert "cluster gone not found" in capsys.readouterr().out
+        assert not (tmp_sockets / "co1.cluster").exists()
+        assert not (tmp_sockets / "co2.cluster").exists()
+
+    def test_a_node_already_gone_does_not_stop_the_rest(
+        self, tmp_sockets: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Real single-VM destroy, with neither node's VM on disk."""
         _save_cluster(name="co1")
         with (
-            patch.object(vm_cluster, "VMInfo") as mock_vm,
-            patch.object(vm_cluster, "kill_qemu"),
-            patch.object(vm_cluster, "unregister_ssh_name"),
-            patch("ltvm_pkg.vm_commands._destroy_vm_artifacts") as mock_destroy,
+            patch("ltvm_pkg.vm_commands.SOCKETS", tmp_sockets),
+            patch("ltvm_pkg.vm_commands._destroy_vm_artifacts") as artifacts,
+            patch("ltvm_pkg.vm_commands.unregister_ssh_name"),
         ):
-            mock_vm.load.side_effect = VMNotFound("any")
-            vm_cluster.cmd_cluster_destroy(argparse.Namespace(name="co1"))
-        # Even with VMNotFound, _destroy_vm_artifacts still called per node.
-        assert mock_destroy.call_count == 2
+            vm_cluster.cmd_cluster_destroy(argparse.Namespace(names=["co1"]))
+        assert artifacts.call_count == 2
+        out = capsys.readouterr().out
+        assert "destroy: co1-mds not found" in out
+        assert "destroy: co1-oss not found" in out
         assert not (tmp_sockets / "co1.cluster").exists()
+
+
+class TestCmdClusterLlmountBehavior:
+    """llmount runs from the first client, and only on a running cluster."""
+
+    _IPS = {"co1-mds": "10.0.0.10", "co1-cli": "10.0.0.12", "co1-cli2": "x"}
+
+    @pytest.fixture(autouse=True)
+    def _cluster(self, tmp_sockets: Path) -> Any:
+        _save_cluster(
+            name="co1",
+            nodes=[
+                {"name": "co1-mds", "roles": ["mgs", "mds", "oss"]},
+                {"name": "co1-cli", "roles": ["client"]},
+                {"name": "co1-cli2", "roles": ["client"]},
+            ],
+        )
+        with (
+            patch.object(
+                vm_cluster.VMInfo,
+                "load",
+                side_effect=lambda n: MagicMock(
+                    ip=self._IPS[n], os_id="rocky9"
+                ),
+            ),
+            patch.object(vm_cluster, "run") as run,
+        ):
+            run.return_value = MagicMock(returncode=0)
+            self.run = run
+            yield
+
+    def _ns(self, **kw: Any) -> argparse.Namespace:
+        base = {"name": "co1", "cleanup": False, "server_only": False}
+        base.update(kw)
+        return argparse.Namespace(timeout=300, **base)
+
+    def _remote(self) -> str:
+        return self.run.call_args.args[0][-1]
+
+    def test_refuses_while_a_node_is_down(self) -> None:
+        from ltvm_pkg.vm_state import EXIT_UNREACHABLE
+
+        state = {"co1-mds": "up", "co1-cli": "down", "co1-cli2": "up"}
+        with patch.object(vm_cluster, "_node_state", side_effect=state.get):
+            with pytest.raises(SystemExit) as exc:
+                vm_cluster.cmd_cluster_llmount(self._ns())
+        assert exc.value.code == EXIT_UNREACHABLE
+        assert not self.run.called
+
+    @pytest.mark.parametrize(
+        ("kw", "want", "unwanted"),
+        [
+            ({}, "bash llmount.sh", "--server-only"),
+            ({"server_only": True}, "bash llmount.sh --server-only", "cleanup"),
+            (
+                {"cleanup": True},
+                "llmountcleanup.sh && lustre_rmmod",
+                "--server",
+            ),
+        ],
+    )
+    def test_runs_the_script_on_the_mgs(
+        self, kw: dict[str, bool], want: str, unwanted: str
+    ) -> None:
+        with patch.object(vm_cluster, "_node_state", return_value="up"):
+            vm_cluster.cmd_cluster_llmount(self._ns(**kw))
+        assert want in self._remote()
+        assert unwanted not in self._remote()
+
+    @pytest.mark.parametrize("cleanup", [False, True])
+    def test_runs_on_the_first_client(self, cleanup: bool) -> None:
+        """Mount and cleanup must run where local.sh expects: from any other
+        node, llmount.sh mounts a client there that cleanup never removes."""
+        with patch.object(vm_cluster, "_node_state", return_value="up"):
+            vm_cluster.cmd_cluster_llmount(self._ns(cleanup=cleanup))
+        assert "root@10.0.0.12" in self.run.call_args.args[0]
+
+    def test_runs_on_the_mgs_when_there_is_no_client(
+        self, tmp_sockets: Path
+    ) -> None:
+        (tmp_sockets / "co1.cluster").unlink()
+        _save_cluster(
+            name="co1", nodes=[{"name": "co1-mds", "roles": ["mgs", "mds"]}]
+        )
+        with patch.object(vm_cluster, "_node_state", return_value="up"):
+            vm_cluster.cmd_cluster_llmount(self._ns())
+        assert "root@10.0.0.10" in self.run.call_args.args[0]
+
+    def test_script_failure_is_an_error(self) -> None:
+        self.run.return_value = MagicMock(returncode=5)
+        with patch.object(vm_cluster, "_node_state", return_value="up"):
+            with pytest.raises(SystemExit) as exc:
+                vm_cluster.cmd_cluster_llmount(self._ns())
+        assert exc.value.code == EXIT_ERROR
+
+
+class TestCmdClusterDeployBuildsForTheNodes:
+    """The Lustre build targets the kernel and variant the nodes boot."""
+
+    def test_kernel_and_variant_reach_the_build(self, tmp_path: Path) -> None:
+        class _TC:
+            os_family = "rhel"
+
+        cluster = ClusterInfo(
+            name="co3", nodes=[{"name": "co3-mds", "roles": ["mgs", "mds"]}]
+        )
+        node = MagicMock(
+            os_id="rocky9",
+            arch="x86_64",
+            variant="mofed",
+            kernel="/a/kernels/5.14-rhel9.3-5.14.0-362.18.1.el9_3/vmlinuz",
+            ip="10.0.0.5",
+        )
+        with (
+            patch.object(ClusterInfo, "load", return_value=cluster),
+            patch.object(vm_cluster.VMInfo, "load", return_value=node),
+            patch.object(vm_cluster, "_validate_lustre_source"),
+            patch("ltvm_pkg.target_config.TargetConfig", return_value=_TC()),
+            patch.object(vm_cluster.subprocess, "run") as run,
+            patch.object(
+                vm_cluster,
+                "_deploy_one_node",
+                side_effect=lambda name, *a, **k: (name, 0, ""),
+            ),
+            patch.object(vm_cluster, "generate_local_sh", return_value=""),
+            patch.object(
+                vm_cluster,
+                "_write_cluster_local_sh",
+                side_effect=lambda name, *a, **k: (name, 0, ""),
+            ),
+        ):
+            run.return_value = MagicMock(returncode=0)
+            vm_cluster.cmd_cluster_deploy(
+                argparse.Namespace(
+                    name="co3", lustre_source=str(tmp_path), mount=False
+                )
+            )
+        build = run.call_args_list[0].args[0]
+        assert build[build.index("--kernel") + 1] == (
+            "5.14-rhel9.3-5.14.0-362.18.1.el9_3"
+        )
+        assert build[build.index("--variant") + 1] == "mofed"
 
 
 class TestCmdClusterExecBehavior:
@@ -1102,6 +1382,26 @@ class TestCmdClusterSshBehavior:
 
 class TestClusterNodeDiskArgs:
     """`cluster create` must state disk counts explicitly."""
+
+    def test_kernel_and_variant_reach_each_node(self) -> None:
+        node = vm_cluster.parse_node_spec("oss:co9-oss:3")
+        with patch.object(vm_cluster.subprocess, "run") as run:
+            run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            vm_cluster._create_one_node(
+                node, vcpus=2, mem=None, kernel="5.14-rhel9.3", variant="mofed"
+            )
+        argv = run.call_args.args[0]
+        assert argv[argv.index("--kernel") + 1] == "5.14-rhel9.3"
+        assert argv[argv.index("--variant") + 1] == "mofed"
+
+    def test_defaults_leave_kernel_and_variant_to_create(self) -> None:
+        node = vm_cluster.parse_node_spec("oss:co9-oss:3")
+        with patch.object(vm_cluster.subprocess, "run") as run:
+            run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            vm_cluster._create_one_node(node, vcpus=2, mem=None)
+        argv = run.call_args.args[0]
+        assert "--kernel" not in argv
+        assert "--variant" not in argv
 
     def test_zero_counts_are_passed_not_omitted(self) -> None:
         """An oss-only node must not inherit `ltvm create`'s defaults.
@@ -1286,6 +1586,26 @@ class TestClusterCreateDryRun:
         assert "co7-mds" in out and "1 MDT" in out
         assert "co7-oss" in out and "3 OST" in out
         assert "Nothing was written" in out
+
+    def test_plan_names_the_kernel_and_variant(
+        self, tmp_sockets: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with patch.object(vm_cluster, "_create_one_node"):
+            cmd_cluster(
+                _ns(
+                    "create",
+                    "co7",
+                    "mgs+mds:co7-mds:1",
+                    "--kernel",
+                    "5.14-rhel9.3",
+                    "--variant",
+                    "mofed",
+                    "--dry-run",
+                )
+            )
+        out = capsys.readouterr().out
+        assert "kernel:  5.14-rhel9.3" in out
+        assert "variant=mofed" in out
 
     def test_does_not_require_root(self, tmp_sockets: Path) -> None:
         """A dry run only reads, so demanding a password for it would

@@ -201,19 +201,31 @@ it costs nothing.
 ## Clusters
 
 ```bash
-ltvm cluster create co2 mgs+mds:co2-mds:1 oss:co2-oss:3
+ltvm cluster create co2 mgs+mds:co2-mds:1 oss:co2-oss:3 client:co2-client
 ltvm cluster deploy co2 --build <tree> --mount
 ltvm cluster exec co2 oss 'lctl dl'        # every node with the role
 ltvm cluster exec co2 co2-oss2 'lctl dl'   # one node by name
 ltvm cluster status co2
+ltvm cluster llumount co2                  # llmount to mount it again
+ltvm cluster stop co2                      # start to bring it back
 ltvm cluster destroy co2
 ```
 
 `cluster create` and `cluster destroy` need `sudo` in front on a host
 that is not set up for unprivileged VMs (see Root).
 
+The cluster commands take the single-VM flags that carry over.
+`cluster create --kernel <name>` boots every node on that kernel, and
+`cluster deploy` then builds Lustre for it -- the way to run an interop
+cluster on a kernel an older branch still supports:
+
 ```bash
+ltvm cluster create co2 --kernel 5.14-rhel9.3 mgs+mds:co2-mds:1 oss:co2-oss:2
 ```
+
+`--variant` and `--wait` work the same way. `cluster start` takes
+`--wait`, and `cluster destroy` accepts `--force`/`--yes` though it
+never prompts.
 
 `cluster exec <role>` fans out and exits non-zero if any node did.
 `cluster ssh <role>` is interactive and lands on the first node.
@@ -310,7 +322,7 @@ and deploy.
 `--json` is accepted everywhere but only some commands have anything
 structured to say.  The ones worth parsing: `list`, `build status`,
 `target show/validate/fetch/delete`, `create`, `deploy-lustre`, and
-`cluster status/list/exec`.  `cluster create/destroy/deploy` stream
+`cluster status/list/exec`.  The other `cluster` actions stream
 human progress under `--json` too, and `cluster ssh` execs an
 interactive session, so don't parse those.
 

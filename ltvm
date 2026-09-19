@@ -193,8 +193,11 @@ try:
         cmd_cluster_destroy,
         cmd_cluster_exec,
         cmd_cluster_list,
+        cmd_cluster_llmount,
         cmd_cluster_ssh,
+        cmd_cluster_start,
         cmd_cluster_status,
+        cmd_cluster_stop,
         cmd_completion,
         cmd_console_log,
         cmd_crash_collect,
@@ -431,6 +434,23 @@ def _invoked_parser(
         if not subs or name not in subs[0].choices:
             return parser
         parser = subs[0].choices[name]
+
+
+def _add_ignored_confirm_flags(sp: argparse.ArgumentParser) -> None:
+    """--force/--yes for a destroy, which never prompts.
+
+    They change nothing; accepting them saves the retry a habitual
+    `--force` or `--yes` would otherwise cost.
+    """
+    sp.add_argument(
+        "--force",
+        "-f",
+        "--yes",
+        "-y",
+        dest="force",
+        action="store_true",
+        help="Accepted and ignored: destroy never asks for confirmation",
+    )
 
 
 def _wait_seconds(value: str) -> int:
@@ -1344,17 +1364,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _destroy_names = sp.add_argument("names", nargs="+", help="VM name(s)")
     _destroy_names.completer = complete_vms  # type: ignore[attr-defined]
-    # destroy never prompts, so these change nothing; accepting them saves the
-    # retry a habitual `--force` or `--yes` would otherwise cost.
-    sp.add_argument(
-        "--force",
-        "-f",
-        "--yes",
-        "-y",
-        dest="force",
-        action="store_true",
-        help="Accepted and ignored: destroy never asks for confirmation",
-    )
+    _add_ignored_confirm_flags(sp)
     sp.set_defaults(func=cmd_destroy)
 
     # -- VM lifecycle: start --
@@ -1895,6 +1905,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _ccp_target.completer = complete_targets  # type: ignore[attr-defined]
     ccp.add_argument(
+        "--kernel",
+        default=None,
+        help="Kernel every node boots (default: the target's); "
+        "`cluster deploy` then builds Lustre for it",
+    )
+    ccp.add_argument(
+        "--variant",
+        default="base",
+        help="Target variant every node boots (default: base). E.g. 'mofed'.",
+    )
+    ccp.add_argument(
         "--vcpus", type=int, default=2, help="vCPUs per node (default: 2)"
     )
     ccp.add_argument(
@@ -1962,11 +1983,45 @@ def build_parser() -> argparse.ArgumentParser:
     cdp = cluster_sub.add_parser(
         "destroy",
         parents=[common],
-        help="Destroy a cluster and every node in it (needs root)",
+        help="Destroy one or more clusters and every node in them (needs root)",
     )
-    _cdp_name = cdp.add_argument("name", help="Cluster name")
-    _cdp_name.completer = complete_clusters  # type: ignore[attr-defined]
+    _cdp_names = cdp.add_argument("names", nargs="+", help="Cluster name(s)")
+    _cdp_names.completer = complete_clusters  # type: ignore[attr-defined]
+    _add_ignored_confirm_flags(cdp)
     cdp.set_defaults(func=cmd_cluster_destroy)
+
+    cstartp = cluster_sub.add_parser(
+        "start",
+        parents=[common],
+        help="Start every node of one or more stopped clusters",
+    )
+    _cstartp_names = cstartp.add_argument(
+        "names", nargs="+", help="Cluster name(s)"
+    )
+    _cstartp_names.completer = complete_clusters  # type: ignore[attr-defined]
+    cstartp.add_argument(
+        "--wait",
+        type=_wait_seconds,
+        default=0,
+        metavar="SECONDS",
+        help=(
+            "When the host's VM memory budget is full, wait up to SECONDS "
+            "for running VMs to free it instead of failing at once "
+            "(default: 0)"
+        ),
+    )
+    cstartp.set_defaults(func=cmd_cluster_start)
+
+    cstopp = cluster_sub.add_parser(
+        "stop",
+        parents=[common],
+        help="Stop every node of one or more running clusters",
+    )
+    _cstopp_names = cstopp.add_argument(
+        "names", nargs="+", help="Cluster name(s)"
+    )
+    _cstopp_names.completer = complete_clusters  # type: ignore[attr-defined]
+    cstopp.set_defaults(func=cmd_cluster_stop)
 
     cdpl = cluster_sub.add_parser(
         "deploy",
@@ -2018,6 +2073,50 @@ def build_parser() -> argparse.ArgumentParser:
         help="OSD backend written into the cluster's cfg/local.sh",
     )
     cdpl.set_defaults(func=cmd_cluster_deploy)
+
+    cllm = cluster_sub.add_parser(
+        "llmount",
+        parents=[common],
+        help="Mount (or unmount) Lustre across a cluster",
+    )
+    _cllm_name = cllm.add_argument("name", help="Cluster name")
+    _cllm_name.completer = complete_clusters  # type: ignore[attr-defined]
+    cllm.add_argument(
+        "--cleanup",
+        action="store_true",
+        help="Unmount: run llmountcleanup.sh && lustre_rmmod "
+        "(same as `ltvm cluster llumount`)",
+    )
+    cllm.add_argument(
+        "--server-only",
+        dest="server_only",
+        action="store_true",
+        help="Mount the servers only, no clients",
+    )
+    cllm.add_argument(
+        "--timeout",
+        type=int,
+        default=300,
+        help="Command timeout in seconds (default: 300)",
+    )
+    cllm.set_defaults(func=cmd_cluster_llmount)
+
+    cllum = cluster_sub.add_parser(
+        "llumount",
+        parents=[common],
+        help="Unmount Lustre across a cluster (same as llmount --cleanup)",
+    )
+    _cllum_name = cllum.add_argument("name", help="Cluster name")
+    _cllum_name.completer = complete_clusters  # type: ignore[attr-defined]
+    cllum.add_argument(
+        "--timeout",
+        type=int,
+        default=300,
+        help="Command timeout in seconds (default: 300)",
+    )
+    cllum.set_defaults(
+        func=cmd_cluster_llmount, cleanup=True, server_only=False
+    )
 
     csp = cluster_sub.add_parser(
         "status", parents=[common], help="Show a cluster's nodes and state"

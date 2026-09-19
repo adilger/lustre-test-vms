@@ -1,5 +1,5 @@
-"""CLI layer for ``ltvm cluster``: create / destroy / deploy / status /
-exec / list / ssh over ``ltvm_pkg.vm_cluster``.
+"""CLI layer for ``ltvm cluster``: create / destroy / start / stop /
+deploy / llmount / status / exec / list / ssh over ``ltvm_pkg.vm_cluster``.
 
 One thin wrapper per action, each reaching the matching vm_cluster
 handler through a ``_call`` adapter that turns SystemExit into an int
@@ -136,26 +136,58 @@ def cmd_cluster_create(args: argparse.Namespace) -> int:
             # vm_cluster reads the target as `os`.
             os=pos_target if pos_target is not None else flag_target,
             arch=args.arch,
+            kernel=args.kernel,
+            variant=args.variant,
             disk_size=args.disk_size,
             root_size=args.root_size,
             nic=list(args.nic or []),
             kernel_args=args.kernel_args,
             owner_id=args.owner_id,
             dry_run=args.dry_run,
+            wait=args.wait,
         ),
         use_json,
     )
 
 
 def cmd_cluster_destroy(args: argparse.Namespace) -> int:
-    """Destroy a cluster and every node in it."""
+    """Destroy clusters and every node in them."""
     use_json = args.json
     err = _cluster_privileges(use_json, drop=False)
     if err is not None:
         return err
     return _call(
-        _handler("cmd_cluster_destroy"), _qemu_ns(name=args.name), use_json
+        _handler("cmd_cluster_destroy"), _qemu_ns(names=args.names), use_json
     )
+
+
+def _node_names(names: list[str]) -> list[str]:
+    """Every node of the named clusters, in cluster order."""
+    from ltvm_pkg.vm_state import ClusterInfo
+
+    return [n.name for c in names for n in ClusterInfo.load(c).get_nodes()]
+
+
+def cmd_cluster_start(args: argparse.Namespace) -> int:
+    """Start every node of the named clusters, as `ltvm start` would."""
+    try:
+        nodes = _node_names(args.names)
+    except (ClusterNotFound, RuntimeError) as e:
+        return _error(str(e), args.json)
+    from ltvm_pkg.cli.vm import cmd_vm_start
+
+    return cmd_vm_start(_qemu_ns(names=nodes, wait=args.wait, json=args.json))
+
+
+def cmd_cluster_stop(args: argparse.Namespace) -> int:
+    """Stop every node of the named clusters, as `ltvm stop` would."""
+    try:
+        nodes = _node_names(args.names)
+    except (ClusterNotFound, RuntimeError) as e:
+        return _error(str(e), args.json)
+    from ltvm_pkg.cli.vm import cmd_vm_stop
+
+    return cmd_vm_stop(_qemu_ns(names=nodes, json=args.json))
 
 
 def cmd_cluster_deploy(args: argparse.Namespace) -> int:
@@ -172,6 +204,23 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> int:
             zfs=args.zfs,
             zfs_version=args.zfs_version,
             fstype=args.fstype,
+        ),
+        use_json,
+    )
+
+
+def cmd_cluster_llmount(args: argparse.Namespace) -> int:
+    """Mount or unmount Lustre across a cluster."""
+    use_json = args.json
+    if args.cleanup and args.server_only:
+        return _error("--server-only has no effect with --cleanup", use_json)
+    return _call(
+        _handler("cmd_cluster_llmount"),
+        _qemu_ns(
+            name=args.name,
+            cleanup=args.cleanup,
+            server_only=args.server_only,
+            timeout=args.timeout,
         ),
         use_json,
     )

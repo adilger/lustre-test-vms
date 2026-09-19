@@ -185,13 +185,26 @@ Off a TTY (CI, a pipe, a log file) it prints one line per asset instead.
 
 ```
 ltvm cluster create <name> [TARGET] <roles:vm[:disks]> ...   (needs root)
-ltvm cluster destroy <name>     Destroy the cluster and every node (root)
+ltvm cluster destroy <name>...  Destroy clusters and every node (root)
+ltvm cluster start <name>...    Start every node, as `ltvm start` does
+ltvm cluster stop <name>...     Stop every node
 ltvm cluster deploy <name>      Build + deploy Lustre to every node
+ltvm cluster llmount <name>     Mount Lustre across the cluster
+ltvm cluster llumount <name>    Unmount it and unload the modules
 ltvm cluster status <name>      Nodes and their state
 ltvm cluster exec <name> <role> <cmd>...   Run on every node with that role
 ltvm cluster ssh  <name> <role> Interactive ssh to one node
 ltvm cluster list               List all clusters
 ```
+
+A cluster command takes its single-VM counterpart's flags where they
+mean the same thing: `cluster create` takes `--kernel`, `--variant` and
+`--wait` as `create` does, and applies them to every node; `cluster
+start` takes `--wait`; `cluster destroy`, like `destroy`, never prompts
+and accepts `--force`/`--yes` anyway. `cluster llmount` and `cluster
+deploy --mount` run llmount.sh from the first client node (the MGS node
+when there is no client), the node the generated `cfg/local.sh` treats
+as local.
 
 `vm` sub-actions:
 

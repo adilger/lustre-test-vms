@@ -251,6 +251,12 @@ ltvm cluster deploy co2 \
 # Run a command on all OSS nodes
 ltvm cluster exec co2 oss 'lctl dl'
 
+# Unmount, stop, and bring it back later
+ltvm cluster llumount co2
+ltvm cluster stop co2
+ltvm cluster start co2
+ltvm cluster llmount co2
+
 # Tear down
 ltvm cluster destroy co2
 ```

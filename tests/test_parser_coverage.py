@@ -223,7 +223,11 @@ class TestVmSubcommandsDispatch:
 _CLUSTER_ARGS: dict[str, list[str]] = {
     "create": ["co1", "mgs+mds:co1-mds:1"],
     "destroy": ["co1"],
+    "start": ["co1"],
+    "stop": ["co1"],
     "deploy": ["co1"],
+    "llmount": ["co1"],
+    "llumount": ["co1"],
     "status": ["co1"],
     "exec": ["co1", "oss", "lctl dl"],
     "list": [],
@@ -261,6 +265,11 @@ class TestClusterActionsDispatch:
             patch("ltvm_pkg.vm_cluster.cmd_cluster_exec"),
             patch("ltvm_pkg.vm_cluster.cmd_cluster_list"),
             patch("ltvm_pkg.vm_cluster.cmd_cluster_ssh"),
+            patch("ltvm_pkg.vm_cluster.cmd_cluster_llmount"),
+            # start/stop hand the nodes to `ltvm start/stop` itself.
+            patch("ltvm_pkg.cli.cluster._node_names", return_value=["co1-a"]),
+            patch("ltvm_pkg.cli.vm.cmd_vm_start", return_value=0),
+            patch("ltvm_pkg.cli.vm.cmd_vm_stop", return_value=0),
         ]
         with contextlib.ExitStack() as stack:
             for p in _cluster_patches:

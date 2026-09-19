@@ -12,12 +12,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
-from .qemu_run import die, is_running, kill_qemu, run
-from .vm_net import SSH_OPTS, run_ssh, sshpass_ssh_argv, unregister_ssh_name
+from .qemu_run import die, is_running, run
+from .vm_net import SSH_OPTS, run_ssh, sshpass_ssh_argv
 from .vm_owner import resolve_owner_id
 from .vm_state import (
     DEFAULT_TARGET,
     EXIT_TIMEOUT,
+    EXIT_UNREACHABLE,
     ROOT_PASSWORD,
     SOCKETS,
     SSH_TIMEOUT,
@@ -263,6 +264,8 @@ def _create_one_node(
     kernel_args: str = "",
     owner_id: str | None = None,
     wait_seconds: int = 0,
+    kernel: str | None = None,
+    variant: str = "base",
 ) -> tuple[str, int, str]:
     """Create a single cluster VM via ltvm subprocess.
 
@@ -300,6 +303,10 @@ def _create_one_node(
         cmd += ["--target", os_target]
     if arch:
         cmd += ["--arch", arch]
+    if kernel:
+        cmd += ["--kernel", kernel]
+    if variant != "base":
+        cmd += ["--variant", variant]
     if disk_size:
         cmd += ["--disk-size", disk_size]
     if root_size:
@@ -372,6 +379,8 @@ def _print_cluster_plan(
     mem: int | None,
     os_target: str | None,
     arch: str | None,
+    kernel: str | None,
+    variant: str,
     disk_size: str | None,
     root_size: str | None,
     nics: list[str],
@@ -399,7 +408,9 @@ def _print_cluster_plan(
     mem_desc = f"{mem} MB" if mem is not None else "target default"
     arch_desc = f" arch={arch}" if arch else ""
     print("Applied to every node:")
-    print(f"  target:  {os_target or 'default'}{arch_desc}")
+    variant_desc = f" variant={variant}" if variant != "base" else ""
+    print(f"  target:  {os_target or 'default'}{arch_desc}{variant_desc}")
+    print(f"  kernel:  {kernel or 'target default'}")
     print(f"  cpu/mem: {vcpus} vcpus, {mem_desc}")
     if disk_size:
         print(f"  disk:    {disk_size} each")
@@ -480,6 +491,8 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
     mem = args.mem
     os_target = getattr(args, "os", None)
     arch = getattr(args, "arch", None)
+    kernel = getattr(args, "kernel", None)
+    variant = getattr(args, "variant", None) or "base"
     disk_size = getattr(args, "disk_size", None)
     root_size = getattr(args, "root_size", None)
     # Multi-NIC: same list of --nic specs applies to every node in the
@@ -506,6 +519,8 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
             mem=mem,
             os_target=os_target,
             arch=arch,
+            kernel=kernel,
+            variant=variant,
             disk_size=disk_size,
             root_size=root_size,
             nics=nics,
@@ -517,6 +532,10 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
     print(f"=== Creating cluster '{cluster_name}' ===")
     if os_target:
         print(f"    Target: {os_target}{(' arch=' + arch) if arch else ''}")
+    if kernel:
+        print(f"    Kernel: {kernel}")
+    if variant != "base":
+        print(f"    Variant: {variant}")
     print(f"    Creating {len(node_specs)} nodes in parallel...")
 
     failed = []
@@ -535,6 +554,8 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
                 kernel_args,
                 owner_id,
                 wait_seconds=wait_seconds,
+                kernel=kernel,
+                variant=variant,
             ): node
             for node in node_specs
         }
@@ -839,6 +860,10 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
     # "x86_64" is wrong for a target whose default arch is something
     # else -- see the matching cmd_deploy comment.
     build_cmd += ["--arch", arch]
+    # Each node deploys from its variant's staging dir, which a base
+    # build does not write.
+    if first_vm.variant != "base":
+        build_cmd += ["--variant", first_vm.variant]
     if getattr(args, "force_compat", False):
         build_cmd += ["--force-compat"]
     if want_zfs:
@@ -956,61 +981,100 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
 
     if args.mount:
         print("=== Mounting Lustre filesystem ===")
-        mgs = cluster.mgs_node()
-        mgs_vm = VMInfo.load(mgs.name)
-
-        lustre_dir = lustre_libdir(os_family)
-        mount_cmd = (
-            f"cd {lustre_dir}/tests && LUSTRE={lustre_dir} bash llmount.sh"
+        _run_llmount(
+            cluster, os_family, server_only=args.server_only, timeout=300
         )
-        if args.server_only:
-            mount_cmd += " --server-only"
-
-        print(f"Running llmount.sh from {mgs.name}...")
-        try:
-            r = run(
-                sshpass_ssh_argv(mgs_vm.ip, mount_cmd),
-                capture_output=False,
-                timeout=300,
-            )
-        except subprocess.TimeoutExpired as e:
-            die(
-                f"llmount.sh timed out after {e.timeout}s on {mgs.name}\n"
-                f"  modules are deployed; check `ssh {mgs.name} dmesg` and "
-                f"`ltvm cluster exec {cluster.name} mds 'lctl dl'`"
-            )
-        if r.returncode != 0:
-            die("llmount.sh failed")
         print("=== Lustre mounted ===")
 
     print(f"\n=== Cluster '{cluster.name}' deployed ===")
 
 
-def cmd_cluster_destroy(args: argparse.Namespace) -> None:
+def _run_llmount(
+    cluster: ClusterInfo,
+    os_family: str,
+    *,
+    cleanup: bool = False,
+    server_only: bool = False,
+    timeout: int = 300,
+) -> None:
+    """Run llmount.sh, or with ``cleanup`` llmountcleanup.sh, for the cluster.
+
+    The cluster block in cfg/local.sh names every node, so the one run
+    brings the whole cluster up or down, remote module loads included.
+    It runs on the first client, the node that block treats as local: run
+    anywhere else, llmount.sh also mounts a client there that
+    llmountcleanup.sh never unmounts, and lustre_rmmod then fails on it.
+    """
+    clients = cluster.client_nodes()
+    node = clients[0] if clients else cluster.mgs_node()
+    node_vm = VMInfo.load(node.name)
+    lustre_dir = lustre_libdir(os_family)
+    script = "llmountcleanup.sh" if cleanup else "llmount.sh"
+    cmd = f"cd {lustre_dir}/tests && LUSTRE={lustre_dir} bash {script}"
+    if cleanup:
+        cmd += " && lustre_rmmod"
+    elif server_only:
+        cmd += " --server-only"
+
+    print(f"Running {script} from {node.name}...", flush=True)
+    try:
+        r = run(
+            sshpass_ssh_argv(node_vm.ip, cmd),
+            capture_output=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as e:
+        die(
+            f"{script} timed out after {e.timeout}s on {node.name}\n"
+            f"  check `ssh {node.name} dmesg` and "
+            f"`ltvm cluster exec {cluster.name} mds 'lctl dl'`",
+            EXIT_TIMEOUT,
+        )
+    if r.returncode != 0:
+        die(f"{script} failed (rc={r.returncode})")
+
+
+def cmd_cluster_llmount(args: argparse.Namespace) -> None:
     cluster = ClusterInfo.load(args.name)
-    nodes = cluster.get_nodes()
+    down = [n.name for n in cluster.get_nodes() if _node_state(n.name) != "up"]
+    if down:
+        die(
+            f"cluster '{cluster.name}' has nodes not running: "
+            f"{', '.join(down)}\n"
+            f"  start them with: ltvm cluster start {cluster.name}",
+            EXIT_UNREACHABLE,
+        )
+    from .vm_commands import _os_family_for_vm
 
-    # Use the same _destroy_vm_artifacts helper that single-node
-    # cmd_destroy uses, so we don't drift from its cleanup list.
-    # The previous inlined loop forgot to unlink the per-VM .info.lock
-    # file (added in round 15), causing `ltvm doctor` to report orphan
-    # info locks for every node after every cluster destroy.
-    from .vm_commands import _destroy_vm_artifacts
+    mgs_vm = VMInfo.load(cluster.mgs_node().name)
+    _run_llmount(
+        cluster,
+        _os_family_for_vm(mgs_vm, "libdir"),
+        cleanup=args.cleanup,
+        server_only=args.server_only,
+        timeout=args.timeout,
+    )
 
-    print(f"=== Destroying cluster '{cluster.name}' ===")
-    for node in nodes:
+
+def cmd_cluster_destroy(args: argparse.Namespace) -> None:
+    # Nodes go through the single-VM destroy, so a cluster node is torn
+    # down exactly as `ltvm destroy <node>` would do it.
+    from .vm_commands import cmd_destroy
+
+    for name in args.names:
         try:
-            vm = VMInfo.load(node.name)
-            kill_qemu(vm)
-        except VMNotFound:
-            pass
-
-        _destroy_vm_artifacts(node.name)
-        unregister_ssh_name(node.name)
-        print(f"  destroyed {node.name}")
-
-    cluster.path.unlink(missing_ok=True)
-    print(f"=== Cluster '{cluster.name}' destroyed ===")
+            cluster = ClusterInfo.load(name)
+        except ClusterNotFound:
+            # Match `ltvm destroy`: a name that is already gone is not
+            # an error, so a cleanup script can run it unconditionally.
+            print(f"destroy: cluster {name} not found")
+            continue
+        print(f"=== Destroying cluster '{cluster.name}' ===")
+        cmd_destroy(
+            argparse.Namespace(names=[n.name for n in cluster.get_nodes()])
+        )
+        cluster.path.unlink(missing_ok=True)
+        print(f"=== Cluster '{cluster.name}' destroyed ===")
 
 
 def _node_state(name: str) -> str:
