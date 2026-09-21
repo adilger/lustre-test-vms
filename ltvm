@@ -1096,7 +1096,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Grow the exported disk to this many GiB instead of "
         "sizing it to the rootfs.  Must be at least as large as the "
-        "rootfs needs.",
+        "rootfs needs.  A minimum, not a limit: the root partition "
+        "grows at boot to fill any larger disk it is given.",
     )
     tep.add_argument(
         "--ssh-key",

@@ -15,6 +15,9 @@ guest tweaks GCE needs -- DHCP networking in place of ltvm's
 cmdline-assigned addresses, and a UUID-based fstab.  Upload the
 result to a GCS bucket and `gcloud compute images create ... --source-uri`.
 
+Every format grows its root partition and filesystem at boot to fill
+the disk it is given, so a small image serves any boot disk size.
+
 Uses losetup + mount, so every external command is invoked through
 ``sudo_run`` from ``ltvm_pkg.priv``.  The CLI wrapper primes sudo
 upfront so the user gets a single password prompt.  Tooling: parted,
@@ -393,6 +396,57 @@ _NM_UNIT_CANDIDATES = (
     "lib/systemd/system/NetworkManager.service",
 )
 
+# Grows the root partition, then its ext4, into whatever disk the image
+# lands on.  Runs every boot and does nothing once the partition reaches
+# the end of the disk.  sfdisk --no-reread skips the in-use check a
+# mounted root would fail; partx then resizes the kernel's view of the
+# one partition, which works while it is mounted.
+_GROWROOT_SCRIPT = """\
+#!/bin/bash
+# Written by `ltvm target export`.  Grow the root partition, and the
+# ext4 on it, to fill the disk: export sizes the partition to the
+# image, and the disk it boots from is usually bigger.
+set -u
+mnt=${1:-/}
+src=$(findmnt -no SOURCE "$mnt") || exit 0
+src=$(readlink -f "$src")
+sys=/sys/class/block/${src#/dev/}
+# A whole-disk root, as under ltvm's own microvm boot, has no table.
+[[ -r $sys/partition ]] || exit 0
+num=$(<"$sys/partition")
+disk=/dev/$(basename "$(readlink -f "$sys/..")")
+disk_end=$(<"/sys/class/block/${disk#/dev/}/size")
+part_end=$(($(<"$sys/start") + $(<"$sys/size")))
+# parted's 1 MiB alignment can leave that much unused at the end.
+((disk_end - part_end > 2048)) || exit 0
+if ! command -v sfdisk >/dev/null; then
+    echo "ltvm-growroot: no sfdisk, $src stays at its exported size" >&2
+    exit 0
+fi
+echo "ltvm-growroot: growing $src to fill $disk"
+echo ", +" | sfdisk -q --no-reread --no-tell-kernel -N "$num" "$disk" &&
+    partx -u --nr "$num" "$disk" &&
+    resize2fs "$src"
+"""
+
+_GROWROOT_UNIT = """\
+# Written by `ltvm target export`.
+[Unit]
+Description=Grow the root partition and filesystem to fill the disk
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ltvm-growroot
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+# Where util-linux puts sfdisk.  Debian and Ubuntu ship it in the
+# separate `fdisk` package, which their base install leaves out.
+_SFDISK_PATHS = ("usr/sbin/sfdisk", "usr/bin/sfdisk")
+
 
 def _lock_root_password(dst_mnt: Path) -> bool:
     """Lock root's password in the image's /etc/shadow.
@@ -510,6 +564,39 @@ def _apply_gce_guest_config(dst_mnt: Path) -> None:
     )
 
 
+def _install_growroot(dst_mnt: Path) -> None:
+    """Grow the root partition to fill the disk at boot.
+
+    Export sizes the partition to the image, and the disk it is booted
+    from -- a GCE boot disk in particular, whose size is chosen at
+    instance creation -- is usually bigger.  Without this the extra
+    space sits past the end of the partition, where rc.local's
+    resize2fs cannot reach it.
+    """
+    units = dst_mnt / "etc" / "systemd" / "system"
+    wants = units / "multi-user.target.wants"
+    sbin = dst_mnt / "usr" / "local" / "sbin"
+    _ensure_dir(wants)
+    _ensure_dir(sbin)
+    _sudo_write_text(sbin / "ltvm-growroot", _GROWROOT_SCRIPT, mode=0o755)
+    _sudo_write_text(units / "ltvm-growroot.service", _GROWROOT_UNIT)
+    sudo_run(
+        [
+            "ln",
+            "-sf",
+            "/etc/systemd/system/ltvm-growroot.service",
+            str(wants / "ltvm-growroot.service"),
+        ],
+        check=False,
+        quiet=True,
+    )
+    if not any((dst_mnt / p).exists() for p in _SFDISK_PATHS):
+        log.warning(
+            "No sfdisk in this image, so its root partition will not "
+            "grow at boot; size the disk with --disk-size-gb instead"
+        )
+
+
 def _round_up_gib_mb(size_mb: int) -> int:
     """Round *size_mb* up to a whole GiB.  GCE rejects an image whose
     disk.raw is not a whole number of gigabytes."""
@@ -576,7 +663,8 @@ def export_image(
         force: overwrite *output* if it exists.
         disk_size_gb: grow the disk to this many GiB instead of
                 sizing it to the rootfs.  Must be at least as large
-                as the rootfs needs.
+                as the rootfs needs.  Only a floor: the root
+                partition grows at boot into any larger disk.
         ssh_key: public key file to append to root's authorized_keys
                 inside the image.
         info: if given, filled with facts about the exported image --
@@ -735,9 +823,11 @@ def export_image(
         _write_grub_cfg(boot, kver, fs_uuid, grub_install=grub_install)
 
         # 5a. Guest-side fixups, while the rootfs is still mounted.
-        #     The fstab rewrite is unconditional: /dev/vda is wrong for
-        #     every exported (partitioned) disk, not just GCE's.
+        #     The fstab rewrite and root growth are unconditional: the
+        #     partition they deal with exists in every exported disk
+        #     and in no ltvm microvm one.
         _rewrite_fstab_root(dst_mnt, fs_uuid)
+        _install_growroot(dst_mnt)
         if image_format == "gce":
             _apply_gce_guest_config(dst_mnt)
             _harden_gce_ssh(dst_mnt)

@@ -268,10 +268,20 @@ that GCE never passes.  The fstab `/` entry is rewritten to
 `UUID=` for *every* format -- the image ships `/dev/vda`,
 which is right only for ltvm's unpartitioned microvm boot.
 
-The image ships no Google guest agent, so GCE cannot inject
-SSH keys: pass `--ssh-key` to bake one in.  It also keeps
-ltvm's lab defaults (root login, empty password) -- don't
-open port 22 to the world.
+Every format also gets `ltvm-growroot.service`, which grows
+the root partition and its ext4 at boot to fill the disk.
+The export sizes the partition to the image, and the disk it
+boots from -- a GCE boot disk sized at instance creation, a
+`qemu-img resize`d qcow2 -- is usually bigger.  It needs
+`sfdisk`, which Debian and Ubuntu ship in the separate
+`fdisk` package; the export warns when the image lacks it.
+
+A base image ships no Google guest agent, so GCE cannot
+inject SSH keys: export rocky10's `gce` variant
+(`--variant gce`), which carries it, or pass `--ssh-key` to
+bake a key in.  `--format gce` turns off password SSH and
+locks root, but the image is otherwise ltvm's lab build --
+don't open port 22 to the world.
 
 ## Lustre/Kernel Compatibility Gate
 

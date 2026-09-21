@@ -1297,3 +1297,93 @@ class TestGuestAgentDetection:
 
         (tmp_path / "usr" / "bin").mkdir(parents=True)
         assert not ie._has_guest_agent(tmp_path)
+
+
+class TestGrowroot:
+    """The exported partition is sized to the image; a cloud boot disk
+    is sized at instance creation and is usually bigger.  Without the
+    unit, the difference sits unused past the end of the partition."""
+
+    def test_installs_executable_script(self, tmp_path: Path) -> None:
+        import ltvm_pkg.image_export as ie
+
+        with patch.object(ie, "sudo_run"):
+            ie._install_growroot(tmp_path)
+
+        script = tmp_path / "usr" / "local" / "sbin" / "ltvm-growroot"
+        assert script.read_text() == ie._GROWROOT_SCRIPT
+        assert script.stat().st_mode & 0o777 == 0o755
+
+    def test_unit_runs_the_installed_script(self, tmp_path: Path) -> None:
+        import ltvm_pkg.image_export as ie
+
+        with patch.object(ie, "sudo_run"):
+            ie._install_growroot(tmp_path)
+
+        unit = (
+            tmp_path / "etc" / "systemd" / "system" / "ltvm-growroot.service"
+        ).read_text()
+        assert "ExecStart=/usr/local/sbin/ltvm-growroot\n" in unit
+        assert "Type=oneshot" in unit
+        assert "WantedBy=multi-user.target" in unit
+
+    def test_enables_unit(self, tmp_path: Path) -> None:
+        import ltvm_pkg.image_export as ie
+
+        with patch.object(ie, "sudo_run") as sr:
+            ie._install_growroot(tmp_path)
+
+        ln_calls = [
+            c.args[0]
+            for c in sr.call_args_list
+            if c.args and c.args[0][0] == "ln"
+        ]
+        assert ln_calls == [
+            [
+                "ln",
+                "-sf",
+                "/etc/systemd/system/ltvm-growroot.service",
+                str(
+                    tmp_path
+                    / "etc"
+                    / "systemd"
+                    / "system"
+                    / "multi-user.target.wants"
+                    / "ltvm-growroot.service"
+                ),
+            ]
+        ]
+
+    def test_script_parses(self) -> None:
+        import ltvm_pkg.image_export as ie
+
+        r = subprocess.run(
+            ["bash", "-n"],
+            input=ie._GROWROOT_SCRIPT,
+            text=True,
+            capture_output=True,
+        )
+        assert r.returncode == 0, r.stderr
+
+    def test_warns_when_image_has_no_sfdisk(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Ubuntu's base install leaves out the fdisk package, which is
+        where Debian puts sfdisk."""
+        import ltvm_pkg.image_export as ie
+
+        with patch.object(ie, "sudo_run"):
+            ie._install_growroot(tmp_path)
+        assert "No sfdisk" in caplog.text
+
+    def test_quiet_when_image_has_sfdisk(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import ltvm_pkg.image_export as ie
+
+        sfdisk = tmp_path / "usr" / "sbin" / "sfdisk"
+        sfdisk.parent.mkdir(parents=True)
+        sfdisk.write_bytes(b"")
+        with patch.object(ie, "sudo_run"):
+            ie._install_growroot(tmp_path)
+        assert "No sfdisk" not in caplog.text

@@ -13,7 +13,7 @@ FROM ${BASE_IMAGE_TAG}
 # and kernel.panic=10, which reboots a node before an LBUG can be read.
 # Nor gce-disk-expand: its %post runs `dracut --force` against the build
 # host's kernel, and `target export` replaces the initramfs regardless.
-# Size the root disk with `target export --disk-size-gb` instead.
+# `target export` installs its own unit that grows the root at boot.
 #
 # EL10's rpm verifies signatures with Sequoia.  That rejects Google's
 # long-documented rpm-package-key.gpg (no valid binding signature), and
