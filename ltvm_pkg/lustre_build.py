@@ -59,6 +59,79 @@ def _show_configure_log(lustre_tree: Path, tail_lines: int = 50) -> None:
     print(f"--- end {log_path} ---\n", file=sys.stderr)
 
 
+# Written into <tree>/.git/info/exclude so the state files a build drops
+# in the Lustre tree do not show up as untracked.  The marker line makes
+# the append idempotent across runs.
+GIT_EXCLUDE_MARKER = "# ltvm build state (added by ltvm build lustre)"
+GIT_EXCLUDE_PATTERNS = ("/.ltvm-*",)
+
+
+def _git_info_dir(lustre_tree: Path) -> Path | None:
+    """Return <tree>'s git ``info/`` directory, or None if it has no gitdir.
+
+    Handles the ``.git``-as-a-file form used by worktrees and submodules,
+    where the real gitdir is named inside that file rather than being the
+    directory itself.  A worktree's gitdir names the main repository in
+    ``commondir``, and git reads ``info/`` from there, not the gitdir.
+    """
+    dot_git = lustre_tree / ".git"
+    if dot_git.is_dir():
+        return dot_git / "info"
+    if dot_git.is_file():
+        try:
+            text = dot_git.read_text()
+        except OSError:
+            return None
+        for line in text.splitlines():
+            if line.startswith("gitdir:"):
+                gitdir = Path(line.split(":", 1)[1].strip())
+                if not gitdir.is_absolute():
+                    gitdir = lustre_tree / gitdir
+                try:
+                    common = Path((gitdir / "commondir").read_text().strip())
+                except OSError:
+                    return gitdir / "info"
+                if not common.is_absolute():
+                    common = gitdir / common
+                return common / "info"
+    return None
+
+
+def _register_git_exclude(lustre_tree: Path) -> None:
+    """Hide ltvm's in-tree state files from ``git status`` in <tree>.
+
+    A build drops .ltvm-build-lock, .ltvm-staging/ and several stamp
+    files into the Lustre source tree.  Anything that reads the tree's
+    untracked files to decide what a patch changed -- patch-watcher's
+    changed-file report, or a human reading `git status` -- otherwise
+    has to know that set by heart in order to filter it out, and the
+    set grows whenever a new stamp is added here.
+
+    .git/info/exclude is the right home for it: per-checkout, itself
+    untracked, so this needs no Lustre patch and does not touch a
+    .gitignore that a commit would pick up.
+
+    Best effort -- a read-only or non-git tree just keeps the files
+    visible, which is how it behaved before.
+    """
+    info_dir = _git_info_dir(lustre_tree)
+    if info_dir is None:
+        return
+    exclude = info_dir / "exclude"
+    try:
+        existing = exclude.read_text() if exclude.is_file() else ""
+        if GIT_EXCLUDE_MARKER in existing:
+            return
+        info_dir.mkdir(parents=True, exist_ok=True)
+        lead = "" if existing == "" or existing.endswith("\n") else "\n"
+        block = "\n".join((GIT_EXCLUDE_MARKER, *GIT_EXCLUDE_PATTERNS))
+        with exclude.open("a") as fp:
+            fp.write(f"{lead}{block}\n")
+    except OSError:
+        # Not worth failing a build over; the files are cosmetic noise.
+        pass
+
+
 @contextlib.contextmanager
 def _tree_build_lock(lustre_tree: Path) -> Iterator[None]:
     """Serialize concurrent builds on a shared Lustre source tree.
@@ -71,6 +144,10 @@ def _tree_build_lock(lustre_tree: Path) -> Iterator[None]:
     Take an fcntl lock on <tree>/.ltvm-build-lock so only one
     containerized make runs per source tree at a time.
     """
+    # Before the first file ltvm writes into the tree, not after: a
+    # build interrupted between the two would otherwise leave the lock
+    # behind with nothing excluding it.
+    _register_git_exclude(lustre_tree)
     lock_path = lustre_tree / ".ltvm-build-lock"
     lock_path.touch(exist_ok=True)
     with lock_path.open("w") as fp:
@@ -812,10 +889,13 @@ def _build_in_container(
             "-delete 2>/dev/null || true"
         )
         # Remove configure residue that poisons re-runs: conftest dirs/files
-        # and the parallel kconftest/lpb directories.
+        # and the parallel kconftest/lpb directories.  confdefs.h joins
+        # them because autoconf deletes it from configure's own exit trap
+        # -- one still on disk is the corpse of a configure that was
+        # killed outright, and it is not in Lustre's .gitignore.
         script_parts.append(
             "rm -rf conftest conftest.c conftest.dir _lpb"
-            " kconftest.dir conftest.err 2>/dev/null || true"
+            " kconftest.dir conftest.err confdefs.h 2>/dev/null || true"
         )
         # Remove stale config/compile lock dirs (*.d directories).
         # When a previous configure was killed mid-compile, it leaves

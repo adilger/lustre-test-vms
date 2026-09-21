@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -8,9 +9,11 @@ import pytest
 
 from ltvm_pkg.lustre_build import (
     CLAIM_STAMP,
+    GIT_EXCLUDE_MARKER,
     _container_exists,
     _kernel_release,
     _needs_reconfigure,
+    _register_git_exclude,
     _show_configure_log,
     _tree_claim,
     build_lustre,
@@ -668,3 +671,123 @@ class TestShowConfigureLog:
         _show_configure_log(tmp_path, tail_lines=50)
         err = cap.readouterr().err
         assert "only line" in err
+
+
+# ---------------------------------------------------------------------------
+# _register_git_exclude
+# ---------------------------------------------------------------------------
+
+
+class TestRegisterGitExclude:
+    """ltvm's in-tree state must not show up as untracked files.
+
+    Patch-watcher reports the files a patch changed as the git diff plus
+    every untracked file, so a build that leaves .ltvm-* behind makes
+    every consumer of that report hand-filter a set only ltvm knows.
+    """
+
+    def _exclude(self, tree: Path) -> Path:
+        return tree / ".git" / "info" / "exclude"
+
+    def test_creates_exclude_in_plain_checkout(self, tmp_path: Path) -> None:
+        (tmp_path / ".git" / "info").mkdir(parents=True)
+        _register_git_exclude(tmp_path)
+        assert "/.ltvm-*" in self._exclude(tmp_path).read_text()
+
+    def test_creates_info_dir_when_absent(self, tmp_path: Path) -> None:
+        (tmp_path / ".git").mkdir()
+        _register_git_exclude(tmp_path)
+        assert "/.ltvm-*" in self._exclude(tmp_path).read_text()
+
+    def test_is_idempotent(self, tmp_path: Path) -> None:
+        (tmp_path / ".git" / "info").mkdir(parents=True)
+        for _ in range(3):
+            _register_git_exclude(tmp_path)
+        text = self._exclude(tmp_path).read_text()
+        assert text.count(GIT_EXCLUDE_MARKER) == 1
+
+    def test_preserves_existing_content(self, tmp_path: Path) -> None:
+        (tmp_path / ".git" / "info").mkdir(parents=True)
+        exclude = self._exclude(tmp_path)
+        exclude.write_text("*.swp\n")
+        _register_git_exclude(tmp_path)
+        text = exclude.read_text()
+        assert text.startswith("*.swp\n")
+        assert "/.ltvm-*" in text
+
+    def test_appends_newline_to_unterminated_file(self, tmp_path: Path) -> None:
+        (tmp_path / ".git" / "info").mkdir(parents=True)
+        exclude = self._exclude(tmp_path)
+        exclude.write_text("*.swp")
+        _register_git_exclude(tmp_path)
+        assert exclude.read_text().splitlines()[0] == "*.swp"
+
+    def test_follows_gitdir_file_of_a_submodule(self, tmp_path: Path) -> None:
+        real = tmp_path / "realgit"
+        (real / "info").mkdir(parents=True)
+        tree = tmp_path / "sub"
+        tree.mkdir()
+        (tree / ".git").write_text(f"gitdir: {real}\n")
+        _register_git_exclude(tree)
+        assert "/.ltvm-*" in (real / "info" / "exclude").read_text()
+
+    def test_worktree_writes_the_main_repository_exclude(
+        self, tmp_path: Path
+    ) -> None:
+        main_git = tmp_path / "main" / ".git"
+        wt_gitdir = main_git / "worktrees" / "wt"
+        wt_gitdir.mkdir(parents=True)
+        (wt_gitdir / "commondir").write_text("../..\n")
+        tree = tmp_path / "wt"
+        tree.mkdir()
+        (tree / ".git").write_text(f"gitdir: {wt_gitdir}\n")
+        _register_git_exclude(tree)
+        assert "/.ltvm-*" in (main_git / "info" / "exclude").read_text()
+        assert not (wt_gitdir / "info").exists()
+
+    def test_non_git_tree_is_a_no_op(self, tmp_path: Path) -> None:
+        _register_git_exclude(tmp_path)
+        assert not (tmp_path / ".git").exists()
+
+    @pytest.mark.parametrize("worktree", [False, True])
+    def test_git_actually_ignores_every_state_file(
+        self, tmp_path: Path, worktree: bool
+    ) -> None:
+        """End to end: the real git, on the real set of names."""
+        env = {
+            "PATH": os.environ.get("PATH", ""),
+            "HOME": str(tmp_path),
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_SYSTEM": "/dev/null",
+        }
+
+        def git(*args: str) -> str:
+            return subprocess.run(
+                ["git", "-c", "user.name=t", "-c", "user.email=t@t", *args],
+                capture_output=True,
+                text=True,
+                check=True,
+                env=env,
+            ).stdout
+
+        tree = tmp_path / "main"
+        git("init", "-q", str(tree))
+        if worktree:
+            git("-C", str(tree), "commit", "-q", "--allow-empty", "-m", "x")
+            tree = tmp_path / "wt"
+            git(
+                "-C", str(tmp_path / "main"), "worktree", "add", "-q", str(tree)
+            )
+        _register_git_exclude(tree)
+        for name in (
+            ".ltvm-build-lock",
+            ".ltvm-last-build",
+            ".ltvm-configure-rocky9-x86_64",
+            ".ltvm-container-libtool",
+            ".ltvm-kernel-rocky9-x86_64",
+            ".ltvm-server-rocky9-x86_64",
+        ):
+            (tree / name).write_text("x\n")
+        (tree / ".ltvm-staging" / "rocky9").mkdir(parents=True)
+        (tree / ".ltvm-staging" / "rocky9" / "a.ko").write_text("x\n")
+        assert git("-C", str(tree), "status", "--porcelain") == ""
