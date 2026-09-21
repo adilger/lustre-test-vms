@@ -248,9 +248,23 @@ QEMU passes it via `-kernel`.
 ## Exporting Images
 
 `ltvm target export` repackages a built `base.ext4` + its
-kernel + a BIOS GRUB2 bootloader into one self-contained
-bootable disk -- for people (or clouds) that don't have
-the ltvm runtime.
+kernel + GRUB2 into one self-contained bootable disk -- for
+people (or clouds) that don't have the ltvm runtime.
+
+The disk is GPT and boots under both BIOS and UEFI: a BIOS
+boot partition holding GRUB's core.img, an EFI system
+partition holding a `BOOTX64.EFI` at the removable-media
+path (so no NVRAM entry is needed), then root, last so it
+can grow.  Both loaders read the same `grub.cfg`.  UEFI is
+not optional on GCE's H4D: it falls back to legacy BIOS, and
+that BIOS cannot read its NVMe boot disk.  The UEFI loader is
+built with `grub-mkimage`, not `grub-install`, whose EFI mode
+is distro-patched both ways (Ubuntu's switches to a Secure
+Boot shim layout when `grub-efi-amd64-signed` is installed;
+RHEL's refuses without `--force`).  Host needs `dosfstools`
+and GRUB's x86_64-efi modules (`grub-efi-amd64-bin` /
+`grub2-efi-x64-modules`); `ltvm install` and `ltvm doctor`
+cover both.
 
 ```bash
 ltvm target export rocky9                      # bootable qcow2
@@ -267,6 +281,12 @@ images take their address from the `fc_ip=` kernel cmdline
 that GCE never passes.  The fstab `/` entry is rewritten to
 `UUID=` for *every* format -- the image ships `/dev/vda`,
 which is right only for ltvm's unpartitioned microvm boot.
+
+The printed `gcloud compute images create` line carries
+`--guest-os-features=UEFI_COMPATIBLE,GVNIC` (GVNIC only when
+the image's kernel has `gve`).  Leave `UEFI_COMPATIBLE` off
+and GCE boots the image through legacy BIOS; GVNIC is the NIC
+the newer families (C4D, H4D) use.
 
 Every format also gets `ltvm-growroot.service`, which grows
 the root partition and its ext4 at boot to fill the disk.

@@ -231,7 +231,9 @@ from ltvm_pkg.priv import sudo_prime as _sudo_prime  # noqa: E402
 from ltvm_pkg.priv import sudo_run as _sudo_run  # noqa: E402
 
 
-def _pkg_install(host: HostInfo, *pkgs: str) -> None:
+def _pkg_install(
+    host: HostInfo, *pkgs: str, no_recommends: bool = False
+) -> None:
     """Install packages using the host's package manager.
 
     Failures are logged with the package list so the user can see what
@@ -240,11 +242,13 @@ def _pkg_install(host: HostInfo, *pkgs: str) -> None:
     """
     translated = _translate_pkgs(pkgs, host)
     if host.pkg_mgr == "dnf":
-        r = _run(["dnf", "install", "-y", *translated], check=False)
+        weak = ["--setopt=install_weak_deps=False"] if no_recommends else []
+        r = _run(["dnf", "install", "-y", *weak, *translated], check=False)
     elif host.pkg_mgr == "apt":
         env = dict(os.environ, DEBIAN_FRONTEND="noninteractive")
+        rec = ["--no-install-recommends"] if no_recommends else []
         r = subprocess.run(
-            ["apt-get", "install", "-y", *translated],
+            ["apt-get", "install", "-y", *rec, *translated],
             env=env,
             check=False,
             capture_output=True,
@@ -266,6 +270,32 @@ def _pkg_install(host: HostInfo, *pkgs: str) -> None:
 # ------------------------------------------------------------------
 
 
+def _check_grub_efi_modules(host: HostInfo) -> None:
+    """GRUB's x86_64-efi modules, which `target export` builds the ESP
+    loader from.  A directory rather than a command, so not in
+    check_prerequisites' table.
+
+    Without recommends: on Debian they pull in grub-efi-amd64-signed and
+    with it a whole EFI bootloader stack the host does not boot from.
+    """
+    from ltvm_pkg import image_export
+
+    if image_export.GRUB_EFI_DIR.is_dir():
+        return
+    pkg = (
+        "grub-efi-amd64-bin"
+        if host.pkg_mgr == "apt"
+        else "grub2-efi-x64-modules"
+    )
+    log.info("Installing %s (GRUB UEFI modules for target export)...", pkg)
+    _pkg_install(host, pkg, no_recommends=True)
+    if not image_export.GRUB_EFI_DIR.is_dir():
+        log.warning(
+            "%s did not install; `ltvm target export` will fail until it does",
+            pkg,
+        )
+
+
 def check_prerequisites(host: HostInfo) -> None:
     """Verify and install basic prerequisites."""
     needed = {
@@ -282,8 +312,12 @@ def check_prerequisites(host: HostInfo) -> None:
         "zstd": "zstd",
         # Needed by `ltvm target export` (bootable-disk packaging).
         "parted": "parted",
+        "mkfs.vfat": "dosfstools",
         ("grub-install" if host.pkg_mgr == "apt" else "grub2-install"): (
             "grub-pc-bin" if host.pkg_mgr == "apt" else "grub2-pc"
+        ),
+        ("grub-mkimage" if host.pkg_mgr == "apt" else "grub2-mkimage"): (
+            "grub-common" if host.pkg_mgr == "apt" else "grub2-tools"
         ),
     }
     missing = []
@@ -313,6 +347,8 @@ def check_prerequisites(host: HostInfo) -> None:
                 "(unreachable mirror? no such package on this distro?).\n"
                 "  Install them by hand and re-run `ltvm install`."
             )
+
+    _check_grub_efi_modules(host)
 
     if not shutil.which("podman"):
         log.info("Installing podman (needed for container/image builds)...")

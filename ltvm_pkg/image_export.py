@@ -5,9 +5,12 @@ kernel separately via `-kernel`.  That's perfect for our own use,
 but leaves the rootfs dependent on ltvm (no bootloader, no kernel
 inside the image).
 
-`ltvm target export` packages the rootfs + matching kernel + a BIOS
-GRUB2 bootloader into a single bootable disk image (qcow2 by default)
-that any plain QEMU or libvirt can boot with just `-drive file=...`.
+`ltvm target export` packages the rootfs + matching kernel + GRUB2
+into a single bootable disk image (qcow2 by default) that any plain
+QEMU or libvirt can boot with just `-drive file=...`.  The disk is GPT
+and carries GRUB for both BIOS and UEFI firmware: GCE's H4D offers
+legacy BIOS only as a fallback, and that BIOS cannot read its NVMe boot
+disk.
 
 `--format gce` wraps that same disk as a Google Compute Engine
 custom image (`disk.raw` in an oldgnu-format tar.gz) and applies the
@@ -21,7 +24,8 @@ the disk it is given, so a small image serves any boot disk size.
 Uses losetup + mount, so every external command is invoked through
 ``sudo_run`` from ``ltvm_pkg.priv``.  The CLI wrapper primes sudo
 upfront so the user gets a single password prompt.  Tooling: parted,
-mkfs.ext4, grub2-install (grub-install on Debian), qemu-img.
+mkfs.ext4, mkfs.vfat, grub2-install and grub2-mkimage (grub-* on
+Debian), GRUB's x86_64-efi modules, qemu-img.
 """
 
 from __future__ import annotations
@@ -44,9 +48,16 @@ log = logging.getLogger(__name__)
 # Headroom above the source rootfs, covering /boot additions (kernel,
 # initramfs, grub modules/core.img) plus a little slack.
 _HEADROOM_MB = 512
-# Reserve the first 1 MiB for the MBR + post-MBR gap where GRUB's
-# core.img lives (matches the parted/grub default).
-_PART_OFFSET_MIB = 1
+# GPT, in MiB: GRUB's BIOS core.img in its own partition, then the EFI
+# system partition, then root.  Root goes last so ltvm-growroot can
+# extend it to the end of whatever disk the image lands on.
+_BIOS_BOOT_MIB = (1, 2)
+_ESP_MIB = (2, 130)
+_ROOT_START_MIB = _ESP_MIB[1]
+
+# Where Debian's grub-efi-amd64-bin and RHEL's grub2-efi-x64-modules
+# both put GRUB's UEFI modules.
+GRUB_EFI_DIR = Path("/usr/lib/grub/x86_64-efi")
 
 # Formats `export_image` knows how to write.  "gce" is "raw", rounded
 # up to a whole GiB and tarred the way Google's image import wants.
@@ -101,14 +112,15 @@ def _sudo_write_text(path: Path, text: str, mode: int = 0o644) -> None:
     subprocess.run(["sudo", "chmod", f"{mode:o}", str(path)], check=True)
 
 
-def _which_or_die(names: list[str]) -> str:
+def _which_or_die(
+    names: list[str], pkgs: str = "grub2-pc / grub-pc-bin"
+) -> str:
     """Return the first binary found on PATH, else raise."""
     for n in names:
         if shutil.which(n) is not None:
             return n
     raise RuntimeError(
-        f"None of {names} found on PATH -- install one "
-        f"(grub2-pc / grub-pc-bin) and retry"
+        f"None of {names} found on PATH -- install one ({pkgs}) and retry"
     )
 
 
@@ -145,6 +157,7 @@ def _check_host_tools(image_format: str = "qcow2") -> dict[str, str]:
     needed = [
         "parted",
         "mkfs.ext4",
+        "mkfs.vfat",
         "losetup",
         "mount",
         "umount",
@@ -157,13 +170,22 @@ def _check_host_tools(image_format: str = "qcow2") -> dict[str, str]:
     if missing:
         raise RuntimeError(
             f"missing host tool(s): {', '.join(missing)} -- "
-            f"install parted, e2fsprogs, util-linux, qemu-utils"
+            f"install parted, e2fsprogs, dosfstools, util-linux, qemu-utils"
         )
     if image_format == "gce":
         _check_gnu_tar()
-    # grub2-install on RHEL/Rocky, grub-install on Debian/Ubuntu.
+    # grub2-* on RHEL/Rocky, grub-* on Debian/Ubuntu.
     grub = _which_or_die(["grub2-install", "grub-install"])
-    return {"grub_install": grub}
+    mkimage = _which_or_die(
+        ["grub2-mkimage", "grub-mkimage"], "grub2-tools / grub-common"
+    )
+    if not GRUB_EFI_DIR.is_dir():
+        raise RuntimeError(
+            f"no GRUB UEFI modules at {GRUB_EFI_DIR} -- install "
+            f"grub2-efi-x64-modules (RHEL) or grub-efi-amd64-bin "
+            f"(Debian/Ubuntu)"
+        )
+    return {"grub_install": grub, "grub_mkimage": mkimage}
 
 
 def _image_size_mb(rootfs: Path, kernel_dir: Path) -> int:
@@ -173,7 +195,7 @@ def _image_size_mb(rootfs: Path, kernel_dir: Path) -> int:
         p = kernel_dir / f
         if p.exists():
             kernel_mb += p.stat().st_size // (1024 * 1024)
-    return rootfs_mb + kernel_mb + _HEADROOM_MB
+    return rootfs_mb + kernel_mb + _HEADROOM_MB + _ROOT_START_MIB
 
 
 def _losetup_attach(image: Path) -> str:
@@ -227,6 +249,11 @@ def _losetup_detach(dev: str) -> None:
     sudo_run(["losetup", "-d", dev], check=False, quiet=True)
 
 
+def _grub_subdir(grub_install: str) -> str:
+    """The /boot subdirectory this host's GRUB builds look in."""
+    return "grub" if Path(grub_install).name == "grub-install" else "grub2"
+
+
 def _write_grub_cfg(
     boot_dir: Path,
     kver: str,
@@ -245,8 +272,7 @@ def _write_grub_cfg(
     config in.  Duplicating is cheap (<1 KiB) and makes the image
     portable whether you export on a Debian or RHEL host.
     """
-    subdir = "grub" if Path(grub_install).name == "grub-install" else "grub2"
-    cfg_dir = boot_dir / subdir
+    cfg_dir = boot_dir / _grub_subdir(grub_install)
     _ensure_dir(cfg_dir)
     cfg_text = (
         "set timeout=2\n"
@@ -263,6 +289,68 @@ def _write_grub_cfg(
         "}\n"
     )
     _sudo_write_text(cfg_dir / "grub.cfg", cfg_text)
+
+
+def _install_grub_efi(
+    esp_mnt: Path,
+    boot_dir: Path,
+    fs_uuid: str,
+    subdir: str,
+    grub_mkimage: str,
+    scratch: Path,
+) -> None:
+    """Put a UEFI GRUB on the ESP that reads the BIOS path's grub.cfg.
+
+    Built with grub-mkimage rather than grub-install, whose EFI mode is
+    distro-patched both ways: Ubuntu's switches to a Secure Boot shim
+    layout whenever grub-efi-amd64-signed is installed, and RHEL's
+    refuses EFI targets without --force.  At the removable-media path,
+    so firmware finds it with no NVRAM boot entry.
+    """
+    mods = boot_dir / subdir / "x86_64-efi"
+    _run(["mkdir", "-p", str(mods)], quiet=True)
+    _run(["cp", "-r", f"{GRUB_EFI_DIR}/.", str(mods)], quiet=True)
+
+    early = scratch / "grub-efi-early.cfg"
+    early.write_text(
+        f"search --no-floppy --fs-uuid --set=root {fs_uuid}\n"
+        f"set prefix=($root)/boot/{subdir}\n"
+    )
+    efi_boot = esp_mnt / "EFI" / "BOOT"
+    _run(["mkdir", "-p", str(efi_boot)], quiet=True)
+    _run(
+        [
+            grub_mkimage,
+            "-O",
+            "x86_64-efi",
+            "-d",
+            str(GRUB_EFI_DIR),
+            "-p",
+            f"/boot/{subdir}",
+            "-c",
+            str(early),
+            "-o",
+            str(efi_boot / "BOOTX64.EFI"),
+            "part_gpt",
+            "ext2",
+            "search",
+            "normal",
+        ]
+    )
+
+
+def _has_gve(dst_mnt: Path, kver: str) -> bool:
+    """Whether the image's kernel has gve, the driver for gVNIC -- the
+    NIC GCE's newer machine families use."""
+    mdir = dst_mnt / "usr" / "lib" / "modules" / kver
+    if any(
+        (mdir / "kernel" / "drivers" / "net" / "ethernet" / "google").rglob(
+            "gve.ko*"
+        )
+    ):
+        return True
+    builtin = mdir / "modules.builtin"
+    return builtin.exists() and "/gve.ko" in builtin.read_text()
 
 
 def _fs_uuid(dev: str) -> str:
@@ -417,7 +505,7 @@ num=$(<"$sys/partition")
 disk=/dev/$(basename "$(readlink -f "$sys/..")")
 disk_end=$(<"/sys/class/block/${disk#/dev/}/size")
 part_end=$(($(<"$sys/start") + $(<"$sys/size")))
-# parted's 1 MiB alignment can leave that much unused at the end.
+# Alignment and GPT's backup header leave up to 1 MiB unused at the end.
 ((disk_end - part_end > 2048)) || exit 0
 if ! command -v sfdisk >/dev/null; then
     echo "ltvm-growroot: no sfdisk, $src stays at its exported size" >&2
@@ -686,6 +774,7 @@ def export_image(
 
     tools = _check_host_tools(image_format)
     grub_install = tools["grub_install"]
+    grub_mkimage = tools["grub_mkimage"]
 
     kernel_name = target_config.resolve_kernel(kernel)
     image_dir = target_config.image_output_dir(kernel)
@@ -737,8 +826,10 @@ def export_image(
     raw = tmpdir / "disk.raw"
     src_mnt = tmpdir / "src"
     dst_mnt = tmpdir / "dst"
+    esp_mnt = tmpdir / "esp"
     src_mnt.mkdir()
     dst_mnt.mkdir()
+    esp_mnt.mkdir()
     loop: str | None = None
     src_loop: str | None = None
 
@@ -752,28 +843,43 @@ def export_image(
                 "-s",
                 str(raw),
                 "mklabel",
-                "msdos",
+                "gpt",
                 "mkpart",
-                "primary",
-                "ext4",
-                f"{_PART_OFFSET_MIB}MiB",
-                "100%",
+                "bios",
+                f"{_BIOS_BOOT_MIB[0]}MiB",
+                f"{_BIOS_BOOT_MIB[1]}MiB",
                 "set",
                 "1",
-                "boot",
+                "bios_grub",
                 "on",
+                "mkpart",
+                "esp",
+                "fat32",
+                f"{_ESP_MIB[0]}MiB",
+                f"{_ESP_MIB[1]}MiB",
+                "set",
+                "2",
+                "esp",
+                "on",
+                "mkpart",
+                "root",
+                "ext4",
+                f"{_ROOT_START_MIB}MiB",
+                "100%",
             ]
         )
 
-        # 2. Attach loop (with partscan) and format the root partition.
+        # 2. Attach loop (with partscan) and format ESP and root.
         loop = _losetup_attach(raw)
-        part = f"{loop}p1"
+        esp = f"{loop}p2"
+        part = f"{loop}p3"
         for _ in range(20):
             if Path(part).exists():
                 break
             time.sleep(0.1)
         if not Path(part).exists():
             raise RuntimeError(f"{part} did not appear after partscan")
+        _run(["mkfs.vfat", "-F", "32", "-n", "ESP", esp], quiet=True)
         _run(["mkfs.ext4", "-q", "-L", "rootfs", part])
 
         # 3. Copy rootfs contents via fs-level cp -a.
@@ -838,6 +944,9 @@ def export_image(
             )
             if info is not None:
                 info["guest_agent"] = agent
+                info["guest_os_features"] = ["UEFI_COMPATIBLE"] + (
+                    ["GVNIC"] if _has_gve(dst_mnt, kver) else []
+                )
         if ssh_key is not None:
             _inject_ssh_key(dst_mnt, ssh_key)
 
@@ -846,10 +955,20 @@ def export_image(
                 grub_install,
                 "--target=i386-pc",
                 f"--boot-directory={boot}",
-                "--modules=part_msdos ext2 biosdisk",
+                "--modules=part_gpt ext2 biosdisk",
                 loop,
             ]
         )
+        _run(["mount", esp, str(esp_mnt)])
+        _install_grub_efi(
+            esp_mnt,
+            boot,
+            fs_uuid,
+            _grub_subdir(grub_install),
+            grub_mkimage,
+            tmpdir,
+        )
+        _run(["umount", str(esp_mnt)])
 
         # 6. Tidy up.  The check runs BEFORE the detach -- see
         #    _fsck_partition for why that ordering is load-bearing.
@@ -890,7 +1009,7 @@ def export_image(
         return output
 
     finally:
-        for m in (src_mnt, dst_mnt):
+        for m in (src_mnt, esp_mnt, dst_mnt):
             sudo_run(["umount", str(m)], check=False, quiet=True)
         for d in (src_loop, loop):
             if d:

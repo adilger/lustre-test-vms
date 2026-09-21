@@ -2530,18 +2530,26 @@ def _check_export_tools() -> list[str]:
     """
     import shutil as _shutil
 
+    from ltvm_pkg import image_export
+
     warnings: list[str] = []
-    for tool in ("parted", "qemu-img"):
+    for tool in ("parted", "qemu-img", "mkfs.vfat"):
         if _shutil.which(tool) is None:
             warnings.append(
                 f"missing host tool: {tool} (needed by `ltvm target export`)"
             )
-    if (
-        _shutil.which("grub2-install") is None
-        and _shutil.which("grub-install") is None
+    for pair in (
+        ("grub2-install", "grub-install"),
+        ("grub2-mkimage", "grub-mkimage"),
     ):
+        if all(_shutil.which(t) is None for t in pair):
+            warnings.append(
+                f"missing host tool: {'/'.join(pair)} "
+                "(needed by `ltvm target export`)"
+            )
+    if not image_export.GRUB_EFI_DIR.is_dir():
         warnings.append(
-            "missing host tool: grub2-install/grub-install "
+            f"missing GRUB UEFI modules: {image_export.GRUB_EFI_DIR} "
             "(needed by `ltvm target export`)"
         )
     return warnings

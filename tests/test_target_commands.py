@@ -1448,3 +1448,27 @@ class TestGceNextStepsAdvice:
     ) -> None:
         out = self._out(capsys, have_ssh_key=True, has_agent=False)
         assert "WARNING" not in out
+
+    def test_images_create_carries_guest_os_features(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Without UEFI_COMPATIBLE GCE boots the image through legacy
+        BIOS, which on H4D cannot read the boot disk."""
+        from ltvm_pkg.cli.targets import _print_gce_next_steps
+
+        _print_gce_next_steps(
+            Path("/tmp/gce-x.tar.gz"),
+            "rocky10",
+            "6.12-rhel10.2",
+            have_ssh_key=False,
+            has_agent=True,
+            features=["UEFI_COMPATIBLE", "GVNIC"],
+        )
+        out = capsys.readouterr().out
+        assert "--guest-os-features=UEFI_COMPATIBLE,GVNIC" in out
+
+    def test_no_features_no_flag(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        out = self._out(capsys, have_ssh_key=True, has_agent=False)
+        assert "--guest-os-features" not in out

@@ -827,8 +827,13 @@ def cmd_target_export(args: argparse.Namespace) -> int:
         "path": str(result),
         "size_mb": round(result.stat().st_size / (1024 * 1024), 1),
     }
+    raw_features = info.get("guest_os_features", [])
+    features = (
+        [str(f) for f in raw_features] if isinstance(raw_features, list) else []
+    )
     if fmt == "gce":
         payload["guest_agent"] = bool(info.get("guest_agent", False))
+        payload["guest_os_features"] = features
     _output(payload, use_json)
     if fmt == "gce" and not use_json:
         _print_gce_next_steps(
@@ -837,6 +842,7 @@ def cmd_target_export(args: argparse.Namespace) -> int:
             kernel_name,
             have_ssh_key=ssh_key is not None,
             has_agent=bool(info.get("guest_agent", False)),
+            features=features,
         )
     return EXIT_OK
 
@@ -861,15 +867,23 @@ def _print_gce_next_steps(
     kernel_name: str,
     have_ssh_key: bool,
     has_agent: bool = False,
+    features: list[str] | None = None,
 ) -> None:
     """Print the upload/import commands, then how you will get in: via
     the guest agent's metadata keys if the image has it, else only a
-    key baked in with --ssh-key."""
+    key baked in with --ssh-key.
+
+    *features* must reach `images create`: without UEFI_COMPATIBLE GCE
+    boots the image through legacy BIOS, and H4D's BIOS fallback cannot
+    read its NVMe boot disk.
+    """
     image_name = gce_image_name(target, kernel_name)
     print()
     print("Next steps (GCE):")
     print(f"  gcloud storage cp {asset} gs://YOUR_BUCKET/")
     print(f"  gcloud compute images create {image_name} \\")
+    if features:
+        print(f"      --guest-os-features={','.join(features)} \\")
     print(f"      --source-uri gs://YOUR_BUCKET/{asset.name}")
     print()
     print(

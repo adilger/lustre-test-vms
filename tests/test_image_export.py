@@ -8,6 +8,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+# What _check_host_tools returns on a Debian-family host.
+_TOOLS = {"grub_install": "grub-install", "grub_mkimage": "grub-mkimage"}
+
 
 def _make_target_config(
     tmp_path: Path,
@@ -139,28 +142,73 @@ class TestCheckHostTools:
             with pytest.raises(RuntimeError, match="grub"):
                 ie._check_host_tools()
 
-    def test_prefers_grub2_install(self) -> None:
+    def test_prefers_grub2_install(self, tmp_path: Path) -> None:
         import ltvm_pkg.image_export as ie
 
         def which(name: str) -> str:
             # Both present; grub2-install should win.
             return f"/u/bin/{name}"
 
-        with patch.object(ie.shutil, "which", side_effect=which):
+        with (
+            patch.object(ie.shutil, "which", side_effect=which),
+            patch.object(ie, "GRUB_EFI_DIR", tmp_path),
+        ):
             tools = ie._check_host_tools()
         assert tools["grub_install"] == "grub2-install"
+        assert tools["grub_mkimage"] == "grub2-mkimage"
 
-    def test_falls_back_to_grub_install(self) -> None:
+    def test_falls_back_to_grub_install(self, tmp_path: Path) -> None:
         import ltvm_pkg.image_export as ie
 
         def which(name: str) -> str | None:
-            if name == "grub2-install":
+            if name in ("grub2-install", "grub2-mkimage"):
                 return None
             return f"/u/bin/{name}"
 
-        with patch.object(ie.shutil, "which", side_effect=which):
+        with (
+            patch.object(ie.shutil, "which", side_effect=which),
+            patch.object(ie, "GRUB_EFI_DIR", tmp_path),
+        ):
             tools = ie._check_host_tools()
         assert tools["grub_install"] == "grub-install"
+        assert tools["grub_mkimage"] == "grub-mkimage"
+
+    def test_no_mkfs_vfat_raises(self) -> None:
+        """The ESP is FAT; without dosfstools there is no UEFI boot."""
+        import ltvm_pkg.image_export as ie
+
+        with patch.object(
+            ie.shutil,
+            "which",
+            side_effect=lambda x: None if x == "mkfs.vfat" else "/u/bin/x",
+        ):
+            with pytest.raises(RuntimeError, match="dosfstools"):
+                ie._check_host_tools()
+
+    def test_no_grub_mkimage_raises(self) -> None:
+        import ltvm_pkg.image_export as ie
+
+        def which(name: str) -> str | None:
+            if name in ("grub2-mkimage", "grub-mkimage"):
+                return None
+            return "/u/bin/" + name
+
+        with patch.object(ie.shutil, "which", side_effect=which):
+            with pytest.raises(RuntimeError, match="mkimage"):
+                ie._check_host_tools()
+
+    def test_no_efi_modules_raises(self, tmp_path: Path) -> None:
+        """grub-mkimage ships in the common package; the x86_64-efi
+        modules it builds from do not, so a BIOS-only GRUB host has the
+        binary and still cannot build the UEFI loader."""
+        import ltvm_pkg.image_export as ie
+
+        with (
+            patch.object(ie.shutil, "which", return_value="/u/bin/x"),
+            patch.object(ie, "GRUB_EFI_DIR", tmp_path / "nope"),
+        ):
+            with pytest.raises(RuntimeError, match="grub-efi-amd64-bin"):
+                ie._check_host_tools()
 
 
 class TestImageSize:
@@ -174,8 +222,9 @@ class TestImageSize:
         (kdir / "vmlinuz").write_bytes(b"\0" * (10 * 1024 * 1024))
 
         size = ie._image_size_mb(rootfs, kdir)
-        # 100 (rootfs) + 10 (vmlinuz) + 512 (headroom) = 622
-        assert size == 622
+        # 100 (rootfs) + 10 (vmlinuz) + 512 (headroom) + 130 (the BIOS
+        # boot and EFI system partitions ahead of root) = 752
+        assert size == 752
 
     def test_missing_vmlinuz_ok(self, tmp_path: Path) -> None:
         """_image_size_mb should not blow up if vmlinuz is absent;
@@ -189,7 +238,7 @@ class TestImageSize:
         kdir.mkdir()
 
         size = ie._image_size_mb(rootfs, kdir)
-        assert size == 50 + ie._HEADROOM_MB
+        assert size == 50 + ie._HEADROOM_MB + ie._ROOT_START_MIB
 
 
 class TestWriteGrubCfg:
@@ -275,7 +324,7 @@ class TestExportImageGuards:
         with patch.object(
             ie,
             "_check_host_tools",
-            return_value={"grub_install": "grub-install"},
+            return_value=_TOOLS,
         ):
             with pytest.raises(FileNotFoundError, match="base.ext4"):
                 ie.export_image(tc, None, tmp_path / "o.qcow2")
@@ -289,7 +338,7 @@ class TestExportImageGuards:
         with patch.object(
             ie,
             "_check_host_tools",
-            return_value={"grub_install": "grub-install"},
+            return_value=_TOOLS,
         ):
             with pytest.raises(FileNotFoundError, match="vmlinuz"):
                 ie.export_image(tc, None, tmp_path / "o.qcow2")
@@ -304,7 +353,7 @@ class TestExportImageGuards:
         with patch.object(
             ie,
             "_check_host_tools",
-            return_value={"grub_install": "grub-install"},
+            return_value=_TOOLS,
         ):
             with pytest.raises(FileNotFoundError, match="kernel release"):
                 ie.export_image(tc, None, tmp_path / "o.qcow2")
@@ -417,14 +466,53 @@ class TestDoctorFlagsMissingExportTools:
             warnings = _check_export_tools()
         assert any("grub" in w for w in warnings)
 
-    def test_silent_when_all_present(self) -> None:
+    def test_silent_when_all_present(self, tmp_path: Path) -> None:
         import shutil as _shutil
 
+        import ltvm_pkg.image_export as ie
         from ltvm_pkg.vm_commands import _check_export_tools
 
-        with patch.object(_shutil, "which", return_value="/u/bin/x"):
+        with (
+            patch.object(_shutil, "which", return_value="/u/bin/x"),
+            patch.object(ie, "GRUB_EFI_DIR", tmp_path),
+        ):
             warnings = _check_export_tools()
         assert warnings == []
+
+    def test_flags_missing_mkimage(self, tmp_path: Path) -> None:
+        import shutil as _shutil
+
+        import ltvm_pkg.image_export as ie
+        from ltvm_pkg.vm_commands import _check_export_tools
+
+        def which(name: str) -> str | None:
+            if name in ("grub-mkimage", "grub2-mkimage"):
+                return None
+            return f"/u/bin/{name}"
+
+        with (
+            patch.object(_shutil, "which", side_effect=which),
+            patch.object(ie, "GRUB_EFI_DIR", tmp_path),
+        ):
+            warnings = _check_export_tools()
+        assert warnings == [
+            "missing host tool: grub2-mkimage/grub-mkimage "
+            "(needed by `ltvm target export`)"
+        ]
+
+    def test_flags_missing_efi_modules(self, tmp_path: Path) -> None:
+        import shutil as _shutil
+
+        import ltvm_pkg.image_export as ie
+        from ltvm_pkg.vm_commands import _check_export_tools
+
+        with (
+            patch.object(_shutil, "which", return_value="/u/bin/x"),
+            patch.object(ie, "GRUB_EFI_DIR", tmp_path / "nope"),
+        ):
+            warnings = _check_export_tools()
+        assert len(warnings) == 1
+        assert "UEFI modules" in warnings[0]
 
 
 def _which_until_installed(missing: str, state: dict):
@@ -514,6 +602,40 @@ class TestHostSetupDeps:
             host_setup.check_prerequisites(host)
         pkgs = [a for call in install.call_args_list for a in call.args]
         assert "grub2-pc" in pkgs
+
+    @pytest.mark.parametrize(
+        "pkg_mgr,pkg",
+        [("apt", "grub-efi-amd64-bin"), ("dnf", "grub2-efi-x64-modules")],
+    )
+    def test_efi_modules_installed_without_recommends(
+        self, tmp_path: Path, pkg_mgr: str, pkg: str
+    ) -> None:
+        """On Debian the modules package recommends a signed EFI
+        bootloader stack; the host needs the modules, not the stack."""
+        import ltvm_pkg.image_export as ie
+        from ltvm_pkg import host_setup
+
+        host = MagicMock()
+        host.pkg_mgr = pkg_mgr
+        with (
+            patch.object(ie, "GRUB_EFI_DIR", tmp_path / "nope"),
+            patch.object(host_setup, "_pkg_install") as install,
+        ):
+            host_setup._check_grub_efi_modules(host)
+        install.assert_called_once_with(host, pkg, no_recommends=True)
+
+    def test_efi_modules_present_installs_nothing(self, tmp_path: Path) -> None:
+        import ltvm_pkg.image_export as ie
+        from ltvm_pkg import host_setup
+
+        host = MagicMock()
+        host.pkg_mgr = "apt"
+        with (
+            patch.object(ie, "GRUB_EFI_DIR", tmp_path),
+            patch.object(host_setup, "_pkg_install") as install,
+        ):
+            host_setup._check_grub_efi_modules(host)
+        install.assert_not_called()
 
 
 # ======================================================================
@@ -939,7 +1061,7 @@ class TestExportImageGceGuards:
         with patch.object(
             ie,
             "_check_host_tools",
-            return_value={"grub_install": "grub-install"},
+            return_value=_TOOLS,
         ):
             with pytest.raises(FileNotFoundError, match="base.ext4"):
                 ie.export_image(
@@ -956,7 +1078,7 @@ class TestExportImageGceGuards:
         with patch.object(
             ie,
             "_check_host_tools",
-            return_value={"grub_install": "grub-install"},
+            return_value=_TOOLS,
         ):
             with pytest.raises(ValueError, match="too small"):
                 ie.export_image(tc, None, tmp_path / "o.qcow2", disk_size_gb=0)
@@ -1387,3 +1509,90 @@ class TestGrowroot:
         with patch.object(ie, "sudo_run"):
             ie._install_growroot(tmp_path)
         assert "No sfdisk" not in caplog.text
+
+
+class TestGrubEfi:
+    """The UEFI loader has to find the root filesystem and the grub.cfg
+    the BIOS path already wrote, with no NVRAM entry to point at it."""
+
+    def _install(self, tmp_path: Path, subdir: str = "grub") -> list[list[str]]:
+        import ltvm_pkg.image_export as ie
+
+        with patch.object(ie, "_run") as run:
+            ie._install_grub_efi(
+                tmp_path / "esp",
+                tmp_path / "boot",
+                "1234-uuid",
+                subdir,
+                "grub-mkimage",
+                tmp_path,
+            )
+        return [c.args[0] for c in run.call_args_list]
+
+    def _mkimage(self, calls: list[list[str]]) -> list[str]:
+        (argv,) = [c for c in calls if c[0] == "grub-mkimage"]
+        return argv
+
+    def test_writes_the_removable_media_path(self, tmp_path: Path) -> None:
+        argv = self._mkimage(self._install(tmp_path))
+        out = argv[argv.index("-o") + 1]
+        assert out == str(tmp_path / "esp" / "EFI" / "BOOT" / "BOOTX64.EFI")
+        assert argv[argv.index("-O") + 1] == "x86_64-efi"
+
+    def test_early_config_finds_root_by_uuid(self, tmp_path: Path) -> None:
+        argv = self._mkimage(self._install(tmp_path, subdir="grub2"))
+        cfg = Path(argv[argv.index("-c") + 1]).read_text()
+        assert "search --no-floppy --fs-uuid --set=root 1234-uuid" in cfg
+        assert "set prefix=($root)/boot/grub2" in cfg
+
+    def test_embeds_search_not_just_search_fs_uuid(
+        self, tmp_path: Path
+    ) -> None:
+        """search_fs_uuid provides only `search.fs_uuid`; the early
+        config's `search` is its own module.  Embedding the wrong one
+        leaves the loader at a grub> prompt."""
+        argv = self._mkimage(self._install(tmp_path))
+        assert "search" in argv
+        assert "part_gpt" in argv
+        assert "ext2" in argv
+
+    def test_copies_modules_for_insmod(self, tmp_path: Path) -> None:
+        """grub.cfg's serial/linux/initrd load from $prefix at boot."""
+        import ltvm_pkg.image_export as ie
+
+        calls = self._install(tmp_path)
+        assert [
+            "cp",
+            "-r",
+            f"{ie.GRUB_EFI_DIR}/.",
+            str(tmp_path / "boot" / "grub" / "x86_64-efi"),
+        ] in calls
+
+
+class TestHasGve:
+    def _mdir(self, tmp_path: Path) -> Path:
+        m = tmp_path / "usr" / "lib" / "modules" / "6.12.0-x"
+        m.mkdir(parents=True)
+        return m
+
+    def test_module(self, tmp_path: Path) -> None:
+        import ltvm_pkg.image_export as ie
+
+        d = self._mdir(tmp_path) / "kernel/drivers/net/ethernet/google/gve"
+        d.mkdir(parents=True)
+        (d / "gve.ko.xz").write_bytes(b"")
+        assert ie._has_gve(tmp_path, "6.12.0-x")
+
+    def test_builtin(self, tmp_path: Path) -> None:
+        import ltvm_pkg.image_export as ie
+
+        (self._mdir(tmp_path) / "modules.builtin").write_text(
+            "kernel/drivers/net/ethernet/google/gve/gve.ko\n"
+        )
+        assert ie._has_gve(tmp_path, "6.12.0-x")
+
+    def test_absent(self, tmp_path: Path) -> None:
+        import ltvm_pkg.image_export as ie
+
+        self._mdir(tmp_path)
+        assert not ie._has_gve(tmp_path, "6.12.0-x")
