@@ -769,6 +769,101 @@ class TestMemoryBudgetCheck:
         ):
             assert qemu_run._memory_shortfall(vm) is None
 
+    @staticmethod
+    def _site(
+        tmp_path_factory: pytest.TempPathFactory,
+        monkeypatch: pytest.MonkeyPatch,
+        text: str,
+    ) -> None:
+        site = tmp_path_factory.mktemp("site") / "ltvm.conf"
+        site.write_text(text)
+        monkeypatch.setenv("LTVM_SITE_CONFIG", str(site))
+        monkeypatch.setattr(qemu_run, "_site_config_warned", set())
+
+    @staticmethod
+    def _shortfall_with_running(
+        tmp_vmdir: Path, running_mb: list[int], new_mb: int
+    ) -> qemu_run._Shortfall | None:
+        """Check a new VM on a 10 GiB host (budget 9216 MiB)."""
+        for i, mb in enumerate(running_mb):
+            _make_vm(tmp_vmdir, name=f"co1-run{i}", mem=mb).save()
+        new_vm = _make_vm(tmp_vmdir, name="co1-new", mem=new_mb)
+        with (
+            patch("ltvm_pkg.qemu_run._read_meminfo_mb", return_value=10240),
+            patch(
+                "ltvm_pkg.qemu_run.is_running",
+                side_effect=lambda o: o.name.startswith("co1-run"),
+            ),
+        ):
+            return qemu_run._memory_shortfall(new_vm)
+
+    def test_overcommit_admits_past_the_budget(
+        self,
+        tmp_vmdir: Path,
+        tmp_path_factory: pytest.TempPathFactory,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """12288 + 4096 MiB is over the 9216 budget but within 2x it."""
+        self._site(tmp_path_factory, monkeypatch, "[memory]\novercommit = 2\n")
+        assert self._shortfall_with_running(tmp_vmdir, [4096] * 3, 4096) is None
+
+    def test_overcommit_refuses_past_its_limit(
+        self,
+        tmp_vmdir: Path,
+        tmp_path_factory: pytest.TempPathFactory,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._site(tmp_path_factory, monkeypatch, "[memory]\novercommit = 2\n")
+        shortfall = self._shortfall_with_running(tmp_vmdir, [4096] * 3, 8192)
+        assert shortfall is not None
+        assert shortfall.fits_when_idle
+        assert "overcommit:   2 " in shortfall.message
+        assert "may commit 18432 MiB" in shortfall.message
+        # 12288 + 8192 - 18432
+        assert "shortfall:    2048 MiB" in shortfall.message
+
+    def test_overcommit_does_not_stretch_one_vm(
+        self,
+        tmp_vmdir: Path,
+        tmp_path_factory: pytest.TempPathFactory,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A VM bigger than the budget never fits, whatever the ratio."""
+        self._site(tmp_path_factory, monkeypatch, "[memory]\novercommit = 4\n")
+        shortfall = self._shortfall_with_running(tmp_vmdir, [], 12288)
+        assert shortfall is not None
+        assert not shortfall.fits_when_idle
+        assert "shortfall:    3072 MiB" in shortfall.message
+
+    def test_overcommit_defaults_to_one(
+        self,
+        tmp_path_factory: pytest.TempPathFactory,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A site file without [memory] changes nothing, and says nothing."""
+        self._site(
+            tmp_path_factory, monkeypatch, "[telemetry]\nenabled = false\n"
+        )
+        assert qemu_run._memory_overcommit() == 1.0
+        assert capsys.readouterr().err == ""
+
+    @pytest.mark.parametrize("value", ["0.5", "lots", "nan", "inf"])
+    def test_bad_overcommit_falls_back_and_warns_once(
+        self,
+        value: str,
+        tmp_path_factory: pytest.TempPathFactory,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        self._site(
+            tmp_path_factory, monkeypatch, f"[memory]\novercommit = {value}\n"
+        )
+        assert qemu_run._memory_overcommit() == 1.0
+        assert qemu_run._memory_overcommit() == 1.0
+        err = capsys.readouterr().err
+        assert err.count("warning: ignoring [memory]") == 1
+
     def test_read_meminfo_parses_memtotal(self, tmp_path: Path) -> None:
         """_read_meminfo_mb returns kB-from-meminfo // 1024 for the named key."""
         meminfo = tmp_path / "meminfo"

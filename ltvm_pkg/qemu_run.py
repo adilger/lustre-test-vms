@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import configparser
 import fcntl
+import math
 import os
 import signal
 import subprocess
@@ -14,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn
 
-from . import rootless, vm_state
+from . import rootless, site_config, vm_state
 from .host_setup import is_macos, socket_vmnet_socket_path
 from .priv import ensure_lock_file, invoking_user, sudo_run
 from .vm_state import (
@@ -88,6 +90,32 @@ class _Shortfall:
     fits_when_idle: bool
 
 
+# A --wait re-reads the site file every few seconds; say what is wrong once.
+_site_config_warned: set[str] = set()
+
+
+def _memory_overcommit() -> float:
+    """/etc/ltvm.conf's ``[memory] overcommit``, or 1.0 if unset or bad."""
+    site = site_config.path()
+    parser = configparser.ConfigParser()
+    try:
+        parser.read(site)
+        ratio = parser.getfloat("memory", "overcommit", fallback=1.0)
+    except (configparser.Error, ValueError) as e:
+        problem = str(e)
+    else:
+        if math.isfinite(ratio) and ratio >= 1.0:
+            return ratio
+        problem = f"overcommit must be a number >= 1.0, not {ratio}"
+    if problem not in _site_config_warned:
+        _site_config_warned.add(problem)
+        print(
+            f"warning: ignoring [memory] in {site}: {problem}",
+            file=sys.stderr,
+        )
+    return 1.0
+
+
 def _memory_shortfall(vm: VMInfo) -> _Shortfall | None:
     """Why the host can't accommodate ``vm``'s RAM now, or None if it can.
 
@@ -100,6 +128,11 @@ def _memory_shortfall(vm: VMInfo) -> _Shortfall | None:
     Instead we sum the *committed* memory of all running VMs (each
     VM's ``-m`` value) and add the new VM, comparing against the
     host's physical RAM minus a reserve.  Conservative but predictable.
+
+    A host that merges identical guest pages (KSM) holds far less than
+    that.  ``[memory] overcommit`` in /etc/ltvm.conf lets the running
+    VMs together commit that multiple of the budget; a single VM must
+    still fit the budget itself.
     """
     needed_mb = vm.mem
     host_total_mb = _read_meminfo_mb("MemTotal")
@@ -110,6 +143,8 @@ def _memory_shortfall(vm: VMInfo) -> _Shortfall | None:
 
     reserve_mb = max(_HOST_MEM_RESERVE_FLOOR_MB, host_total_mb // 10)
     budget_mb = host_total_mb - reserve_mb
+    overcommit = _memory_overcommit()
+    limit_mb = int(budget_mb * overcommit)
 
     running: list[tuple[str, int]] = []
     for name in VMInfo.all_names():
@@ -139,9 +174,12 @@ def _memory_shortfall(vm: VMInfo) -> _Shortfall | None:
             running.append((other.name, other.mem))
 
     committed_mb = sum(m for _, m in running)
-    if committed_mb + needed_mb <= budget_mb:
+    if needed_mb <= budget_mb and committed_mb + needed_mb <= limit_mb:
         return None
 
+    shortfall_mb = max(
+        committed_mb + needed_mb - limit_mb, needed_mb - budget_mb
+    )
     lines = [
         f"not enough host memory to start VM '{vm.name}'",
         f"  requested:    {needed_mb} MiB",
@@ -149,8 +187,14 @@ def _memory_shortfall(vm: VMInfo) -> _Shortfall | None:
         f"{len(running)} running VM(s)",
         f"  host budget:  {budget_mb} MiB "
         f"(MemTotal {host_total_mb} MiB - {reserve_mb} MiB reserve)",
-        f"  shortfall:    {committed_mb + needed_mb - budget_mb} MiB",
     ]
+    if overcommit != 1.0:
+        lines.append(
+            f"  overcommit:   {overcommit:g} ({site_config.path()}), so "
+            f"running VMs may commit {limit_mb} MiB, but no single VM "
+            f"more than the budget"
+        )
+    lines.append(f"  shortfall:    {shortfall_mb} MiB")
     if running:
         lines.append("")
         lines.append("running VMs (largest first):")

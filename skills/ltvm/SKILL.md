@@ -75,6 +75,14 @@ are not yours to stop, that is how to wait for room -- not a retry loop:
 ltvm create co1-single --mem 4096 --wait 1800
 ```
 
+A host running KSM holds far less than that, since guests booted from
+one image share most of their pages, so an admin may have set
+`[memory] overcommit = N` in `/etc/ltvm.conf`. The running guests may
+then commit N times the budget, though one VM must still fit the budget
+on its own, and a refusal prints the ratio in force. It is off by
+default and it is the user's setting for the whole host: do not raise
+it to get past a refusal -- wait.
+
 `--kernel-args` adds kernel boot parameters, also fixed at create time.
 The target kernels have no KASAN, but they build in SLUB debugging (and
 the Rocky ones page owner tracking), off until booted with them:

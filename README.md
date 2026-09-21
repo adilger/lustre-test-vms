@@ -244,6 +244,30 @@ VM names MUST include the checkout number and a descriptive role:
 `co<N>-<role>` (e.g. `co1-single`, `co2-mds`, `co2-oss`). Never bare
 names like `testvm`.
 
+### Host memory
+
+`create` and `start` refuse a VM when the running guests' memory (each
+one's `--mem`) plus the new one would exceed the host's RAM less a
+reserve of 1 GiB or 10%, whichever is larger. `--wait SECONDS` waits
+for room instead.
+
+That counts every guest at its full size, which overstates what a host
+running KSM holds: guests booted from the same image share most of
+their pages. An admin can let the running guests commit a multiple of
+the budget, for every user on the host:
+
+```ini
+# /etc/ltvm.conf
+[memory]
+overcommit = 2
+```
+
+It is 1.0 unless set. A single VM must still fit the budget, and the
+host wants swap behind it, because merged pages are copied apart again
+as soon as guests write different data to them. The kernel boots with
+KSM off; `w /sys/kernel/mm/ksm/run - - - - 1` in a file under
+`/etc/tmpfiles.d/` turns it on at every boot.
+
 ### Running VMs without sudo
 
 `ltvm install` sets a Linux host up so that members of the `ltvm` group

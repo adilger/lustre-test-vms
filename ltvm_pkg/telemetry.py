@@ -62,6 +62,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from . import site_config
+
 log = logging.getLogger("ltvm.telemetry")
 
 ENDPOINT = os.environ.get(
@@ -121,7 +123,7 @@ def _counters_file() -> Path:
 
 
 def _site_config() -> Path:
-    return Path(os.environ.get("LTVM_SITE_CONFIG") or "/etc/ltvm.conf")
+    return site_config.path()
 
 
 NOTICE = """\

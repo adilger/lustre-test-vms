@@ -442,6 +442,15 @@ mechanism.  Both are fixed at create time -- `ltvm create` against an
 existing VM warns that a differing value was ignored.  `cluster create`
 takes `--root-size` too and applies it to every node.
 
+**Host memory:** `create` and `start` admit a VM only when the running
+VMs' `-m` plus its own fit MemTotal less a reserve
+(`qemu_run._memory_shortfall`).  `[memory] overcommit` in
+`/etc/ltvm.conf` (`site_config.path()`; `LTVM_SITE_CONFIG` moves it, and
+the tests point it at a file that does not exist) multiplies that budget
+for the sum, never for one VM.  It is 1.0 unless set, for hosts running
+KSM; a value below 1.0 or not a number warns once per process and counts
+as 1.0.
+
 **Kernel arguments:** `--kernel-args 'slub_debug=FZPU page_owner=on'`
 is stored in the `.info` file as `KERNEL_ARGS` and appended after
 ltvm's own parameters on every boot, so a parameter whose last
