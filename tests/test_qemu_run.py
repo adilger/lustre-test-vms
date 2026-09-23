@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fcntl
 import itertools
+import subprocess
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -668,6 +669,47 @@ class TestLaunchQemuMacos:
             qemu_run.kill_qemu(vm)
         ip_calls = [c for c in h.run_calls if c and c[0] == "ip"]
         assert ip_calls == [], f"unexpected ip commands on macOS: {ip_calls}"
+
+
+class TestIsRunningMacos:
+    """macOS has no /proc, so is_running asks ps for the command line."""
+
+    def _is_running(self, vm: VMInfo, stdout: str, rc: int = 0) -> bool:
+        done = subprocess.CompletedProcess([], rc, stdout=stdout, stderr="")
+        with (
+            patch("ltvm_pkg.qemu_run.is_macos", return_value=True),
+            patch("ltvm_pkg.qemu_run.subprocess.run", return_value=done) as run,
+        ):
+            result = qemu_run.is_running(vm)
+        assert "comm=" not in run.call_args.args[0]
+        return result
+
+    def test_long_qemu_path_is_running(self, tmp_vmdir: Path) -> None:
+        """ps truncates comm= to 16 chars ("/opt/qemu/bin/qe"), which read
+        as "not QEMU" and listed every running VM as stopped."""
+        vm = _make_vm(tmp_vmdir)
+        vm.pid = 46513
+        out = (
+            "/opt/qemu/bin/qemu-system-aarch64 -name "
+            f"{vm.name} -machine virt,accel=hvf\n"
+        )
+        assert self._is_running(vm, out)
+
+    def test_other_vm_is_not_running(self, tmp_vmdir: Path) -> None:
+        vm = _make_vm(tmp_vmdir)
+        vm.pid = 46513
+        out = "/opt/qemu/bin/qemu-system-aarch64 -name co9-other\n"
+        assert not self._is_running(vm, out)
+
+    def test_reused_pid_is_not_running(self, tmp_vmdir: Path) -> None:
+        vm = _make_vm(tmp_vmdir)
+        vm.pid = 46513
+        assert not self._is_running(vm, "/usr/bin/python3 foo.py\n")
+
+    def test_dead_pid_is_not_running(self, tmp_vmdir: Path) -> None:
+        vm = _make_vm(tmp_vmdir)
+        vm.pid = 46513
+        assert not self._is_running(vm, "", rc=1)
 
 
 # ── memory budget check ──────────────────────────────────
