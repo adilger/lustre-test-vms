@@ -360,10 +360,13 @@ def _read_subnet() -> str:
         v = f.read_text().strip()
         if v:
             return v
+    # One return, not one per platform: mypy evaluates sys.platform,
+    # so a return after an early darwin one is "unreachable" on a Mac.
+    subnet = "192.168.100"
     if sys.platform == "darwin":
         gw = os.environ.get("LTVM_VMNET_GATEWAY", "192.168.105.1")
-        return gw.rsplit(".", 1)[0]
-    return "192.168.100"
+        subnet = gw.rsplit(".", 1)[0]
+    return subnet
 
 
 SUBNET = _read_subnet()
