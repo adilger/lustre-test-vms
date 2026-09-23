@@ -15,6 +15,9 @@ Three shells, three conventions:
   ``#compdef`` header and a trailing call.
 * **fish** reads ``complete`` directives from its completion dirs.
 
+On macOS the directories are Homebrew's rather than the system's; see
+``_SEARCH_MACOS``.
+
 We generate all three with :func:`argcomplete.shellcode` in-process
 rather than shelling out to ``register-python-argcomplete``, so the
 install does not depend on that script being on PATH (it lives in the
@@ -26,6 +29,7 @@ from __future__ import annotations
 import importlib.util
 import logging
 import os
+import platform
 import shutil
 import sys
 from dataclasses import dataclass
@@ -61,6 +65,19 @@ _SEARCH: dict[str, tuple[str, ...]] = {
         "/usr/share/fish/vendor_completions.d",
         "/etc/fish/completions",
     ),
+}
+
+# macOS: every /usr/share path above is on the SIP-sealed system
+# volume, which not even root can write -- so resolving there left
+# `ltvm doctor` reporting completion missing forever, with no --fix
+# able to cure it.  The shells a Mac user actually completes with come
+# from Homebrew and read these, relative to the Homebrew prefix, which
+# the installing user owns: no elevation needed.  bash-completion
+# (either major version) sources etc/bash_completion.d.
+_SEARCH_MACOS: dict[str, tuple[str, ...]] = {
+    "bash": ("etc/bash_completion.d",),
+    "zsh": ("share/zsh/site-functions",),
+    "fish": ("share/fish/vendor_completions.d",),
 }
 
 # The filename each shell expects.  zsh's underscore prefix is not
@@ -157,6 +174,39 @@ class Target:
         return self.directory / _FILENAME[self.shell]
 
 
+def _brew_prefix() -> str:
+    """The Homebrew prefix, found without running brew.
+
+    No subprocess and no reliance on PATH: this is reached from
+    `ltvm doctor`, and from `ltvm install` under whatever PATH the
+    caller had.  $HOMEBREW_PREFIX is what `brew shellenv` exports;
+    failing that, a brew in either of Homebrew's two default prefixes
+    (Apple Silicon, then Intel); failing that, a brew on PATH, whose
+    ``bin/`` sits directly under the prefix.  With no Homebrew at all,
+    the default prefix for this CPU -- the place it would go.
+    """
+    env = os.environ.get("HOMEBREW_PREFIX")
+    if env and Path(env, "bin", "brew").exists():
+        return env
+    for prefix in ("/opt/homebrew", "/usr/local"):
+        if Path(prefix, "bin", "brew").exists():
+            return prefix
+    brew = shutil.which("brew")
+    if brew:
+        return str(Path(brew).parent.parent)
+    return "/opt/homebrew" if platform.machine() == "arm64" else "/usr/local"
+
+
+def _search(shell: str) -> tuple[str, ...]:
+    """Candidate directories for *shell* on this host, before the root."""
+    from .host_setup import is_macos
+
+    if is_macos():
+        prefix = _brew_prefix()
+        return tuple(f"{prefix}/{d}" for d in _SEARCH_MACOS[shell])
+    return _SEARCH[shell]
+
+
 def _base(root: Path | None) -> Path:
     """The prefix every system path is resolved under."""
     if root is not None:
@@ -170,7 +220,7 @@ def resolve_target(shell: str, root: Path | None = None) -> Target:
     An explicit *root* beats $LTVM_COMPLETION_ROOT, which beats /.
     """
     base = _base(root)
-    candidates = [base / d.lstrip("/") for d in _SEARCH[shell]]
+    candidates = [base / d.lstrip("/") for d in _search(shell)]
     for cand in candidates:
         if cand.is_dir():
             return Target(shell, cand, True)
@@ -266,7 +316,7 @@ def uninstall(
     out: list[Result] = []
     base = _base(root)
     for shell in shells or SHELLS:
-        for d in _SEARCH[shell]:
+        for d in _search(shell):
             path = base / d.lstrip("/") / _FILENAME[shell]
             if not path.exists():
                 continue
@@ -309,7 +359,7 @@ def status(root: Path | None = None) -> list[Result]:
         # An install may have landed in a non-preferred directory.
         base = _base(root)
         found: Path | None = None
-        for d in _SEARCH[shell]:
+        for d in _search(shell):
             cand = base / d.lstrip("/") / _FILENAME[shell]
             if cand.exists():
                 found = cand
