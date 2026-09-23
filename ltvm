@@ -226,6 +226,7 @@ try:
         cmd_telemetry,
         cmd_update,
         cmd_validate,
+        cmd_vm_set,
         cmd_vm_start,
         cmd_vm_stop,
     )
@@ -1406,7 +1407,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp.set_defaults(func=cmd_list)
 
-    # -- vm (console-log | crash-collect | nmi | snapshot | restore) --
+    # -- vm (console-log | crash-collect | nmi | snapshot | restore | set) --
     vm_parser = sub.add_parser(
         "vm",
         parents=[common],
@@ -1519,6 +1520,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _vrp_tag.completer = complete_snapshot_tags  # type: ignore[attr-defined]
     vrp.set_defaults(func=cmd_restore)
+
+    vsetp = vm_sub.add_parser(
+        "set",
+        parents=[common],
+        help="Change the vCPUs or memory of a stopped VM (next start)",
+    )
+    _vsetp_name = vsetp.add_argument("name", help="VM name")
+    _vsetp_name.completer = complete_vms  # type: ignore[attr-defined]
+    vsetp.add_argument("--vcpus", type=int, default=None, help="New vCPU count")
+    vsetp.add_argument(
+        "--mem", type=int, default=None, help="New memory size in MB"
+    )
+    vsetp.set_defaults(func=cmd_vm_set)
 
     def _vm_no_action(args: argparse.Namespace) -> int:
         vm_parser.print_help()

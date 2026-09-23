@@ -112,3 +112,10 @@ def cmd_restore(args: argparse.Namespace) -> int:
     from ltvm_pkg.vm_commands import cmd_restore as _restore
 
     return _vm_call(_restore, args, use_json)
+
+
+def cmd_vm_set(args: argparse.Namespace) -> int:
+    use_json = args.json
+    from ltvm_pkg.vm_commands import cmd_set as _set
+
+    return _vm_call(_set, args, use_json)
