@@ -18,6 +18,10 @@ ltvm target fetch rocky9       # pre-built artifacts (fastest)
 # or: ltvm build all rocky9 --lustre-tree ~/lustre-release
 ```
 
+On macOS run `./ltvm install` *without* sudo: it refuses to run
+as root there (Homebrew will not) and elevates only the steps
+that need it -- see "Running on macOS" in README.md.
+
 Ask: **"Where is your Lustre source checkout?"**  The usage
 guidance an agent needs is the `ltvm` skill, which `ltvm
 install` links into their skill directories -- there is
@@ -117,6 +121,11 @@ image, and for the test suite, which sets it in `tests/conftest.py` so
 `ltvm doctor --fix` under pytest cannot rewrite the developer's real
 `/etc/bash_completion.d`.
 
+macOS takes its directories from the Homebrew prefix instead
+(`_SEARCH_MACOS`): `/usr/share` there is on the SIP-sealed system
+volume, which not even root can write.  The prefix is the user's, so
+nothing elevates, and it is found without running `brew`.
+
 ## Repository Layout
 
 - `targets/` -- `targets.yaml` (source of truth), shared
@@ -140,7 +149,7 @@ image, and for the test suite, which sets it in `tests/conftest.py` so
 ## Quick Start
 
 ```bash
-sudo ./ltvm install
+sudo ./ltvm install                # macOS: no sudo (see above)
 ltvm target fetch rocky9
 ltvm build status
 ```
