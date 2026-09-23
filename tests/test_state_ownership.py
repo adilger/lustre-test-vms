@@ -68,6 +68,53 @@ class TestInfoLock:
         assert VMInfo.load("co1-lock").pid == 777
 
 
+class TestEnsureDir:
+    """The first create on a host where nothing made /opt/qemu-vms.
+
+    On macOS `ltvm install` has no bridge step, which is what makes
+    VM_DIR on Linux, so the IP-allocation lock's bare mkdir died with
+    PermissionError before the VM got an address.
+    """
+
+    def test_makes_a_missing_dir_as_the_user(self, tmp_path: Path) -> None:
+        d = tmp_path / "a" / "b"
+        with patch.object(priv, "sudo_run") as sudo:
+            priv.ensure_dir(d)
+        assert d.is_dir()
+        sudo.assert_not_called()
+
+    def test_escalates_when_the_parent_is_not_writable(
+        self, tmp_path: Path
+    ) -> None:
+        d = tmp_path / "qemu-vms"
+        with (
+            patch.object(Path, "mkdir", side_effect=PermissionError),
+            patch.object(priv, "sudo_run") as sudo,
+        ):
+            priv.ensure_dir(d)
+        sudo.assert_called_once()
+        assert sudo.call_args.args[0] == ["mkdir", "-p", str(d)]
+
+    def test_noninteractive_without_sudo_raises(self, tmp_path: Path) -> None:
+        with (
+            patch.object(Path, "mkdir", side_effect=PermissionError),
+            patch.object(priv, "sudo_ready", return_value=False),
+            patch.object(priv, "sudo_run") as sudo,
+            pytest.raises(PermissionError),
+        ):
+            priv.ensure_dir(tmp_path / "x", noninteractive=True)
+        sudo.assert_not_called()
+
+    def test_existing_dir_is_left_alone(self, tmp_path: Path) -> None:
+        with (
+            patch.object(Path, "mkdir") as mkdir,
+            patch.object(priv, "sudo_run") as sudo,
+        ):
+            priv.ensure_dir(tmp_path)
+        mkdir.assert_not_called()
+        sudo.assert_not_called()
+
+
 class TestEnsureLockFile:
     """A lock file must never be created by rename.
 

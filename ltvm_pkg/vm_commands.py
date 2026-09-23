@@ -2527,10 +2527,19 @@ def _check_export_tools() -> list[str]:
     Split out so tests can exercise the check directly without
     mocking the rest of cmd_doctor.  `ltvm install` is the fixer for
     anything listed here.
+
+    Nothing on macOS: export drives losetup and mount, so it cannot run
+    there whatever is installed, and `ltvm install` does not try to
+    provide these.  Counting them made doctor exit non-zero forever on
+    every Mac; cmd_doctor prints a note instead, the way it skips the
+    other Linux-only checks.
     """
     import shutil as _shutil
 
     from ltvm_pkg import image_export
+
+    if is_macos():
+        return []
 
     warnings: list[str] = []
     for tool in ("parted", "qemu-img", "mkfs.vfat"):
@@ -3061,6 +3070,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                         print(f"  FAILED to remove: {err or 'unknown error'}")
                         fix_failures += 1
 
+    if is_macos():
+        print("note: `ltvm target export` needs a Linux host; not checked")
     for line in _check_export_tools():
         print(line)
         issues += 1

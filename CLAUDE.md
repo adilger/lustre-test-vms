@@ -18,6 +18,10 @@ ltvm target fetch rocky9       # pre-built artifacts (fastest)
 # or: ltvm build all rocky9 --lustre-tree ~/lustre-release
 ```
 
+On macOS run `./ltvm install` *without* sudo: it refuses to run
+as root there (Homebrew will not) and elevates only the steps
+that need it -- see "Running on macOS" in README.md.
+
 Ask: **"Where is your Lustre source checkout?"**  The usage
 guidance an agent needs is the `ltvm` skill, which `ltvm
 install` links into their skill directories -- there is
@@ -117,6 +121,11 @@ image, and for the test suite, which sets it in `tests/conftest.py` so
 `ltvm doctor --fix` under pytest cannot rewrite the developer's real
 `/etc/bash_completion.d`.
 
+macOS takes its directories from the Homebrew prefix instead
+(`_SEARCH_MACOS`): `/usr/share` there is on the SIP-sealed system
+volume, which not even root can write.  The prefix is the user's, so
+nothing elevates, and it is found without running `brew`.
+
 ## Repository Layout
 
 - `targets/` -- `targets.yaml` (source of truth), shared
@@ -140,7 +149,7 @@ image, and for the test suite, which sets it in `tests/conftest.py` so
 ## Quick Start
 
 ```bash
-sudo ./ltvm install
+sudo ./ltvm install                # macOS: no sudo (see above)
 ltvm target fetch rocky9
 ltvm build status
 ```
@@ -264,7 +273,9 @@ Boot shim layout when `grub-efi-amd64-signed` is installed;
 RHEL's refuses without `--force`).  Host needs `dosfstools`
 and GRUB's x86_64-efi modules (`grub-efi-amd64-bin` /
 `grub2-efi-x64-modules`); `ltvm install` and `ltvm doctor`
-cover both.
+cover both.  Export needs `losetup` and `mount`, so it is
+Linux-only: on macOS doctor prints a note instead of counting
+the missing tools as issues.
 
 ```bash
 ltvm target export rocky9                      # bootable qcow2

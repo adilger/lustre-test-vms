@@ -18,7 +18,7 @@ from typing import Any, NoReturn
 
 from . import rootless, site_config, vm_state
 from .host_setup import is_macos, socket_vmnet_socket_path
-from .priv import ensure_lock_file, invoking_user, sudo_run
+from .priv import ensure_dir, ensure_lock_file, invoking_user, sudo_run
 from .vm_state import (
     BRIDGE,
     EXIT_ERROR,
@@ -222,7 +222,7 @@ def _launch_lock() -> Iterator[None]:
     new QEMU's pid is recorded, which is when ``is_running`` counts it.
     """
     path = vm_state.VM_DIR / ".launch.lock"
-    path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_dir(path.parent)
     try:
         ensure_lock_file(path)
     except (OSError, RuntimeError):
@@ -273,9 +273,14 @@ def is_running(vm: VMInfo) -> bool:
     if vm.pid <= 0:
         return False
     if is_macos():
+        # Only args=, not comm=: macOS truncates comm to 16 characters
+        # *including the directory*, so /opt/qemu/bin/qemu-system-aarch64
+        # came back as "/opt/qemu/bin/qe" and every running VM -- whose
+        # root-owned QEMU the caller cannot signal to check otherwise --
+        # was listed as stopped.  argv[0] carries the whole path.
         try:
             r = subprocess.run(
-                ["ps", "-p", str(vm.pid), "-o", "comm=", "-o", "args="],
+                ["ps", "-p", str(vm.pid), "-o", "args="],
                 capture_output=True,
                 text=True,
                 check=False,
@@ -284,13 +289,12 @@ def is_running(vm: VMInfo) -> bool:
             return False
         if r.returncode != 0:
             return False
-        out = r.stdout.strip()
-        if not out:
+        ps_args = r.stdout.split()
+        if not ps_args:
             return False
-        comm = Path(out.split()[0]).name
-        if not comm.startswith("qemu-system"):
+        if not Path(ps_args[0]).name.startswith("qemu-system"):
             return False
-        return _cmdline_names_vm(out.split(), vm.name, strict=False)
+        return _cmdline_names_vm(ps_args, vm.name, strict=False)
     try:
         comm = Path(f"/proc/{vm.pid}/comm").read_text().strip()
     except OSError:

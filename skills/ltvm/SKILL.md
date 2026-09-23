@@ -23,6 +23,10 @@ ltvm target fetch rocky9        # pre-built artifacts -- much faster than buildi
 ltvm build status               # what is stale
 ```
 
+On macOS it is `./ltvm install` with no `sudo`: it refuses to run as
+root there and prompts for sudo itself where it must (README.md,
+"Running on macOS").
+
 `install` also sets up tab completion for the human's shell (bash, zsh,
 fish), which needs a new shell before it works -- worth saying when you
 walk someone through setup, since nothing else announces it. `ltvm
@@ -191,6 +195,18 @@ If `doctor` reports that this user is not in the `ltvm` group, that is
 for the human to fix (`sudo usermod -aG ltvm <user>`, then a new login);
 do not try to work around it.
 
+**macOS** has no shared layout. Guests reach the network through
+socket_vmnet, run by launchd, and resolve each other through ltvm's own
+dnsmasq; both come from `./ltvm install`. The lifecycle commands still
+run as the user, but elevate individual steps through sudo: every
+`create` and `start` launches QEMU as root, `stop` and `destroy` signal
+it as root, and the first `create` makes `/opt/qemu-vms` and each one
+updates `/etc/hosts`. You cannot answer a sudo password prompt, so when
+one of these fails for want of a password, ask the human to run that
+same command in their own terminal -- where sudo can prompt and then
+remember the password for a few minutes -- rather than working around
+it. Never edit sudoers.
+
 ## Talking to a VM
 
 Every VM gets an entry in your `~/.ssh/config`, so plain `ssh` and
@@ -199,11 +215,16 @@ Every VM gets an entry in your `~/.ssh/config`, so plain `ssh` and
 ```bash
 ssh co1-single 'lctl dl'
 scp co1-single:/tmp/out.txt .
-timeout 30 ssh co1-single 'uptime'     # when it may be hung
+ssh -o ConnectTimeout=10 -o ServerAliveInterval=5 \
+    -o ServerAliveCountMax=3 co1-single uptime   # when it may be hung
 ```
 
-Wrap anything that might hang in `timeout`. A VM that stops answering is
-a candidate for `ltvm vm console-log`, not for a longer wait.
+Bound anything that might hang. The ssh options above give up on a VM
+that stops answering within about 15 seconds, on any host. For a long
+command, set a timeout on your own command runner, or use `timeout` --
+which macOS lacks; Homebrew's coreutils installs it as `gtimeout`. A VM
+that stops answering is a candidate for `ltvm vm console-log`, not for a
+longer wait.
 
 Do not use `ltvm vm console-log -f`: it streams until Ctrl-C, which is
 useful to a human watching a boot and a way to hang yourself. Take

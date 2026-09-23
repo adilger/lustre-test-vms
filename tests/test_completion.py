@@ -32,6 +32,17 @@ import pytest
 from ltvm_pkg import completion, shell_completion
 
 
+@pytest.fixture(autouse=True)
+def _linux_layout() -> Any:
+    """Pin the Linux directory layout; TestMacOSLayout opts back out.
+
+    The path assertions below are written against the Linux candidates,
+    and on a Mac shell_completion would otherwise resolve Homebrew's.
+    """
+    with patch("ltvm_pkg.host_setup.is_macos", return_value=False):
+        yield
+
+
 def _args(**kw: object) -> argparse.Namespace:
     return argparse.Namespace(**kw)
 
@@ -371,6 +382,105 @@ class TestResolveTarget:
         assert str(
             shell_completion.resolve_target("bash", root=other).path
         ).startswith(str(other))
+
+
+class TestMacOSLayout:
+    """/usr/share is on the SIP-sealed system volume, which not even
+    root can write: picking it left doctor reporting completion missing
+    forever.  macOS installs under the Homebrew prefix instead."""
+
+    @pytest.fixture(autouse=True)
+    def _macos(self) -> Any:
+        with (
+            patch("ltvm_pkg.host_setup.is_macos", return_value=True),
+            patch.object(
+                shell_completion, "_brew_prefix", return_value="/opt/homebrew"
+            ),
+        ):
+            yield
+
+    def test_each_shell_lands_under_the_homebrew_prefix(
+        self, tmp_path: Path
+    ) -> None:
+        paths = {
+            s: shell_completion.resolve_target(s, root=tmp_path).path
+            for s in shell_completion.SHELLS
+        }
+        brew = tmp_path / "opt/homebrew"
+        assert paths == {
+            "bash": brew / "etc/bash_completion.d/ltvm",
+            "zsh": brew / "share/zsh/site-functions/_ltvm",
+            "fish": brew / "share/fish/vendor_completions.d/ltvm.fish",
+        }
+
+    def test_an_existing_system_directory_is_never_chosen(
+        self, tmp_path: Path
+    ) -> None:
+        """/usr/share/zsh/site-functions exists on every Mac, and was
+        the directory the Linux list picked first."""
+        (tmp_path / "usr/share/zsh/site-functions").mkdir(parents=True)
+        for shell in shell_completion.SHELLS:
+            target = shell_completion.resolve_target(shell, root=tmp_path)
+            assert "usr/share" not in str(target.path)
+            assert not target.directory_exists
+
+    def test_install_status_uninstall_round_trip(self, tmp_path: Path) -> None:
+        with patch("shutil.which", return_value="/bin/sh"):
+            installed = shell_completion.install(root=tmp_path)
+            assert {r.status for r in installed} == {"installed"}
+            assert all(
+                str(r.path).startswith(str(tmp_path / "opt/homebrew"))
+                for r in installed
+            )
+            status = shell_completion.status(root=tmp_path)
+            assert {r.status for r in status} == {"current"}
+            removed = shell_completion.uninstall(root=tmp_path)
+        assert {r.status for r in removed} == {"removed"}
+
+    def test_env_root_prefixes_the_homebrew_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("LTVM_COMPLETION_ROOT", str(tmp_path))
+        assert shell_completion.resolve_target("zsh").path == (
+            tmp_path / "opt/homebrew/share/zsh/site-functions/_ltvm"
+        )
+
+
+class TestBrewPrefix:
+    """Found without running brew or trusting PATH."""
+
+    def test_homebrew_prefix_env_wins(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "bin").mkdir()
+        (tmp_path / "bin/brew").touch()
+        monkeypatch.setenv("HOMEBREW_PREFIX", str(tmp_path))
+        assert shell_completion._brew_prefix() == str(tmp_path)
+
+    def test_brew_on_path_gives_its_grandparent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("HOMEBREW_PREFIX", raising=False)
+        with (
+            patch.object(Path, "exists", return_value=False),
+            patch("shutil.which", return_value="/somewhere/brew/bin/brew"),
+        ):
+            assert shell_completion._brew_prefix() == "/somewhere/brew"
+
+    @pytest.mark.parametrize(
+        ("machine", "expected"),
+        [("arm64", "/opt/homebrew"), ("x86_64", "/usr/local")],
+    )
+    def test_no_homebrew_uses_the_default_for_the_cpu(
+        self, machine: str, expected: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("HOMEBREW_PREFIX", raising=False)
+        with (
+            patch.object(Path, "exists", return_value=False),
+            patch("shutil.which", return_value=None),
+            patch("platform.machine", return_value=machine),
+        ):
+            assert shell_completion._brew_prefix() == expected
 
 
 # ── shell registration: install / uninstall / status ──────

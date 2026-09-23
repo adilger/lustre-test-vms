@@ -44,8 +44,17 @@ if [[ -n "$base" && "$base" != "$major.$minor" ]]; then
 fi
 
 new="$major.$minor.$((patch + 1))"
-sed "0,/^version = \"$current\"/s//version = \"$new\"/" \
-	"$pyproject" > "$pyproject.tmp"
+# awk, not `sed 0,/re/`: that address is GNU-only, and BSD sed on macOS
+# accepts it silently and replaces nothing -- the lock below was bumped
+# and pyproject was not.
+awk -v cur="$current" -v new="$new" '
+	!done && $0 == "version = \"" cur "\"" {
+		print "version = \"" new "\""
+		done = 1
+		next
+	}
+	{ print }
+' "$pyproject" > "$pyproject.tmp"
 mv "$pyproject.tmp" "$pyproject"
 git add "$pyproject"
 

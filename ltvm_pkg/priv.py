@@ -220,6 +220,30 @@ def chmod_regular(path: Path, mode: int) -> None:
         os.close(fd)
 
 
+def ensure_dir(path: Path, *, noninteractive: bool = False) -> None:
+    """Create directory *path* (and parents), escalating when it must.
+
+    /opt/qemu-vms is root-owned, and on macOS nothing creates it before
+    the first `ltvm create` -- the Linux `ltvm install` makes it while
+    setting up the bridge, which macOS has no equivalent of -- so a bare
+    ``mkdir`` from the unprivileged create died with PermissionError
+    before the VM got its IP.  Made under sudo, the directory is
+    root-owned 0755 as `ltvm install` would have left it.
+    """
+    if path.is_dir():
+        return
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except PermissionError:
+        if noninteractive and not sudo_ready():
+            raise
+        sudo_run(
+            ["mkdir", "-p", str(path)],
+            quiet=True,
+            noninteractive=noninteractive,
+        )
+
+
 def ensure_lock_file(path: Path, *, noninteractive: bool = False) -> None:
     """Create *path* as a 0666 lock file if it is not there yet.
 
@@ -303,17 +327,7 @@ def atomic_write(
     Creates parent directories as needed (sudo if required).
     """
     parent = path.parent
-    if not parent.exists():
-        try:
-            parent.mkdir(parents=True, exist_ok=True)
-        except PermissionError:
-            if noninteractive and not sudo_ready():
-                raise
-            sudo_run(
-                ["mkdir", "-p", str(parent)],
-                quiet=True,
-                noninteractive=noninteractive,
-            )
+    ensure_dir(parent, noninteractive=noninteractive)
 
     owns = _ltvm_owned(path)
     prev_owner: tuple[int, int] | None = None
