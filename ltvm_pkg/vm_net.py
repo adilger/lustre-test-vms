@@ -17,6 +17,7 @@ from typing import IO
 
 from . import rootless
 from .priv import atomic_write as _priv_atomic_write
+from .priv import ensure_dir as _ensure_dir
 from .priv import ensure_lock_file as _ensure_lock_file
 from .priv import sudo_ready, sudo_run
 from .qemu_run import die, run
@@ -122,7 +123,7 @@ def _open_lock_file(path: Path) -> IO[str]:
 @contextmanager
 def _ip_alloc_lock() -> Iterator[None]:
     """Exclusive file lock serialising IP allocation across concurrent creates."""
-    _IP_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_dir(_IP_LOCK_PATH.parent)
     with _open_lock_file(_IP_LOCK_PATH) as fh:
         fcntl.flock(fh, fcntl.LOCK_EX)
         try:
@@ -139,7 +140,7 @@ def _hosts_lock() -> Iterator[None]:
     each of which calls register_ssh_name(); without this lock the unsynchronised
     read-modify-write on /etc/hosts silently drops entries.
     """
-    _HOSTS_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_dir(_HOSTS_LOCK_PATH.parent)
     with _open_lock_file(_HOSTS_LOCK_PATH) as fh:
         fcntl.flock(fh, fcntl.LOCK_EX)
         try:
