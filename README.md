@@ -215,6 +215,7 @@ ltvm vm crash-collect <name>    Pull vmcore + run lustre_triage
 ltvm vm nmi           <name>    Inject NMI (panic + kdump)
 ltvm vm snapshot      <name>    Snapshot overlay disk
 ltvm vm restore       <name>    Restore to a snapshot
+ltvm vm set           <name>    Change --vcpus/--mem of a stopped VM
 ```
 
 `vm` also answers for the top-level VM commands -- `create`, `destroy`,

@@ -2518,6 +2518,44 @@ def cmd_restore(args: argparse.Namespace) -> None:
         print(f"restored {vm.name} to '{args.tag}'")
 
 
+# ── set ──────────────────────────────────────────────────
+
+
+def cmd_set(args: argparse.Namespace) -> None:
+    """Change the vCPU count and/or memory of a stopped VM.
+
+    Both are read from the .info file each time QEMU is launched, so
+    the new values take effect at the next start, and the VM keeps its
+    disks and everything installed on them -- unlike destroying and
+    recreating it.  The VM must be stopped: a running QEMU would keep
+    its old size, and `list` would then report values it isn't using.
+    """
+    if args.vcpus is None and args.mem is None:
+        die("nothing to set: give --vcpus and/or --mem")
+    if args.vcpus is not None and args.vcpus <= 0:
+        die(f"--vcpus must be > 0 (got {args.vcpus})")
+    if args.mem is not None and args.mem <= 0:
+        die(f"--mem must be > 0 (got {args.mem})")
+
+    vm = VMInfo.load(args.name)
+    if is_running(vm):
+        die(f"{vm.name} is running; stop it first (`ltvm stop {vm.name}`)")
+
+    changes = []
+    if args.vcpus is not None and args.vcpus != vm.vcpus:
+        changes.append(f"vcpus {vm.vcpus} -> {args.vcpus}")
+        vm.vcpus = args.vcpus
+    if args.mem is not None and args.mem != vm.mem:
+        changes.append(f"mem {vm.mem}M -> {args.mem}M")
+        vm.mem = args.mem
+    if not changes:
+        print(f"{vm.name}: no change")
+        return
+
+    vm.save()
+    print(f"{vm.name}: {', '.join(changes)} (takes effect at next start)")
+
+
 # ── doctor ───────────────────────────────────────────────
 
 

@@ -446,6 +446,7 @@ ltvm vm nmi co1-single                # inject NMI -> kdump
 ltvm vm snapshot co1-single [tag]     # snapshot the overlay disk
 ltvm vm snapshot co1-single --delete tag
 ltvm vm restore co1-single [tag]      # restore (no tag: list them)
+ltvm vm set co1-single --vcpus 2 --mem 4096   # resize a stopped VM
 ltvm vm crash-collect co1-single --mod-dir $CO/1
 ltvm destroy co1-single
 ```
@@ -472,6 +473,13 @@ filesystem into whatever the overlay is, so the flag is the whole
 mechanism.  Both are fixed at create time -- `ltvm create` against an
 existing VM warns that a differing value was ignored.  `cluster create`
 takes `--root-size` too and applies it to every node.
+
+**Resizing:** vCPUs and memory are not fixed: `ltvm vm set <name>
+--vcpus N --mem MB` rewrites them in the stopped VM's `.info`, which
+`launch_qemu` reads on every start, so the VM keeps its disks and
+installed state.  It refuses a running VM, whose QEMU would keep the
+old size while `list` showed the new one.  The host memory check runs
+at the next `start`, as for any VM.
 
 **Host memory:** `create` and `start` admit a VM only when the running
 VMs' `-m` plus its own fit MemTotal less a reserve

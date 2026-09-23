@@ -1857,6 +1857,76 @@ class TestCmdSnapshot:
         assert "snapshot 'v1' deleted" in capsys.readouterr().out
 
 
+# ── cmd_set ──────────────────────────────────────────────
+
+
+class TestCmdSet:
+    """cmd_set resizes a stopped VM in place for its next start."""
+
+    def _args(
+        self, name: str, vcpus: int | None = None, mem: int | None = None
+    ):
+        return argparse.Namespace(name=name, vcpus=vcpus, mem=mem)
+
+    def test_changes_vcpus_and_mem(
+        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        vm = _seed_vm_files(tmp_vmdir, "set-both")
+        with patch("ltvm_pkg.vm_commands.is_running", return_value=False):
+            vm_commands.cmd_set(self._args("set-both", vcpus=2, mem=1536))
+        vm = VMInfo.load("set-both")
+        assert (vm.vcpus, vm.mem) == (2, 1536)
+        assert "next start" in capsys.readouterr().out
+
+    def test_keeps_other_fields(self, tmp_vmdir: Path) -> None:
+        """Only VCPUS changes; disks and identity stay as they were."""
+        before = _seed_vm_files(tmp_vmdir, "set-keep", mdt=2, ost=6)
+        with patch("ltvm_pkg.vm_commands.is_running", return_value=False):
+            vm_commands.cmd_set(self._args("set-keep", vcpus=before.vcpus + 1))
+        after = VMInfo.load("set-keep")
+        assert after.vcpus == before.vcpus + 1
+        assert (after.mem, after.mdt_disks, after.ost_disks, after.ip) == (
+            before.mem,
+            before.mdt_disks,
+            before.ost_disks,
+            before.ip,
+        )
+
+    def test_running_vm_is_refused(self, tmp_vmdir: Path) -> None:
+        before = _seed_vm_files(tmp_vmdir, "set-running")
+        with (
+            patch("ltvm_pkg.vm_commands.is_running", return_value=True),
+            pytest.raises(SystemExit),
+        ):
+            vm_commands.cmd_set(self._args("set-running", vcpus=1))
+        assert VMInfo.load("set-running").vcpus == before.vcpus
+
+    @pytest.mark.parametrize(
+        "vcpus,mem", [(None, None), (0, None), (None, 0), (-1, 512)]
+    )
+    def test_bad_arguments_die(
+        self, tmp_vmdir: Path, vcpus: int | None, mem: int | None
+    ) -> None:
+        _seed_vm_files(tmp_vmdir, "set-bad")
+        with (
+            patch("ltvm_pkg.vm_commands.is_running", return_value=False),
+            pytest.raises(SystemExit),
+        ):
+            vm_commands.cmd_set(self._args("set-bad", vcpus=vcpus, mem=mem))
+
+    def test_same_values_do_not_rewrite(
+        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        vm = _seed_vm_files(tmp_vmdir, "set-same")
+        with (
+            patch("ltvm_pkg.vm_commands.is_running", return_value=False),
+            patch.object(VMInfo, "save") as mock_save,
+        ):
+            vm_commands.cmd_set(self._args("set-same", vcpus=vm.vcpus))
+        mock_save.assert_not_called()
+        assert "no change" in capsys.readouterr().out
+
+
 # ── cmd_restore ──────────────────────────────────────────
 
 

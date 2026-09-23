@@ -68,6 +68,11 @@ VM's own OS disk (default 8G). Both are fixed at create time, so a VM
 that needs room for a debug build or a vmcore wants `--root-size 20G`
 when it is created, not after.
 
+vCPUs and memory can change later without recreating the VM: stop it,
+then `ltvm vm set <name> --vcpus 2 --mem 4096`, and the new size applies
+at the next start. Use it to shrink idle VMs on a crowded host rather
+than destroying them.
+
 Running guests may commit at most the host's RAM less a reserve.
 `create` and `start` refuse a VM that would go over it and list the
 guests using it; with `--wait SECONDS` they wait up to that long for
