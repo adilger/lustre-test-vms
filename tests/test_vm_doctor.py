@@ -345,6 +345,25 @@ class TestCheckExportTools:
     """Direct test of the _check_export_tools helper so its decisions
     are pinned independently of the surrounding doctor plumbing."""
 
+    @pytest.fixture(autouse=True)
+    def _linux_host(self, tmp_path: Path) -> Iterator[None]:
+        """A Linux host whose GRUB UEFI modules are present, so each
+        test sees only the tool it takes away -- on any build host."""
+        with (
+            patch("ltvm_pkg.vm_commands.is_macos", return_value=False),
+            patch("ltvm_pkg.image_export.GRUB_EFI_DIR", tmp_path),
+        ):
+            yield
+
+    def test_nothing_is_an_issue_on_macos(self) -> None:
+        """Export needs losetup and mount, so on a Mac it cannot run
+        at all; its tools missing must not keep doctor failing."""
+        with (
+            patch("ltvm_pkg.vm_commands.is_macos", return_value=True),
+            patch("shutil.which", return_value=None),
+        ):
+            assert vm_commands._check_export_tools() == []
+
     def test_all_present_no_warnings(self) -> None:
         with patch(
             "shutil.which",

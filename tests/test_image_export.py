@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -439,6 +440,11 @@ class TestCliWiring:
 class TestDoctorFlagsMissingExportTools:
     """`ltvm doctor` surfaces missing export deps so users aren't
     surprised at export time."""
+
+    @pytest.fixture(autouse=True)
+    def _linux_host(self) -> Iterator[None]:
+        with patch("ltvm_pkg.vm_commands.is_macos", return_value=False):
+            yield
 
     def test_flags_missing_parted(self) -> None:
         import shutil as _shutil

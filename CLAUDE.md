@@ -264,7 +264,9 @@ Boot shim layout when `grub-efi-amd64-signed` is installed;
 RHEL's refuses without `--force`).  Host needs `dosfstools`
 and GRUB's x86_64-efi modules (`grub-efi-amd64-bin` /
 `grub2-efi-x64-modules`); `ltvm install` and `ltvm doctor`
-cover both.
+cover both.  Export needs `losetup` and `mount`, so it is
+Linux-only: on macOS doctor prints a note instead of counting
+the missing tools as issues.
 
 ```bash
 ltvm target export rocky9                      # bootable qcow2
