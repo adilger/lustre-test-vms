@@ -1370,11 +1370,35 @@ class TestGuestScope:
     """QEMU keeps its caller's cgroup; a guest must not die with its caller."""
 
     ENV = {"XDG_RUNTIME_DIR": "/run/user/1001"}
+    MANAGER = "0::/user.slice/user-1001.slice/user@1001.service/app.slice/x"
+    SESSION = "0::/user.slice/user-1001.slice/session-4.scope"
+
+    @pytest.fixture(autouse=True)
+    def _host(self, tmp_path: Path) -> None:
+        self.host = tmp_path / "host"
+        self.host.mkdir()
 
     def _scope(
-        self, vm: VMInfo, env: dict[str, str], euid: int = 1001
+        self,
+        vm: VMInfo,
+        env: dict[str, str],
+        euid: int = 1001,
+        cgroup: str = MANAGER,
+        linger: bool = False,
     ) -> list[str]:
+        proc = self.host / "cgroup"
+        proc.write_text(f"{cgroup}\n")
+        lingering = self.host / "linger"
+        lingering.mkdir(exist_ok=True)
+        if linger:
+            (lingering / "alice").touch()
         with (
+            patch("ltvm_pkg.qemu_run._PROC_SELF_CGROUP", proc),
+            patch("ltvm_pkg.qemu_run._LINGER_DIR", lingering),
+            patch(
+                "ltvm_pkg.qemu_run.pwd.getpwuid",
+                return_value=MagicMock(pw_name="alice"),
+            ),
             patch.dict("os.environ", env, clear=True),
             patch("ltvm_pkg.qemu_run.os.geteuid", return_value=euid),
             patch("ltvm_pkg.qemu_run.sys.platform", "linux"),
@@ -1394,6 +1418,29 @@ class TestGuestScope:
         assert "--unit=ltvm-co23-lnet-1700000000.scope" in prefix
         assert "--collect" in prefix
         assert prefix[-1] == "--"
+
+    def test_a_session_guest_without_linger_stays_in_its_session(
+        self, tmp_vmdir: Path
+    ) -> None:
+        # user@UID.service stops at logout when linger is off; the session
+        # scope does not, with KillUserProcesses=no.
+        vm = _make_vm(tmp_vmdir)
+        assert self._scope(vm, self.ENV, cgroup=self.SESSION) == []
+
+    def test_a_caller_under_its_manager_gets_a_scope_without_linger(
+        self, tmp_vmdir: Path
+    ) -> None:
+        vm = _make_vm(tmp_vmdir)
+        assert self._scope(vm, self.ENV, cgroup=self.MANAGER) != []
+        other = "0::/user.slice/user-1002.slice/user@1002.service/x.scope"
+        assert self._scope(vm, self.ENV, cgroup=other) == []
+
+    def test_a_lingering_user_gets_a_scope_from_a_session(
+        self, tmp_vmdir: Path
+    ) -> None:
+        vm = _make_vm(tmp_vmdir)
+        prefix = self._scope(vm, self.ENV, cgroup=self.SESSION, linger=True)
+        assert prefix[:3] == ["systemd-run", "--user", "--scope"]
 
     def test_no_scope_without_a_user_manager_as_root_or_when_off(
         self, tmp_vmdir: Path

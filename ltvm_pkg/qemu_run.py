@@ -6,6 +6,7 @@ import configparser
 import fcntl
 import math
 import os
+import pwd
 import re
 import shutil
 import signal
@@ -374,10 +375,48 @@ def _prepare_log(vm: Any) -> None:
 
 
 GUEST_SLICE = "ltvm-guests.slice"
+_PROC_SELF_CGROUP = Path("/proc/self/cgroup")
+_LINGER_DIR = Path("/var/lib/systemd/linger")
 _SCOPE_REFUSALS = (
     "Failed to start transient scope unit",
     "Failed to connect to",
 )
+
+
+def _manager_outlives_login(uid: int) -> bool:
+    """Will ``user@UID.service`` outlive the caller's login?
+
+    It stops at logout unless the user lingers, while a login's session
+    scope survives it.  A caller already running under it is tied to it
+    anyway.
+    """
+    try:
+        cgroup = _PROC_SELF_CGROUP.read_text()
+    except OSError:
+        cgroup = ""
+    for line in cgroup.splitlines():
+        if line.startswith("0::"):
+            if f"user@{uid}.service" in line[3:].split("/"):
+                return True
+            break
+    try:
+        user = pwd.getpwuid(uid).pw_name
+    except KeyError:
+        user = None
+    if user is not None:
+        return (_LINGER_DIR / user).exists()
+    if not shutil.which("loginctl"):
+        return False
+    try:
+        r = subprocess.run(
+            ["loginctl", "show-user", str(uid), "-p", "Linger", "--value"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return r.returncode == 0 and r.stdout.strip() == "yes"
 
 
 def _guest_scope(vm: VMInfo) -> list[str]:
@@ -386,7 +425,8 @@ def _guest_scope(vm: VMInfo) -> list[str]:
     QEMU daemonizes but keeps its caller's cgroup, so a guest started from a
     service, or from a tool in a transient scope, dies when that unit is
     stopped or killed.  In a user scope of its own it belongs to no caller.
-    ``[]`` where there is no user manager to ask, or ``LTVM_GUEST_SCOPE=0``.
+    ``[]`` where there is no user manager to ask, where the manager stops at
+    logout, or ``LTVM_GUEST_SCOPE=0``.
     """
     if os.environ.get("LTVM_GUEST_SCOPE", "1") == "0" or os.geteuid() == 0:
         return []
@@ -396,6 +436,8 @@ def _guest_scope(vm: VMInfo) -> list[str]:
         os.environ.get("XDG_RUNTIME_DIR")
         or os.environ.get("DBUS_SESSION_BUS_ADDRESS")
     ):
+        return []
+    if not _manager_outlives_login(os.geteuid()):
         return []
     name = re.sub(r"[^A-Za-z0-9_.-]", "_", vm.name)
     return [
