@@ -6,6 +6,8 @@ import configparser
 import fcntl
 import math
 import os
+import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -369,6 +371,55 @@ def _prepare_log(vm: Any) -> None:
             ["chown", f"{owner[0]}:{owner[1]}", str(vm.log_path)], quiet=True
         )
     sudo_run(["chmod", "644", str(vm.log_path)], quiet=True)
+
+
+GUEST_SLICE = "ltvm-guests.slice"
+_SCOPE_REFUSALS = (
+    "Failed to start transient scope unit",
+    "Failed to connect to",
+)
+
+
+def _guest_scope(vm: VMInfo) -> list[str]:
+    """A ``systemd-run`` prefix that gives an unprivileged QEMU a scope of its own.
+
+    QEMU daemonizes but keeps its caller's cgroup, so a guest started from a
+    service, or from a tool in a transient scope, dies when that unit is
+    stopped or killed.  In a user scope of its own it belongs to no caller.
+    ``[]`` where there is no user manager to ask, or ``LTVM_GUEST_SCOPE=0``.
+    """
+    if os.environ.get("LTVM_GUEST_SCOPE", "1") == "0" or os.geteuid() == 0:
+        return []
+    if not sys.platform.startswith("linux") or not shutil.which("systemd-run"):
+        return []
+    if not (
+        os.environ.get("XDG_RUNTIME_DIR")
+        or os.environ.get("DBUS_SESSION_BUS_ADDRESS")
+    ):
+        return []
+    name = re.sub(r"[^A-Za-z0-9_.-]", "_", vm.name)
+    return [
+        "systemd-run",
+        "--user",
+        "--scope",
+        "--quiet",
+        "--collect",
+        f"--unit=ltvm-{name}-{int(time.time())}.scope",
+        f"--slice={GUEST_SLICE}",
+        f"--description=ltvm guest {vm.name}",
+        "--",
+    ]
+
+
+def _scope_refused(log_path: Path, offset: int) -> bool:
+    """Did systemd-run fail to make the scope, rather than QEMU fail to start?"""
+    try:
+        with open(log_path, "rb") as log:
+            log.seek(offset)
+            text = log.read().decode(errors="replace")
+    except OSError:
+        return False
+    return any(refusal in text for refusal in _SCOPE_REFUSALS)
 
 
 def launch_qemu(vm: VMInfo, *, wait_seconds: int = 0) -> None:
@@ -751,7 +802,16 @@ def _start_qemu(vm: VMInfo) -> None:
             # is opened here, unprivileged, and inherited as fd 1/2 --
             # sudo preserves those.
             argv = qemu_args if helper is not None else _as_root(qemu_args)
-            r = subprocess.run(argv, stdout=log, stderr=log)
+            scope = _guest_scope(vm) if helper is not None else []
+            log.flush()
+            logged = os.fstat(log.fileno()).st_size
+            r = subprocess.run([*scope, *argv], stdout=log, stderr=log)
+            if (
+                r.returncode != 0
+                and scope
+                and _scope_refused(vm.log_path, logged)
+            ):
+                r = subprocess.run(argv, stdout=log, stderr=log)
         if r.returncode != 0:
             die(
                 f"QEMU failed to start for '{vm.name}' "

@@ -218,6 +218,9 @@ def _run_launch(vm: VMInfo, harness: _LaunchHarness) -> None:
         # TestMemoryBudgetCheck for direct coverage of the check.
         patch("ltvm_pkg.qemu_run._memory_shortfall", return_value=None),
         patch("ltvm_pkg.qemu_run.time.time", return_value=1700000000),
+        # Command construction, not where the guest's cgroup comes from;
+        # TestGuestScope covers that.
+        patch("ltvm_pkg.qemu_run._guest_scope", return_value=[]),
         patch.object(VMInfo, "update_pid"),
         patch.object(VMInfo, "update_last_boot"),
     ):
@@ -1358,3 +1361,109 @@ class TestLaunchElevation:
             _run_launch(vm, h)
         assert h.qemu_args is not None
         assert h.qemu_args[0] != "sudo"
+
+
+# ── an unprivileged guest's own scope ────────────────────
+
+
+class TestGuestScope:
+    """QEMU keeps its caller's cgroup; a guest must not die with its caller."""
+
+    ENV = {"XDG_RUNTIME_DIR": "/run/user/1001"}
+
+    def _scope(
+        self, vm: VMInfo, env: dict[str, str], euid: int = 1001
+    ) -> list[str]:
+        with (
+            patch.dict("os.environ", env, clear=True),
+            patch("ltvm_pkg.qemu_run.os.geteuid", return_value=euid),
+            patch("ltvm_pkg.qemu_run.sys.platform", "linux"),
+            patch(
+                "ltvm_pkg.qemu_run.shutil.which",
+                return_value="/usr/bin/systemd-run",
+            ),
+            patch("ltvm_pkg.qemu_run.time.time", return_value=1700000000),
+        ):
+            return qemu_run._guest_scope(vm)
+
+    def test_a_user_with_a_manager_gets_a_scope_per_guest(
+        self, tmp_vmdir: Path
+    ) -> None:
+        prefix = self._scope(_make_vm(tmp_vmdir, name="co23-lnet"), self.ENV)
+        assert prefix[:3] == ["systemd-run", "--user", "--scope"]
+        assert "--unit=ltvm-co23-lnet-1700000000.scope" in prefix
+        assert "--collect" in prefix
+        assert prefix[-1] == "--"
+
+    def test_no_scope_without_a_user_manager_as_root_or_when_off(
+        self, tmp_vmdir: Path
+    ) -> None:
+        vm = _make_vm(tmp_vmdir)
+        assert self._scope(vm, {}) == []
+        assert self._scope(vm, self.ENV, euid=0) == []
+        assert self._scope(vm, {**self.ENV, "LTVM_GUEST_SCOPE": "0"}) == []
+
+    def _launch(
+        self, tmp_vmdir: Path, results: list[int], refusal: str = ""
+    ) -> list[list[str]]:
+        vm = _make_vm(tmp_vmdir)
+        vm.pid_path.write_text("12345\n")
+        launched: list[list[str]] = []
+
+        def subprocess_run(argv, **kwargs):
+            launched.append(list(argv))
+            if argv[0] == "systemd-run" and refusal:
+                kwargs["stdout"].write(refusal + "\n")
+                kwargs["stdout"].flush()
+            r = MagicMock()
+            r.returncode = results[len(launched) - 1]
+            return r
+
+        ready = MagicMock(
+            ok=True, helper=Path("/usr/lib/qemu/qemu-bridge-helper")
+        )
+        with (
+            patch(
+                "ltvm_pkg.qemu_run.run", return_value=MagicMock(returncode=0)
+            ),
+            patch(
+                "ltvm_pkg.qemu_run.subprocess.run", side_effect=subprocess_run
+            ),
+            patch("ltvm_pkg.qemu_run.is_running", return_value=False),
+            patch("ltvm_pkg.qemu_run._memory_shortfall", return_value=None),
+            patch("ltvm_pkg.qemu_run.os.geteuid", return_value=1001),
+            patch("ltvm_pkg.qemu_run.is_macos", return_value=False),
+            patch("ltvm_pkg.qemu_run.rootless.readiness", return_value=ready),
+            patch(
+                "ltvm_pkg.qemu_run._guest_scope",
+                return_value=["systemd-run", "--user", "--scope", "--"],
+            ),
+            patch.object(VMInfo, "update_pid"),
+            patch.object(VMInfo, "update_last_boot"),
+        ):
+            qemu_run.launch_qemu(vm)
+        return launched
+
+    def test_an_unprivileged_guest_starts_in_its_scope(
+        self, tmp_vmdir: Path
+    ) -> None:
+        [argv] = self._launch(tmp_vmdir, [0])
+        assert argv[:4] == ["systemd-run", "--user", "--scope", "--"]
+        assert "-daemonize" in argv
+
+    def test_a_scope_systemd_refuses_falls_back_to_the_old_launch(
+        self, tmp_vmdir: Path
+    ) -> None:
+        first, second = self._launch(
+            tmp_vmdir,
+            [1, 0],
+            refusal="Failed to start transient scope unit: Access denied",
+        )
+        assert first[0] == "systemd-run"
+        assert second[0] != "systemd-run" and "-daemonize" in second
+
+    def test_a_qemu_that_fails_inside_its_scope_is_not_retried(
+        self, tmp_vmdir: Path
+    ) -> None:
+        with pytest.raises(SystemExit):
+            self._launch(tmp_vmdir, [1], refusal="")

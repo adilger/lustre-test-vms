@@ -286,6 +286,14 @@ directories stops one member from deleting another's VM files.  A
 passthrough VM still runs QEMU as root, so only trusted users belong in
 the group on a host that uses passthrough.
 
+An unprivileged QEMU starts in a systemd user scope of its own,
+`ltvm-<name>-<time>.scope` in `ltvm-guests.slice`, when the user has a
+systemd manager.  QEMU daemonizes but keeps its caller's cgroup, so a
+guest started from a service, or from a tool that runs in a transient
+scope, would otherwise be killed whenever that unit is stopped.
+`LTVM_GUEST_SCOPE=0` turns it off; a manager that refuses the scope gets
+the plain launch.
+
 ### Agent/session ownership
 
 Every new VM records an advisory `owner_id` for lifecycle reconciliation.
