@@ -287,14 +287,15 @@ passthrough VM still runs QEMU as root, so only trusted users belong in
 the group on a host that uses passthrough.
 
 An unprivileged QEMU starts in a systemd user scope of its own,
-`ltvm-<name>-<time>.scope` in `ltvm-guests.slice`, when the user has a
-systemd manager that outlives the login: linger is on, or ltvm already
-runs under the manager.  Without linger the manager stops at logout, so
-a guest started from a login stays in the login's session.  QEMU
-daemonizes but keeps its caller's cgroup, so a guest started from a
-service, or from a tool that runs in a transient scope, would otherwise
-be killed whenever that unit is stopped.  `LTVM_GUEST_SCOPE=0` turns it
-off; a manager that refuses the scope gets the plain launch.
+`ltvm-<name>-<time>-<random>.scope` in `ltvm-guests.slice`, when the
+user has a systemd manager that outlives the login: linger is on, or
+ltvm already runs under the manager.  Without linger the manager stops
+at logout, so a guest started from a login stays in the login's
+session.  QEMU daemonizes but keeps its caller's cgroup, so a guest
+started from a service, or from a tool that runs in a transient scope,
+would otherwise be killed whenever that unit is stopped.
+`LTVM_GUEST_SCOPE=0` turns it off; a manager that refuses the scope
+gets the plain launch.
 
 ### Agent/session ownership
 

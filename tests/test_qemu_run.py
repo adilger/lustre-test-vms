@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fcntl
 import itertools
+import re
 import subprocess
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -1415,9 +1416,22 @@ class TestGuestScope:
     ) -> None:
         prefix = self._scope(_make_vm(tmp_vmdir, name="co23-lnet"), self.ENV)
         assert prefix[:3] == ["systemd-run", "--user", "--scope"]
-        assert "--unit=ltvm-co23-lnet-1700000000.scope" in prefix
+        [unit] = [a for a in prefix if a.startswith("--unit=")]
+        assert re.fullmatch(
+            r"--unit=ltvm-co23-lnet-1700000000-[0-9a-f]{8}\.scope", unit
+        )
         assert "--collect" in prefix
         assert prefix[-1] == "--"
+
+    def test_two_guests_of_one_name_in_one_second_get_their_own_units(
+        self, tmp_vmdir: Path
+    ) -> None:
+        vm = _make_vm(tmp_vmdir, name="co23-lnet")
+        units = [
+            [a for a in self._scope(vm, self.ENV) if a.startswith("--unit=")]
+            for _ in range(2)
+        ]
+        assert units[0] != units[1]
 
     def test_a_session_guest_without_linger_stays_in_its_session(
         self, tmp_vmdir: Path
@@ -1514,3 +1528,25 @@ class TestGuestScope:
     ) -> None:
         with pytest.raises(SystemExit):
             self._launch(tmp_vmdir, [1], refusal="")
+
+    def test_a_qemu_socket_it_cannot_reach_is_not_a_refused_scope(
+        self, tmp_vmdir: Path
+    ) -> None:
+        with pytest.raises(SystemExit):
+            self._launch(
+                tmp_vmdir,
+                [1, 0],
+                refusal="qemu-system-x86_64: -chardev socket,id=c0: "
+                "Failed to connect to socket /tmp/x: Connection refused",
+            )
+
+    def test_a_user_bus_it_cannot_reach_falls_back_to_the_old_launch(
+        self, tmp_vmdir: Path
+    ) -> None:
+        first, second = self._launch(
+            tmp_vmdir,
+            [1, 0],
+            refusal="Failed to connect to bus: No medium found",
+        )
+        assert first[0] == "systemd-run"
+        assert second[0] != "systemd-run"

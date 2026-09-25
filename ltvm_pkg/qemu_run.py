@@ -8,6 +8,7 @@ import math
 import os
 import pwd
 import re
+import secrets
 import shutil
 import signal
 import subprocess
@@ -378,8 +379,9 @@ GUEST_SLICE = "ltvm-guests.slice"
 _PROC_SELF_CGROUP = Path("/proc/self/cgroup")
 _LINGER_DIR = Path("/var/lib/systemd/linger")
 _SCOPE_REFUSALS = (
+    "Failed to connect to bus",
+    "Failed to connect to user scope bus",
     "Failed to start transient scope unit",
-    "Failed to connect to",
 )
 
 
@@ -446,7 +448,7 @@ def _guest_scope(vm: VMInfo) -> list[str]:
         "--scope",
         "--quiet",
         "--collect",
-        f"--unit=ltvm-{name}-{int(time.time())}.scope",
+        f"--unit=ltvm-{name}-{int(time.time())}-{secrets.token_hex(4)}.scope",
         f"--slice={GUEST_SLICE}",
         f"--description=ltvm guest {vm.name}",
         "--",
