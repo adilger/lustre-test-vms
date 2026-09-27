@@ -432,7 +432,10 @@ def _guest_scope(vm: VMInfo) -> list[str]:
     """
     if os.environ.get("LTVM_GUEST_SCOPE", "1") == "0" or os.geteuid() == 0:
         return []
-    if not sys.platform.startswith("linux") or not shutil.which("systemd-run"):
+    # Through a variable: mypy evaluates a sys.platform test, so on a Mac
+    # the rest of the function would be "unreachable".
+    linux = sys.platform.startswith("linux")
+    if not linux or not shutil.which("systemd-run"):
         return []
     if not (
         os.environ.get("XDG_RUNTIME_DIR")
