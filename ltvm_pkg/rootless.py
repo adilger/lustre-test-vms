@@ -195,6 +195,12 @@ def drop_to(user: pwd.struct_passwd) -> bool:
     can do the whole job unprivileged.  Returns True when the process is
     now *user*.
     """
+    # Off Linux readiness() always says no, and trying costs more than
+    # the answer: macOS's getgroups() reports the directory-service
+    # group list rather than what setgroups() set, and for root that is
+    # more than the 16 setgroups() will take back.
+    if platform.system() != "Linux":
+        return False
     with _acting_as(user):
         if not readiness().ok:
             return False

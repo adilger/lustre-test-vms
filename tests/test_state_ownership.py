@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -209,6 +209,21 @@ class TestInvokingUser:
         with patch.dict(os.environ, {}, clear=True):
             owner = priv.invoking_user()
         assert owner is not None and owner[0] == me
+
+    def test_unnamed_primary_group_is_numeric(self) -> None:
+        # A Mac bound to a directory service: the gid resolves to no
+        # name.  None here left every sudo-made file root-owned.
+        import grp
+        import pwd
+
+        user = MagicMock(pw_name="alice", pw_gid=1626987246)
+        with (
+            patch.dict(os.environ, {"SUDO_USER": "alice"}, clear=True),
+            patch.object(os, "geteuid", return_value=0),
+            patch.object(pwd, "getpwnam", return_value=user),
+            patch.object(grp, "getgrgid", side_effect=KeyError(1626987246)),
+        ):
+            assert priv.invoking_user() == ("alice", "1626987246")
 
     def test_chown_noop_when_not_root(self, tmp_path: Path) -> None:
         f = tmp_path / "x"

@@ -182,6 +182,7 @@ class TestDropToSudoUser:
         )
         mocks: dict[str, Any] = {}
         with (
+            patch.object(rootless.platform, "system", return_value="Linux"),
             patch.object(rootless.os, "geteuid", return_value=0),
             patch.object(rootless.pwd, "getpwnam", return_value=user),
             patch.object(rootless.os, "getgrouplist", return_value=[1234, 99]),
@@ -214,6 +215,17 @@ class TestDropToSudoUser:
         as_sudo_root["setuid"].assert_not_called()
         # The trial identity is given back.
         assert as_sudo_root["seteuid"].call_args_list[-1].args == (0,)
+        assert os.environ["SUDO_USER"] == "alice"
+
+    def test_stays_root_off_linux_without_touching_groups(
+        self, as_sudo_root: dict
+    ) -> None:
+        # macOS: root's getgroups() is longer than setgroups() takes
+        # back, so even trying the user's identity raised ValueError.
+        with patch.object(rootless.platform, "system", return_value="Darwin"):
+            assert not rootless.drop_to_sudo_user()
+        for fn in ("setgroups", "setegid", "seteuid", "setgid", "setuid"):
+            as_sudo_root[fn].assert_not_called()
         assert os.environ["SUDO_USER"] == "alice"
 
 

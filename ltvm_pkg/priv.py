@@ -146,9 +146,14 @@ def invoking_user() -> tuple[str, str] | None:
         return None
     try:
         pw = pwd.getpwnam(name)
-        return name, grp.getgrgid(pw.pw_gid).gr_name
     except KeyError:
         return None
+    try:
+        return name, grp.getgrgid(pw.pw_gid).gr_name
+    except KeyError:
+        # A primary group can have no name -- a Mac bound to a
+        # directory service -- and chown and install take the number.
+        return name, str(pw.pw_gid)
 
 
 def _ltvm_owned(path: Path) -> bool:
