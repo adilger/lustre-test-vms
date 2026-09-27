@@ -532,6 +532,16 @@ files `O_NOFOLLOW` (`priv.chmod_regular`, `priv.ensure_lock_file`,
 `passthrough` NIC still needs a root QEMU, so it takes the classic path
 below; on a shared host that trusts the group with root.
 
+*Shared* on macOS: `ltvm install` makes the same directories and the
+`ltvm` group (`dseditgroup`), but there is no helper -- QEMU connects
+to socket_vmnet's socket, which launchd creates `root:staff` 0770.
+Homebrew's dnsmasq has no inotify for `hostsdir=`, so it reads
+`hosts.d/` as `addn-hosts=`, and the `io.github.ltvm.dnsmasq-reload`
+LaunchDaemon, with `WatchPaths` on the directory, runs `launchctl kill
+SIGHUP` on the dnsmasq job when a file comes or goes.  It runs a fixed
+command and reads nothing a user wrote.  macOS caps `setgroups()` at 16
+groups, so dropping from root there goes through `initgroups()`.
+
 *Classic* (no bridge helper, or the user is not in the group): only
 `update`, `cluster create` and `cluster destroy` need the whole command
 under root -- and not `cluster create --dry-run`, which only reads.

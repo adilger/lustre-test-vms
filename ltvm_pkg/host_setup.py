@@ -926,6 +926,7 @@ def install_dnsmasq_macos(force: bool = False) -> None:
         (HOST_CONFIG_DIR / "ltvm-dnsmasq-macos.conf")
         .read_text()
         .replace("@VMNET_GATEWAY@", DEFAULT_VMNET_GATEWAY)
+        .replace("@HOSTS_DIR@", str(VM_DIR / "hosts.d"))
     )
     desired_plist = (
         (HOST_CONFIG_DIR / f"{DNSMASQ_PLIST_LABEL}.plist")
@@ -1013,6 +1014,129 @@ def install_dnsmasq_macos(force: bool = False) -> None:
     elif needs_reload:
         _sudo_run(
             ["launchctl", "kickstart", "-k", f"system/{DNSMASQ_PLIST_LABEL}"]
+        )
+
+
+def install_dnsmasq_reload_macos(force: bool = False) -> None:
+    """Install the LaunchDaemon that reloads dnsmasq when hosts.d changes.
+
+    dnsmasq runs as root, so a user registering a VM cannot signal it,
+    and Homebrew's build has no inotify to notice the new file itself.
+    launchd watches the directory and sends the SIGHUP; the job runs a
+    fixed command and reads nothing a user wrote.
+    """
+    from ltvm_pkg import rootless
+
+    path = rootless.DNSMASQ_RELOAD_PLIST
+    label = rootless.DNSMASQ_RELOAD_LABEL
+    desired = (
+        (HOST_CONFIG_DIR / f"{label}.plist")
+        .read_text()
+        .replace("@HOSTS_DIR@", str(VM_DIR / "hosts.d"))
+    )
+    cur = path.read_text() if path.exists() else ""
+    loaded = (
+        _run_quiet(
+            ["launchctl", "print", f"system/{label}"], check=False
+        ).returncode
+        == 0
+    )
+    if cur == desired and loaded and not force:
+        log.info("%s already loaded", label)
+        return
+    _sudo_prime(f"Installing {path} requires root")
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".plist", delete=False
+    ) as tf:
+        tf.write(desired)
+        tmp = tf.name
+    try:
+        _sudo_run(
+            [
+                "install",
+                "-m",
+                "0644",
+                "-o",
+                "root",
+                "-g",
+                "wheel",
+                tmp,
+                str(path),
+            ]
+        )
+    finally:
+        Path(tmp).unlink(missing_ok=True)
+    if loaded:
+        _sudo_run(["launchctl", "bootout", f"system/{label}"], check=False)
+    _sudo_run(["launchctl", "bootstrap", "system", str(path)])
+    log.info("Loaded %s", label)
+
+
+def _setup_shared_vm_dirs_macos() -> None:
+    """Give the ltvm group the VM directories, as on Linux.
+
+    See ltvm_pkg.rootless.  Runs as the user, elevating each step.
+    """
+    import getpass
+    import grp
+
+    from ltvm_pkg import rootless
+
+    _sudo_prime("Sharing the VM directories with the ltvm group needs root")
+    try:
+        grp.getgrnam(rootless.GROUP)
+    except KeyError:
+        _sudo_run(
+            [
+                "dseditgroup",
+                "-o",
+                "create",
+                "-r",
+                "ltvm VM users",
+                rootless.GROUP,
+            ]
+        )
+        log.info("Created group %s", rootless.GROUP)
+    dirs = [VM_DIR, VM_DIR / "overlays", VM_DIR / "sockets", VM_DIR / "hosts.d"]
+    for d in dirs:
+        if d.is_symlink():
+            raise RuntimeError(f"{d} is a symlink; refusing to share it")
+    _sudo_run(["mkdir", "-p", *(str(d) for d in dirs)])
+    # -h: act on a link planted since the check, never on its target.
+    _sudo_run(
+        ["chown", "-h", f"root:{rootless.GROUP}", *(str(d) for d in dirs)]
+    )
+    _sudo_run(
+        [
+            "chmod",
+            "-h",
+            f"{rootless.SHARED_DIR_MODE:o}",
+            *(str(d) for d in dirs),
+        ]
+    )
+
+    user = getpass.getuser()
+    member = _run_quiet(
+        ["dseditgroup", "-o", "checkmember", "-m", user, rootless.GROUP],
+        check=False,
+    )
+    if member.returncode != 0:
+        _sudo_run(
+            [
+                "dseditgroup",
+                "-o",
+                "edit",
+                "-a",
+                user,
+                "-t",
+                "user",
+                rootless.GROUP,
+            ]
+        )
+        log.info(
+            "Added %s to %s -- open a new terminal if VMs still need sudo",
+            user,
+            rootless.GROUP,
         )
 
 
@@ -2401,16 +2525,15 @@ def verify(subnet: str = DEFAULT_SUBNET) -> dict[str, Any]:
         for r in shell_completion.status()
     }
 
-    if not macos:
-        from ltvm_pkg import rootless
+    from ltvm_pkg import rootless
 
-        rd = rootless.readiness()
-        # Informational: sudo remains a working path without it.
-        results["unprivileged_vms"] = {
-            "ready": rd.ok,
-            "helper": str(rd.helper) if rd.helper else None,
-            "problems": rd.problems,
-        }
+    rd = rootless.readiness()
+    # Informational: sudo remains a working path without it.
+    results["unprivileged_vms"] = {
+        "ready": rd.ok,
+        "helper": str(rd.helper) if rd.helper else None,
+        "problems": rd.problems,
+    }
 
     # Overall
     checks = [
@@ -2542,7 +2665,12 @@ def print_verify(results: dict[str, Any]) -> None:
     uv = results.get("unprivileged_vms")
     if uv is not None:
         if uv["ready"]:
-            ok(f"unprivileged VMs: ready (bridge helper {uv['helper']})")
+            via = (
+                f"bridge helper {uv['helper']}"
+                if uv["helper"]
+                else "socket_vmnet"
+            )
+            ok(f"unprivileged VMs: ready ({via})")
         else:
             ok("unprivileged VMs: unavailable -- " + "; ".join(uv["problems"]))
 
@@ -2842,7 +2970,10 @@ def _run_setup_macos(
         install_socket_vmnet_macos(force=force)
         install_socket_vmnet_launchd_macos(force=force)
         install_sshpass_macos(force=force)
+        # hosts.d before dnsmasq, which reads it at start.
+        _setup_shared_vm_dirs_macos()
         install_dnsmasq_macos(force=force)
+        install_dnsmasq_reload_macos(force=force)
 
     if "podman" in active:
         install_podman_macos(force=force)

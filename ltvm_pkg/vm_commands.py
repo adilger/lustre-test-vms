@@ -2856,7 +2856,8 @@ def _check_unprivileged_vms(
     """
     rd = rootless.readiness()
     if rd.ok:
-        print(f"unprivileged VMs: ready (bridge helper {rd.helper})")
+        via = f"bridge helper {rd.helper}" if rd.helper else "socket_vmnet"
+        print(f"unprivileged VMs: ready ({via})")
         return _check_base_images_readable(fix)
     try:
         installed = (
@@ -2865,9 +2866,8 @@ def _check_unprivileged_vms(
     except OSError:
         installed = False
     if not installed:
-        print(
-            "unprivileged VMs: not set up -- `sudo ltvm install` sets them up"
-        )
+        cmd = "ltvm install" if is_macos() else "sudo ltvm install"
+        print(f"unprivileged VMs: not set up -- `{cmd}` sets them up")
         return 0, 0
     for problem in rd.problems:
         print(f"unprivileged VMs unavailable: {problem}")

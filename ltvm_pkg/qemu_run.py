@@ -571,14 +571,17 @@ def _start_qemu(vm: VMInfo) -> None:
     all_taps = [vm.tap] + [t for (_i, _n, t, _m) in extra_nics]
     macos = is_macos()
     has_passthrough = any(n.split(":", 1)[0] == "passthrough" for n in vm.nics)
-    # With the bridge helper, QEMU runs as the user and each NIC's tap
-    # is created by the helper and goes away with QEMU.  Passthrough
-    # still needs a root QEMU for the vfio device.
+    # On a shared host QEMU runs as the user.  On Linux each NIC's tap
+    # is created by the bridge helper and goes away with QEMU; on macOS
+    # QEMU connects to socket_vmnet's socket itself.  Passthrough still
+    # needs a root QEMU for the vfio device.
     helper: Path | None = None
-    if not macos and not has_passthrough and os.geteuid() != 0:
+    as_user = False
+    if not has_passthrough and os.geteuid() != 0:
         ready = rootless.readiness()
         if ready.ok:
             helper = ready.helper
+            as_user = True
     vmnet_socket: str | None = None
     if macos:
         vmnet_socket = str(socket_vmnet_socket_path())
@@ -848,8 +851,8 @@ def _start_qemu(vm: VMInfo) -> None:
             # the root-owned SOCKETS dir, and attaches the TAP.  The log
             # is opened here, unprivileged, and inherited as fd 1/2 --
             # sudo preserves those.
-            argv = qemu_args if helper is not None else _as_root(qemu_args)
-            scope = _guest_scope(vm) if helper is not None else []
+            argv = qemu_args if as_user else _as_root(qemu_args)
+            scope = _guest_scope(vm) if as_user else []
             log.flush()
             logged = os.fstat(log.fileno()).st_size
             r = subprocess.run([*scope, *argv], stdout=log, stderr=log)
@@ -881,7 +884,7 @@ def _start_qemu(vm: VMInfo) -> None:
         # the same bargain the QMP socket gets below -- a pid is not a
         # secret, and without this an unprivileged ltvm cannot read the
         # pid of the VM it just started.
-        owner = invoking_user() if helper is None else None
+        owner = invoking_user() if not as_user else None
         if owner is not None:
             sudo_run(
                 ["chown", f"{owner[0]}:{owner[1]}", str(vm.pid_path)],
