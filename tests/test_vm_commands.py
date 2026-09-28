@@ -10,8 +10,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from ltvm_pkg import vm_commands
-from ltvm_pkg.vm_state import DISK_SIZE_BYTES, ROOT_SIZE_BYTES, VMInfo
+from ltvm_pkg import vm_cluster, vm_commands
+from ltvm_pkg.vm_state import (
+    DISK_SIZE_BYTES,
+    ROOT_SIZE_BYTES,
+    ClusterInfo,
+    VMInfo,
+)
 
 # ── _validate_vm_name ────────────────────────────────────
 
@@ -684,6 +689,76 @@ class TestCmdDestroy:
         mock_unreg.assert_called_once_with("live")
         assert not vm.info_path.exists()
         assert not vm.overlay_path.exists()
+
+
+class TestOrphanClusterRecord:
+    """A cluster record whose VMs are all gone must not block its name."""
+
+    @staticmethod
+    def _record(name: str, members: list[str]) -> ClusterInfo:
+        cluster = ClusterInfo(
+            name=name,
+            nodes=[{"name": m, "roles": ["client"]} for m in members],
+        )
+        cluster.save()
+        return cluster
+
+    def test_destroying_the_last_member_drops_the_record(
+        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _seed_vm_files(tmp_vmdir, "co9-a")
+        _seed_vm_files(tmp_vmdir, "co9-b")
+        cluster = self._record("co9", ["co9-a", "co9-b"])
+        with (
+            patch("ltvm_pkg.vm_commands.kill_qemu"),
+            patch("ltvm_pkg.vm_commands.unregister_ssh_name"),
+        ):
+            vm_commands.cmd_destroy(argparse.Namespace(names=["co9-a"]))
+            assert cluster.path.exists()
+            vm_commands.cmd_destroy(argparse.Namespace(names=["co9-b"]))
+        assert not cluster.path.exists()
+        assert "removed cluster record co9" in capsys.readouterr().out
+
+    def test_other_clusters_are_left_alone(self, tmp_vmdir: Path) -> None:
+        _seed_vm_files(tmp_vmdir, "co9-a")
+        other = self._record("co8", ["co8-gone"])
+        with (
+            patch("ltvm_pkg.vm_commands.kill_qemu"),
+            patch("ltvm_pkg.vm_commands.unregister_ssh_name"),
+        ):
+            vm_commands.cmd_destroy(argparse.Namespace(names=["co9-a"]))
+        assert other.path.exists()
+
+    @staticmethod
+    def _create(name: str, sockets: Path) -> None:
+        # The same node twice dies right after the existing-record check.
+        args = argparse.Namespace(
+            name=name, nodes=["client:co9-x", "client:co9-x"]
+        )
+        with (
+            patch("ltvm_pkg.vm_cluster.SOCKETS", sockets),
+            pytest.raises(SystemExit),
+        ):
+            vm_cluster.cmd_cluster_create(args)
+
+    def test_create_replaces_an_orphan_record(
+        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        cluster = self._record("co9", ["co9-gone"])
+        self._create("co9", cluster.path.parent)
+        assert not cluster.path.exists()
+        captured = capsys.readouterr()
+        assert "removed stale cluster record co9" in captured.out
+        assert "listed more than once" in captured.err
+
+    def test_create_refuses_a_live_cluster(
+        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _seed_vm_files(tmp_vmdir, "co9-a")
+        cluster = self._record("co9", ["co9-a"])
+        self._create("co9", cluster.path.parent)
+        assert cluster.path.exists()
+        assert "already exists" in capsys.readouterr().err
 
 
 # ── cmd_stop ─────────────────────────────────────────────

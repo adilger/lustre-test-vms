@@ -266,6 +266,15 @@ ltvm cluster create co2 --kernel 5.14-rhel9.3 mgs+mds:co2-mds:1 oss:co2-oss:2
 `--wait`, and `cluster destroy` accepts `--force`/`--yes` though it
 never prompts.
 
+Create and start wait 30 seconds for a guest to answer ssh. On a loaded
+host, with several guests booting at once, that can run out while they
+are still booting ("SSH not ready after 30s"); export
+`LTVM_SSH_TIMEOUT=<seconds>` to wait longer rather than retrying.
+
+A cluster record whose VMs are all gone, because they were destroyed one
+by one, is removed with the last of them, and `cluster create` replaces
+one it finds.
+
 `cluster exec <role>` fans out and exits non-zero if any node did.
 `cluster ssh <role>` is interactive and lands on the first node.
 

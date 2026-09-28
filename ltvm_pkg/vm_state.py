@@ -971,6 +971,17 @@ class ClusterInfo:
     def all_names() -> list[str]:
         return [f.stem for f in sorted(SOCKETS.glob("*.cluster"))]
 
+    def orphaned(self) -> bool:
+        """True when every member VM is gone, so the record means nothing.
+
+        `cluster create` saves the record only after every node exists,
+        so a create in progress is never orphaned.
+        """
+        nodes = self.get_nodes()
+        return bool(nodes) and not any(
+            (SOCKETS / f"{n.name}.info").exists() for n in nodes
+        )
+
     def get_nodes(self) -> list[ClusterNode]:
         """Parse the stored node dicts into ClusterNode objects.
 
@@ -1020,3 +1031,23 @@ class ClusterInfo:
 
     def client_nodes(self) -> list[ClusterNode]:
         return [n for n in self.get_nodes() if n.is_client]
+
+
+def drop_orphan_clusters(members: set[str]) -> list[str]:
+    """Remove the records of clusters listing any of `members` whose
+    member VMs are all gone, and return their names.  A record that
+    cannot be read is left for `ltvm doctor` to report.
+    """
+    dropped: list[str] = []
+    for cname in ClusterInfo.all_names():
+        try:
+            cluster = ClusterInfo.load(cname)
+            if not any(n.name in members for n in cluster.get_nodes()):
+                continue
+            if not cluster.orphaned():
+                continue
+        except (ClusterNotFound, RuntimeError, ValueError):
+            continue
+        cluster.path.unlink(missing_ok=True)
+        dropped.append(cname)
+    return dropped

@@ -862,4 +862,7 @@ def wait_for_ssh(ip: str, max_wait: int = 30) -> None:
             )
         time.sleep(1)
     elapsed = int(time.monotonic() - start)
-    die(f"SSH not ready after {elapsed}s on {ip}")
+    die(
+        f"SSH not ready after {elapsed}s on {ip}; if the guest is still "
+        f"booting, set LTVM_SSH_TIMEOUT to wait longer"
+    )

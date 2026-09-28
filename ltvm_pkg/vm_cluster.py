@@ -432,8 +432,22 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
     from .vm_commands import _validate_kernel_args, _validate_vm_name
 
     _validate_vm_name(cluster_name)
-    if (SOCKETS / f"{cluster_name}.cluster").exists():
-        die(f"cluster '{cluster_name}' already exists")
+    record = SOCKETS / f"{cluster_name}.cluster"
+    if record.exists():
+        try:
+            orphaned = ClusterInfo.load(cluster_name).orphaned()
+        except ClusterNotFound:
+            orphaned = None
+        except (RuntimeError, ValueError):
+            orphaned = False
+        if orphaned is False:
+            die(f"cluster '{cluster_name}' already exists")
+        if orphaned:
+            record.unlink(missing_ok=True)
+            print(
+                f"removed stale cluster record {cluster_name}: "
+                f"all its VMs are gone"
+            )
 
     node_specs = [parse_node_spec(s) for s in args.nodes]
 
@@ -1083,7 +1097,10 @@ def cmd_cluster_destroy(args: argparse.Namespace) -> None:
         vm_claim.require_all([n.name for n in cluster.get_nodes()], "destroy")
         print(f"=== Destroying cluster '{cluster.name}' ===")
         cmd_destroy(
-            argparse.Namespace(names=[n.name for n in cluster.get_nodes()])
+            argparse.Namespace(
+                names=[n.name for n in cluster.get_nodes()],
+                drop_cluster_records=False,
+            )
         )
         cluster.path.unlink(missing_ok=True)
         print(f"=== Cluster '{cluster.name}' destroyed ===")

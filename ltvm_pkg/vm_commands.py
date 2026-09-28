@@ -54,6 +54,7 @@ from .vm_state import (
     VM_DIR,
     VMInfo,
     VMNotFound,
+    drop_orphan_clusters,
     lustre_libdir,
     nic_ip6,
     resolve_os_artifacts,
@@ -1537,6 +1538,11 @@ def cmd_destroy(args: argparse.Namespace) -> None:
             print(f"destroyed {name}")
         else:
             print(f"destroy: {name} not found")
+    # A cluster whose nodes were destroyed one by one would otherwise
+    # keep its record, and `cluster create` of the same name refuses.
+    if getattr(args, "drop_cluster_records", True):
+        for cname in drop_orphan_clusters(set(args.names)):
+            print(f"removed cluster record {cname}: all its VMs are gone")
 
 
 def cmd_llmount(args: argparse.Namespace) -> None:
