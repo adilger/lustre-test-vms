@@ -839,6 +839,45 @@ class TestCmdList:
         assert out["totals"]["vcpus_used"] == 4
         assert out["totals"]["mem_used_mb"] == 2048
 
+    def test_json_lists_clusters_and_members(
+        self,
+        tmp_vmdir: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Clusters are in the listing, so a controller cleaning up a
+        run can destroy one as a cluster rather than node by node."""
+        _seed_vm_files(tmp_vmdir, "co9-mds")
+        _seed_vm_files(tmp_vmdir, "lone")
+        ClusterInfo(
+            name="co9",
+            nodes=[{"name": "co9-mds", "roles": ["mds"]}],
+            owner_id="patch-watcher:abc",
+        ).save()
+        (tmp_vmdir / "sockets" / "broken.cluster").write_text("{")
+        with patch("ltvm_pkg.vm_commands.is_running", return_value=False):
+            vm_commands.cmd_list(argparse.Namespace(json=True))
+        captured = capsys.readouterr()
+        out = json.loads(captured.out)
+        assert out["clusters"] == [
+            {
+                "name": "co9",
+                "owner_id": "patch-watcher:abc",
+                "members": ["co9-mds"],
+            }
+        ]
+        by_name = {v["name"]: v for v in out["vms"]}
+        assert by_name["co9-mds"]["cluster"] == "co9"
+        assert by_name["lone"]["cluster"] is None
+        assert "cluster broken: unreadable" in captured.err
+
+    def test_json_clusters_is_a_list_when_there_are_none(
+        self,
+        tmp_vmdir: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        vm_commands.cmd_list(argparse.Namespace(json=True))
+        assert json.loads(capsys.readouterr().out)["clusters"] == []
+
 
 # ── cmd_console_log ──────────────────────────────────────
 

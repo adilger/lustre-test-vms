@@ -52,6 +52,8 @@ from .vm_state import (
     SOCKETS,
     SSH_TIMEOUT,
     VM_DIR,
+    ClusterInfo,
+    ClusterNotFound,
     VMInfo,
     VMNotFound,
     drop_orphan_clusters,
@@ -1658,6 +1660,35 @@ def _claim_field(c: dict[str, Any] | None) -> str:
     return f" claimed={c['owner']}{'' if c['live'] else '(stale)'}"
 
 
+def _cluster_rows() -> list[dict[str, Any]]:
+    """Every readable cluster record, for `ltvm list`.
+
+    An unreadable record is left out with a warning; `ltvm doctor`
+    reports it.
+    """
+    rows: list[dict[str, Any]] = []
+    for cname in ClusterInfo.all_names():
+        try:
+            cluster = ClusterInfo.load(cname)
+            members = [n.name for n in cluster.get_nodes()]
+        except ClusterNotFound:
+            continue
+        except (RuntimeError, ValueError) as exc:
+            print(
+                f"warning: cluster {cname}: unreadable state ({exc})",
+                file=sys.stderr,
+            )
+            continue
+        rows.append(
+            {
+                "name": cluster.name,
+                "owner_id": cluster.owner_id,
+                "members": members,
+            }
+        )
+    return rows
+
+
 def cmd_list(args: argparse.Namespace) -> None:
     total_vcpus = 0
     total_mem = 0
@@ -1732,6 +1763,11 @@ def cmd_list(args: argparse.Namespace) -> None:
             }
         )
 
+    clusters = _cluster_rows()
+    member_of = {m: c["name"] for c in clusters for m in c["members"]}
+    for e in entries:
+        e["cluster"] = member_of.get(e["name"])
+
     host_cpus = os.cpu_count() or 1
     host_mem_mb = _host_total_mem_mb()
 
@@ -1740,6 +1776,7 @@ def cmd_list(args: argparse.Namespace) -> None:
             json.dumps(
                 {
                     "vms": entries,
+                    "clusters": clusters,
                     "totals": {
                         "running": running_count,
                         "stopped": stopped_count,
@@ -1780,11 +1817,12 @@ def cmd_list(args: argparse.Namespace) -> None:
                 if e.get("mem_rss_mb") is not None
                 else f"{e['mem']}M"
             )
+            cluster = f" cluster={e['cluster']}" if e["cluster"] else ""
             print(
                 f"{e['name']:<20} {e['ip']:<18} {e['status']:<8} "
                 f"{os_id:<8} {disks:<14} mem={mem:<12} "
                 f"boot={boot:<10} deploy={deploy:<10} by={creator} "
-                f"owner={owner_id}{_claim_field(e.get('claim'))}"
+                f"owner={owner_id}{_claim_field(e.get('claim'))}{cluster}"
             )
         print("---")
         print(
@@ -3051,8 +3089,6 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     # Cluster files referencing dead nodes.  A user can `ltvm destroy
     # node` individually after a `cluster create`, leaving the .cluster
     # file pointing at VMs that no longer exist.
-    from .vm_state import ClusterInfo, ClusterNotFound
-
     for cname in ClusterInfo.all_names():
         try:
             cluster = ClusterInfo.load(cname)

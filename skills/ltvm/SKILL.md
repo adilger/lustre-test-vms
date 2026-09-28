@@ -358,7 +358,9 @@ directory is a Lustre tree. On EL8/EL9 images run them with
 
 Export `LTVM_OWNER_ID=<durable-session-id>` before creating VMs so the
 owner metadata identifies the session rather than a pid; read it back with
-`ltvm list --json`.
+`ltvm list --json`. Its `clusters` list gives each cluster's owner and
+member VMs, and each VM row names its `cluster`; destroy a cluster with
+`ltvm cluster destroy`, not node by node.
 
 ## Sharing VMs with other sessions
 
