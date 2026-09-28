@@ -369,8 +369,129 @@ def _read_subnet() -> str:
     return subnet
 
 
+def _read_extra_subnet() -> str:
+    """Return the subnet every extra (--nic) NIC is addressed from.
+
+    Overridable with ``$LTVM_EXTRA_SUBNET`` or ``VM_DIR/extra-subnet``
+    so a host whose real network already uses the default can move it.
+    """
+    env = os.environ.get("LTVM_EXTRA_SUBNET")
+    if env:
+        return env
+    f = VM_DIR / "extra-subnet"
+    if f.is_file():
+        v = f.read_text().strip()
+        if v:
+            return v
+    return "172.16.100"
+
+
+def _validate_subnet6(prefix: str, source: str) -> str:
+    """Check an overriding /64 prefix is four hextets.
+
+    Only the shape is checked: an override may use short hextets, and
+    then gets short addresses, which is the operator's choice.
+    """
+    hextets = prefix.split(":")
+    if len(hextets) != 4:
+        raise ValueError(
+            f"{source} must be exactly four colon-separated hextets "
+            f"(a /64 prefix with no trailing '::'), got {prefix!r}"
+        )
+    for h in hextets:
+        if not 1 <= len(h) <= 4:
+            raise ValueError(
+                f"{source} hextet {h!r} is not 1-4 hex digits: {prefix!r}"
+            )
+        try:
+            int(h, 16)
+        except ValueError:
+            raise ValueError(
+                f"{source} hextet {h!r} is not hexadecimal: {prefix!r}"
+            ) from None
+    return prefix
+
+
+def _read_extra_subnet6() -> str:
+    """Return the /64 prefix every extra (--nic) NIC is addressed from.
+
+    Overridable with ``$LTVM_EXTRA_SUBNET6`` or ``VM_DIR/extra-subnet6``,
+    mirroring ``_read_extra_subnet()``.  The default keeps every address
+    at full width; an override is taken as given.
+    """
+    env = os.environ.get("LTVM_EXTRA_SUBNET6")
+    if env:
+        return _validate_subnet6(env, "LTVM_EXTRA_SUBNET6")
+    f = VM_DIR / "extra-subnet6"
+    if f.is_file():
+        v = f.read_text().strip()
+        if v:
+            return _validate_subnet6(v, str(f))
+    return "fd17:2016:1000:f100"
+
+
 SUBNET = _read_subnet()
 GATEWAY = f"{SUBNET}.1"
+# Extra NICs share ONE network of their own -- the Lustre network --
+# separate from mgmt.  Separate from mgmt because two scope-link routes
+# for the mgmt prefix made the guest send all peer traffic out eth0.
+# Shared between the extras because LNet multi-rail is several NIs on
+# one LNet network; a network per NIC index would instead give one
+# rail each on o2ib0 and o2ib1.  Two NICs on one subnet is ordinary
+# Linux multi-homing, and needs the source-based policy routing that
+# targets/common/rc.local installs.
+EXTRA_SUBNET = _read_extra_subnet()
+# Every network ltvm hands out is a /24.  Guest-side prefix length is
+# carried on the kernel cmdline (fc_nic_prefixes=) rather than being
+# hardcoded in rc.local.
+PREFIX_LEN = 24
+# The extra NICs additionally carry one static ULA each, from a single
+# /64 that echoes EXTRA_SUBNET.  Mgmt (eth0) stays IPv4 only.
+EXTRA_SUBNET6 = _read_extra_subnet6()
+PREFIX_LEN6 = 64
+
+
+def nic_ip6(ipv4: str) -> str:
+    """The IPv6 address paired with an extra NIC's IPv4 address.
+
+    The interface ID spells out the four IPv4 octets, each as 'f'
+    followed by the octet zero-padded to three decimal digits, so
+    172.16.100.203 pairs with
+
+        fd17:2016:1000:f100:f172:f016:f100:f203
+
+    The leading 'f' puts every hextet above 0x1000, which is what keeps
+    the address at its full 39-character width: no hextet can lose a
+    leading zero and none can be zero, so inet_ntop can never emit a
+    '::'.  The NID is then 43 characters against LNET_NIDSTR_SIZE of
+    64, versus 19 for the longest IPv4 NID.
+
+    The encoding is injective in the whole IPv4 address, so uniqueness
+    is inherited from the IPv4 allocator -- there is deliberately no
+    second allocator and no second uniqueness rule.
+    """
+    octets = ipv4.split(".")
+    if len(octets) != 4:
+        raise ValueError(f"not an IPv4 address: {ipv4!r}")
+    return ":".join([EXTRA_SUBNET6] + [f"f{int(o):03d}" for o in octets])
+
+
+def subnet_for_nic(idx: int) -> str:
+    """Return the /24 prefix NIC *idx* is addressed from.
+
+    Index 0 is the mgmt NIC (eth0); 1..N are the extras (eth1..ethN),
+    which all share EXTRA_SUBNET.
+    """
+    if idx == 0:
+        return SUBNET
+    if EXTRA_SUBNET == SUBNET:
+        raise ValueError(
+            f"extra-NIC subnet {EXTRA_SUBNET}.0/24 is the mgmt subnet; "
+            f"set LTVM_EXTRA_SUBNET to a different network"
+        )
+    return EXTRA_SUBNET
+
+
 MARKER = "# qemu-vm"
 ROOT_PASSWORD = "initial0"
 # Cross-arch (TCG) boots are 5-20x slower than native; let operators bump
@@ -445,6 +566,13 @@ class VMInfo:
     # files without this field load as an empty list.  Mgmt IP stays
     # in `self.ip`.
     nic_ips: list[str] = field(default_factory=list)
+
+    # Per-extra-NIC IPv6 addresses, index-parallel to nics and to
+    # nic_ips.  Recorded at create time so the guest and deploy read
+    # one fact rather than each recomputing it.  Older .info files
+    # without this field load as an empty list, and a VM with none is
+    # addressed exactly as before.  Mgmt (eth0) is IPv4 only.
+    nic_ip6s: list[str] = field(default_factory=list)
 
     # For passthrough NICs: which host driver owned each BDF before we
     # bound it to vfio-pci.  Populated by cmd_create after
@@ -545,6 +673,9 @@ class VMInfo:
             # Per-extra-NIC IPs, same index order as NICS.  '|' stays
             # unambiguous because IPs don't contain it.
             f"NIC_IPS={'|'.join(self.nic_ips)}\n"
+            # Per-extra-NIC IPv6 addresses, same index order.  '|'
+            # again: an IPv6 address contains ':' but never '|'.
+            f"NIC_IP6S={'|'.join(self.nic_ip6s)}\n"
             # BDF=driver pairs for passthrough NICs so destroy can
             # rebind.  Empty unless the VM has passthrough NICs.
             f"PASSTHROUGH_DRIVERS="
@@ -688,6 +819,10 @@ class VMInfo:
         nic_ips_raw = vals.get("NIC_IPS", "")
         nic_ips_list = [s for s in nic_ips_raw.split("|") if s]
 
+        # Missing on .info files written before extras carried IPv6.
+        nic_ip6s_raw = vals.get("NIC_IP6S", "")
+        nic_ip6s_list = [s for s in nic_ip6s_raw.split("|") if s]
+
         # PASSTHROUGH_DRIVERS is BDF=drv|BDF=drv|... (empty when no
         # passthrough NICs).  Missing on older .info files.
         pt_raw = vals.get("PASSTHROUGH_DRIVERS", "")
@@ -724,6 +859,7 @@ class VMInfo:
             variant=vals.get("VARIANT", "base"),
             nics=nics_list,
             nic_ips=nic_ips_list,
+            nic_ip6s=nic_ip6s_list,
             passthrough_drivers=pt_drivers,
             kernel_args=vals.get("KERNEL_ARGS", ""),
         )

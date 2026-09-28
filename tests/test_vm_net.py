@@ -138,11 +138,12 @@ def tmp_vmdir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     lock_path = tmp_path / ".ip-alloc.lock"
     hosts_lock = tmp_path / ".hosts.lock"
     # SUBNET is a module-level constant frozen at import time, so
-    # LTVM_SUBNET in env is too late.  Patch the resolved values
-    # directly on both modules that re-exported the import.
+    # LTVM_SUBNET in env is too late.  Patch the resolved value; both
+    # SUBNET and EXTRA_SUBNET_BASE are read at call time through
+    # vm_state.subnet_for_nic(), so patching vm_state alone is enough.
     with (
         patch("ltvm_pkg.vm_state.SUBNET", "192.168.100"),
-        patch("ltvm_pkg.vm_net.SUBNET", "192.168.100"),
+        patch("ltvm_pkg.vm_state.EXTRA_SUBNET", "172.16.100"),
         patch("ltvm_pkg.vm_state.VM_DIR", tmp_path),
         patch("ltvm_pkg.vm_state.SOCKETS", sockets),
         patch("ltvm_pkg.vm_net._IP_LOCK_PATH", lock_path),
@@ -207,31 +208,78 @@ class TestAllocIp:
         for ip in ips:
             assert ip.startswith("192.168.100.")
 
-    def test_count_gt_1_returns_distinct_ips(self, tmp_vmdir: Path) -> None:
-        """count=N allocates N distinct IPs all in-subnet."""
+    def test_mgmt_and_extras_are_on_separate_networks(
+        self, tmp_vmdir: Path
+    ) -> None:
+        """The mgmt NIC keeps the mgmt /24; every extra NIC shares one
+        network of its own.  Two scope-link routes for the MGMT prefix
+        were what made the guest send peer traffic out eth0."""
         with vm_net.alloc_ip("multinic", count=4) as ips:
             assert len(ips) == 4
-            assert len(set(ips)) == 4
-            for ip in ips:
-                assert ip.startswith("192.168.100.")
+            assert ips[0].startswith("192.168.100.")
+            for extra in ips[1:]:
+                assert extra.startswith("172.16.100.")
+
+    def test_extras_of_one_vm_get_distinct_octets(
+        self, tmp_vmdir: Path
+    ) -> None:
+        """Sharing a network means the extras must not share an
+        address -- eth1 and eth2 are different hosts on one subnet."""
+        with vm_net.alloc_ip("multinic", count=4) as ips:
+            extras = ips[1:]
+            assert len(set(extras)) == len(extras)
+
+    def test_extras_get_distinct_ipv6_addresses(self, tmp_vmdir: Path) -> None:
+        """The IPv6 addresses are derived from the IPv4 ones, so two
+        extras on one VM inherit the IPv4 allocator's uniqueness."""
+        from ltvm_pkg.vm_state import EXTRA_SUBNET6, nic_ip6
+
+        with vm_net.alloc_ip("multinic", count=3) as ips:
+            ip6s = [nic_ip6(ip) for ip in ips[1:]]
+        assert len(set(ip6s)) == 2
+        for a in ip6s:
+            assert a.startswith(EXTRA_SUBNET6 + ":")
+            assert len(a) == 39
+            assert "::" not in a
+
+    def test_same_octet_reused_across_networks(self, tmp_vmdir: Path) -> None:
+        """An address is only unique within its own network: the mgmt
+        NIC and the first extra normally take the same host octet on
+        their two different networks."""
+        with vm_net.alloc_ip("multinic", count=2) as ips:
+            assert ips[0].rsplit(".", 1)[1] == ips[1].rsplit(".", 1)[1]
+
+    def test_peer_extra_net_ip_blocks_only_that_net(
+        self, tmp_vmdir: Path
+    ) -> None:
+        """Uniqueness is enforced per network: a peer's eth1 address
+        blocks that address on the extra network only."""
+        with vm_net.alloc_ip("mine", count=2) as probe:
+            want_mgmt, want_extra = probe[0], probe[1]
+        peer = VMInfo(name="peer", ip="10.0.0.9", nic_ips=[want_extra])
+        peer.save()
+        with vm_net.alloc_ip("mine", count=2) as ips:
+            assert ips[0] == want_mgmt  # untouched network, same octet
+            assert ips[1] != want_extra
+            assert ips[1].startswith("172.16.100.")
 
     def test_count_gt_1_skips_peers_nic_ips(self, tmp_vmdir: Path) -> None:
-        """_used_ips must include nic_ips, not just mgmt IP.  Otherwise
-        two multi-NIC VMs could collide on an extra-NIC IP."""
+        """A pre-fix VM's extras sit on the mgmt /24.  They must still
+        block the mgmt allocation, so old and new VMs can coexist."""
         peer = VMInfo(
             name="peer",
             ip="192.168.100.50",
             nic_ips=["192.168.100.51", "192.168.100.52"],
         )
         peer.save()
-        with vm_net.alloc_ip("mine", count=3) as ips:
-            for ip in ips:
-                assert ip not in {
+        for name in ("a", "b", "c"):
+            with vm_net.alloc_ip(name, count=3) as ips:
+                assert ips[0] not in {
                     "192.168.100.50",
                     "192.168.100.51",
                     "192.168.100.52",
                 }
-            assert len(set(ips)) == 3
+                VMInfo(name=name, ip=ips[0], nic_ips=ips[1:]).save()
 
     def test_explicit_ip_with_count_gt_1_pins_mgmt_only(
         self, tmp_vmdir: Path

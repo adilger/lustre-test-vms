@@ -252,6 +252,269 @@ class TestVMInfoNicsField:
         assert mac1 != mac_for_name(vm.name)
 
 
+class TestSubnetForNic:
+    """The mgmt NIC and the extra NICs are on separate networks; the
+    extras share one network with each other, because LNet multi-rail
+    is several NIs on ONE LNet network."""
+
+    def test_mgmt_nic_uses_the_mgmt_subnet(self) -> None:
+        from ltvm_pkg import vm_state
+
+        with patch("ltvm_pkg.vm_state.SUBNET", "192.168.100"):
+            assert vm_state.subnet_for_nic(0) == "192.168.100"
+
+    def test_every_extra_nic_shares_one_subnet(self) -> None:
+        from ltvm_pkg import vm_state
+
+        with (
+            patch("ltvm_pkg.vm_state.SUBNET", "192.168.100"),
+            patch("ltvm_pkg.vm_state.EXTRA_SUBNET", "172.16.100"),
+        ):
+            nets = [vm_state.subnet_for_nic(i) for i in (1, 2, 3)]
+        assert nets == ["172.16.100"] * 3
+
+    def test_extra_subnet_equal_to_mgmt_rejected(self) -> None:
+        """A mgmt subnet reused as the extra network is a config
+        error, not something to silently allocate over."""
+        from ltvm_pkg import vm_state
+
+        with (
+            patch("ltvm_pkg.vm_state.SUBNET", "172.16.100"),
+            patch("ltvm_pkg.vm_state.EXTRA_SUBNET", "172.16.100"),
+        ):
+            assert vm_state.subnet_for_nic(0) == "172.16.100"
+            with pytest.raises(ValueError):
+                vm_state.subnet_for_nic(1)
+
+
+class TestVMInfoNicIp6sField:
+    """NIC_IP6S is index-parallel to NIC_IPS and absent on older
+    .info files, which must still load."""
+
+    def test_nic_ip6s_round_trip(self, tmp_sockets: Path) -> None:
+        vm = VMInfo(
+            name="rails6",
+            ip="192.168.100.60",
+            nics=["softroce", "softroce"],
+            nic_ips=["172.16.100.60", "172.16.100.61"],
+            nic_ip6s=[
+                "fd17:2016:1000:f100:f172:f016:f100:f060",
+                "fd17:2016:1000:f100:f172:f016:f100:f061",
+            ],
+        )
+        vm.save()
+        assert (
+            "NIC_IP6S=fd17:2016:1000:f100:f172:f016:f100:f060"
+            "|fd17:2016:1000:f100:f172:f016:f100:f061\n"
+            in vm.info_path.read_text()
+        )
+        loaded = VMInfo.load("rails6")
+        assert loaded.nic_ip6s == vm.nic_ip6s
+
+    def test_legacy_info_file_without_nic_ip6s_line(
+        self, tmp_sockets: Path
+    ) -> None:
+        """A .info written before extras carried IPv6 loads with an
+        empty list, keeping the VM usable across an ltvm upgrade."""
+        info = tmp_sockets / "old6.info"
+        info.write_text(
+            "NAME=old6\n"
+            "IP=192.168.100.90\n"
+            "PID=0\n"
+            "TAP=tap-old6\n"
+            "NICS=softroce\n"
+            "NIC_IPS=172.16.100.90\n"
+        )
+        loaded = VMInfo.load("old6")
+        assert loaded.nic_ips == ["172.16.100.90"]
+        assert loaded.nic_ip6s == []
+
+
+class TestNicIp6:
+    """Every extra NIC's IPv6 address is derived from its IPv4 one, and
+    must render at full width."""
+
+    def test_maps_an_ipv4_address_to_its_pair(self) -> None:
+        from ltvm_pkg import vm_state
+
+        with patch("ltvm_pkg.vm_state.EXTRA_SUBNET6", "fd17:2016:1000:f100"):
+            assert (
+                vm_state.nic_ip6("172.16.100.203")
+                == "fd17:2016:1000:f100:f172:f016:f100:f203"
+            )
+
+    def test_different_octets_give_different_addresses(self) -> None:
+        from ltvm_pkg import vm_state
+
+        with patch("ltvm_pkg.vm_state.EXTRA_SUBNET6", "fd17:2016:1000:f100"):
+            a = vm_state.nic_ip6("172.16.100.203")
+            b = vm_state.nic_ip6("172.16.100.204")
+        assert a != b
+
+    def test_not_an_ipv4_address_rejected(self) -> None:
+        from ltvm_pkg import vm_state
+
+        with pytest.raises(ValueError):
+            vm_state.nic_ip6("172.16.100")
+
+    def test_addresses_always_render_at_full_width(self) -> None:
+        """The property the whole scheme exists to hold: 39 characters,
+        eight four-digit hextets, never compressed.  A short address is
+        shorter than the IPv4 one it replaces, so it exercises nothing.
+        """
+        import ipaddress
+
+        from ltvm_pkg import vm_state
+
+        with patch("ltvm_pkg.vm_state.EXTRA_SUBNET6", "fd17:2016:1000:f100"):
+            for octet in range(10, 254):
+                a = vm_state.nic_ip6(f"172.16.100.{octet}")
+                assert len(a) == 39, a
+                assert "::" not in a, a
+                assert str(ipaddress.IPv6Address(a)) == a, a
+                assert all(len(h) == 4 for h in a.split(":")), a
+
+
+class TestExtraSubnet6Validation:
+    """An override is checked for shape only; the full-width rule holds
+    for the default prefix, not for a prefix the operator chose."""
+
+    def test_short_hextets_accepted_on_override(self) -> None:
+        from ltvm_pkg import vm_state
+
+        with patch.dict("os.environ", {"LTVM_EXTRA_SUBNET6": "fd00:1:2:3"}):
+            assert vm_state._read_extra_subnet6() == "fd00:1:2:3"
+
+    def test_short_override_gives_a_valid_address(self) -> None:
+        import ipaddress
+
+        from ltvm_pkg import vm_state
+
+        with patch("ltvm_pkg.vm_state.EXTRA_SUBNET6", "fd00:0:0:0"):
+            a = vm_state.nic_ip6("172.16.100.23")
+        assert ipaddress.IPv6Address(a) == ipaddress.IPv6Address(
+            "fd00::f172:f016:f100:f023"
+        )
+
+    def test_overlong_hextet_rejected(self) -> None:
+        from ltvm_pkg import vm_state
+
+        with patch.dict(
+            "os.environ", {"LTVM_EXTRA_SUBNET6": "fd17:2016:1000:10000"}
+        ):
+            with pytest.raises(ValueError) as e:
+                vm_state._read_extra_subnet6()
+        assert "LTVM_EXTRA_SUBNET6" in str(e.value)
+
+    def test_wrong_hextet_count_rejected(self) -> None:
+        from ltvm_pkg import vm_state
+
+        with patch.dict("os.environ", {"LTVM_EXTRA_SUBNET6": "fd17:2016:1000"}):
+            with pytest.raises(ValueError) as e:
+                vm_state._read_extra_subnet6()
+        assert "LTVM_EXTRA_SUBNET6" in str(e.value)
+
+    def test_non_hex_hextet_rejected(self) -> None:
+        from ltvm_pkg import vm_state
+
+        with patch.dict(
+            "os.environ", {"LTVM_EXTRA_SUBNET6": "fd17:2016:1000:zzzz"}
+        ):
+            with pytest.raises(ValueError) as e:
+                vm_state._read_extra_subnet6()
+        assert "LTVM_EXTRA_SUBNET6" in str(e.value)
+
+    def test_valid_override_accepted(self) -> None:
+        from ltvm_pkg import vm_state
+
+        with patch.dict(
+            "os.environ", {"LTVM_EXTRA_SUBNET6": "fd99:1234:abcd:f001"}
+        ):
+            assert vm_state._read_extra_subnet6() == "fd99:1234:abcd:f001"
+
+    def test_default_prefix_holds_the_invariant(self) -> None:
+        from ltvm_pkg import vm_state
+
+        with patch.dict("os.environ", {}, clear=True):
+            with patch("ltvm_pkg.vm_state.VM_DIR", Path("/nonexistent")):
+                prefix = vm_state._read_extra_subnet6()
+        assert prefix == "fd17:2016:1000:f100"
+        assert all(int(h, 16) >= 0x1000 for h in prefix.split(":"))
+
+
+class TestVMInfoNicIpsField:
+    """NIC_IPS stays a plain list of dotted quads even though extras
+    moved off the mgmt /24 -- the network is derivable from the
+    address, so the .info format did not have to grow."""
+
+    def test_nic_ips_on_their_own_networks_round_trip(
+        self, tmp_sockets: Path
+    ) -> None:
+        vm = VMInfo(
+            name="rails",
+            ip="192.168.100.60",
+            nics=["softroce", "softroce"],
+            nic_ips=["172.16.100.60", "172.16.100.61"],
+        )
+        vm.save()
+        assert (
+            "NIC_IPS=172.16.100.60|172.16.100.61\n" in vm.info_path.read_text()
+        )
+        loaded = VMInfo.load("rails")
+        assert loaded.nic_ips == ["172.16.100.60", "172.16.100.61"]
+
+    def test_legacy_info_file_without_nic_ips_line(
+        self, tmp_sockets: Path
+    ) -> None:
+        """A pre-fix .info: NICS= present, NIC_IPS= absent entirely.
+
+        It must still load, keeping the VM usable across an ltvm
+        upgrade -- the extras simply have no recorded address.
+        """
+        info = tmp_sockets / "old.info"
+        info.write_text(
+            "NAME=old\n"
+            "IP=192.168.100.90\n"
+            "PID=0\n"
+            "TAP=tap-old\n"
+            "MAC=AA:FC:00:00:00:01\n"
+            "VCPUS=2\n"
+            "MEM=2048\n"
+            "MDT_DISKS=0\n"
+            "OST_DISKS=0\n"
+            "IMAGE=\n"
+            "KERNEL=\n"
+            "NICS=tcp\n"
+        )
+        vm = VMInfo.load("old")
+        assert vm.nics == ["tcp"]
+        assert vm.nic_ips == []
+
+    def test_legacy_info_file_with_mgmt_subnet_nic_ips(
+        self, tmp_sockets: Path
+    ) -> None:
+        """A VM created before the fix has its extras on the mgmt /24.
+        Loading must not rewrite or reject them."""
+        info = tmp_sockets / "sameteam.info"
+        info.write_text(
+            "NAME=sameteam\n"
+            "IP=192.168.100.33\n"
+            "PID=0\n"
+            "TAP=tap-sameteam\n"
+            "MAC=AA:FC:00:00:00:02\n"
+            "VCPUS=2\n"
+            "MEM=2048\n"
+            "MDT_DISKS=0\n"
+            "OST_DISKS=0\n"
+            "IMAGE=\n"
+            "KERNEL=\n"
+            "NICS=tcp\n"
+            "NIC_IPS=192.168.100.34\n"
+        )
+        vm = VMInfo.load("sameteam")
+        assert vm.nic_ips == ["192.168.100.34"]
+
+
 class TestVMInfoLoadCorruption:
     """VMInfo.load fails loud on corrupt int fields -- writes are atomic
     (tempfile + rename) so a truncated/garbage int signals real damage."""

@@ -399,6 +399,110 @@ class TestLaunchQemuCommand:
         append = h.qemu_args[h.qemu_args.index("-append") + 1]
         assert append.endswith(" fc_name=co1-single")
 
+    def test_fc_nic_ips_carry_no_prefix(self, tmp_vmdir: Path) -> None:
+        """fc_nic_ips= stays bare dotted quads.  An image older than
+        fc_nic_prefixes appends its own '/24'; a '/24' already in the
+        value would make its `ip addr add` fail silently."""
+        vm = _make_vm(tmp_vmdir)
+        vm.nics = ["softroce", "softroce"]
+        vm.nic_ips = ["172.16.100.33", "172.16.100.34"]
+        h = _LaunchHarness()
+        _run_launch(vm, h)
+        append = h.qemu_args[h.qemu_args.index("-append") + 1]
+        assert "fc_nic_ips=172.16.100.33,172.16.100.34" in append
+        assert "/24," not in append
+
+    def test_fc_nic_prefixes_parallel_to_fc_nic_ips(
+        self, tmp_vmdir: Path
+    ) -> None:
+        """The prefix length travels in its own index-matched array."""
+        vm = _make_vm(tmp_vmdir)
+        vm.nics = ["tcp", "tcp"]
+        vm.nic_ips = ["172.16.100.33", "172.16.100.34"]
+        h = _LaunchHarness()
+        _run_launch(vm, h)
+        append = h.qemu_args[h.qemu_args.index("-append") + 1]
+        assert "fc_nic_prefixes=24,24" in append
+
+    def test_fc_nic_ip6s_carries_the_full_addresses(
+        self, tmp_vmdir: Path
+    ) -> None:
+        """The extras' IPv6 addresses ride their own parallel array,
+        at their full 39-character width."""
+        vm = _make_vm(tmp_vmdir)
+        vm.nics = ["softroce", "softroce"]
+        vm.nic_ips = ["172.16.100.33", "172.16.100.34"]
+        vm.nic_ip6s = [
+            "fd17:2016:1000:f100:f172:f016:f100:f033",
+            "fd17:2016:1000:f100:f172:f016:f100:f034",
+        ]
+        h = _LaunchHarness()
+        _run_launch(vm, h)
+        append = h.qemu_args[h.qemu_args.index("-append") + 1]
+        assert (
+            "fc_nic_ip6s=fd17:2016:1000:f100:f172:f016:f100:f033,"
+            "fd17:2016:1000:f100:f172:f016:f100:f034" in append
+        )
+        assert "fc_nic_ip6_prefixes=64,64" in append
+
+    def test_no_ip6_arrays_without_nic_ip6s(self, tmp_vmdir: Path) -> None:
+        """A VM created before the extras carried IPv6 gets neither
+        parameter, so its cmdline is unchanged."""
+        vm = _make_vm(tmp_vmdir)
+        vm.nics = ["tcp"]
+        vm.nic_ips = ["172.16.100.33"]
+        vm.nic_ip6s = []
+        h = _LaunchHarness()
+        _run_launch(vm, h)
+        append = h.qemu_args[h.qemu_args.index("-append") + 1]
+        assert "fc_nic_ip6s" not in append
+        assert "fc_nic_ip6_prefixes" not in append
+
+    def test_cmdline_stays_inside_command_line_size(
+        self, tmp_vmdir: Path
+    ) -> None:
+        """Three extra NICs add about 40 characters each; the whole
+        cmdline must stay well inside COMMAND_LINE_SIZE (2048)."""
+        vm = _make_vm(tmp_vmdir)
+        vm.nics = ["softroce", "softroce", "softroce"]
+        vm.nic_ips = [
+            "172.16.100.233",
+            "172.16.100.234",
+            "172.16.100.235",
+        ]
+        vm.nic_ip6s = [
+            "fd17:2016:1000:f100:f172:f016:f100:f233",
+            "fd17:2016:1000:f100:f172:f016:f100:f234",
+            "fd17:2016:1000:f100:f172:f016:f100:f235",
+        ]
+        h = _LaunchHarness()
+        _run_launch(vm, h)
+        append = h.qemu_args[h.qemu_args.index("-append") + 1]
+        assert len(append) < 2048
+
+    def test_no_prefixes_without_nic_ips(self, tmp_vmdir: Path) -> None:
+        """An old .info with NICS but no NIC_IPS emits neither array,
+        so rc.local just brings the interfaces up as it always did."""
+        vm = _make_vm(tmp_vmdir)
+        vm.nics = ["tcp"]
+        vm.nic_ips = []
+        h = _LaunchHarness()
+        _run_launch(vm, h)
+        append = h.qemu_args[h.qemu_args.index("-append") + 1]
+        assert "fc_nics=tcp" in append
+        assert "fc_nic_ips=" not in append
+        assert "fc_nic_prefixes=" not in append
+
+    def test_no_nic_arrays_on_single_nic_cmdline(self, tmp_vmdir: Path) -> None:
+        """Regression bar: a VM with no --nic gets the same cmdline as
+        before this change."""
+        vm = _make_vm(tmp_vmdir)
+        h = _LaunchHarness()
+        _run_launch(vm, h)
+        append = h.qemu_args[h.qemu_args.index("-append") + 1]
+        assert "fc_nic_ips=" not in append
+        assert "fc_nic_prefixes=" not in append
+
     def test_data_disks_emit_device_and_drive(self, tmp_vmdir: Path) -> None:
         """mdt+ost disks produce paired -device/-drive args, 1-indexed."""
         vm = _make_vm(tmp_vmdir, mdt_disks=1, ost_disks=2)
