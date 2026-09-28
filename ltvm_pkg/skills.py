@@ -64,6 +64,8 @@ def _target_user() -> tuple[Path, int, int] | None:
     None covers both the unprivileged case and a real root login, where
     ``Path.home()`` is already the right home and no chown is wanted.
     """
+    if os.geteuid() != 0 and not os.environ.get("SUDO_USER"):
+        return None
     user = invoking_user()
     if user is None:
         return None

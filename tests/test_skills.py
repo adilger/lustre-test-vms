@@ -120,3 +120,11 @@ class TestThisCheckout:
             )
             assert fields["name"].strip() == skill.name
             assert fields["description"].strip()
+
+
+def test_unprivileged_without_sudo_uses_path_home(monkeypatch):
+    """A per-run $HOME must win over the passwd home."""
+    monkeypatch.setattr(skills.os, "geteuid", lambda: 1234)
+    monkeypatch.delenv("SUDO_USER", raising=False)
+
+    assert skills._target_user() is None
