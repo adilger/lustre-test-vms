@@ -229,9 +229,7 @@ class TestAllocIp:
             extras = ips[1:]
             assert len(set(extras)) == len(extras)
 
-    def test_extras_get_distinct_ipv6_addresses(
-        self, tmp_vmdir: Path
-    ) -> None:
+    def test_extras_get_distinct_ipv6_addresses(self, tmp_vmdir: Path) -> None:
         """The IPv6 addresses are derived from the IPv4 ones, so two
         extras on one VM inherit the IPv4 allocator's uniqueness."""
         from ltvm_pkg.vm_state import EXTRA_SUBNET6, nic_ip6

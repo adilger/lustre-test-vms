@@ -493,9 +493,7 @@ class TestLaunchQemuCommand:
         assert "fc_nic_ips=" not in append
         assert "fc_nic_prefixes=" not in append
 
-    def test_no_nic_arrays_on_single_nic_cmdline(
-        self, tmp_vmdir: Path
-    ) -> None:
+    def test_no_nic_arrays_on_single_nic_cmdline(self, tmp_vmdir: Path) -> None:
         """Regression bar: a VM with no --nic gets the same cmdline as
         before this change."""
         vm = _make_vm(tmp_vmdir)

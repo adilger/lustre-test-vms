@@ -387,12 +387,10 @@ def _read_extra_subnet() -> str:
 
 
 def _validate_subnet6(prefix: str, source: str) -> str:
-    """Check a /64 prefix keeps every address at its full width.
+    """Check an overriding /64 prefix is four hextets.
 
-    Exactly four hextets, each parsing as hex and each >= 0x1000.  A
-    hextet at or above 0x1000 always prints four digits and is never
-    zero, so no address built on the prefix can lose a leading zero or
-    gain a '::'.
+    Only the shape is checked: an override may use short hextets, and
+    then gets short addresses, which is the operator's choice.
     """
     hextets = prefix.split(":")
     if len(hextets) != 4:
@@ -401,20 +399,16 @@ def _validate_subnet6(prefix: str, source: str) -> str:
             f"(a /64 prefix with no trailing '::'), got {prefix!r}"
         )
     for h in hextets:
+        if not 1 <= len(h) <= 4:
+            raise ValueError(
+                f"{source} hextet {h!r} is not 1-4 hex digits: {prefix!r}"
+            )
         try:
-            value = int(h, 16)
+            int(h, 16)
         except ValueError:
             raise ValueError(
                 f"{source} hextet {h!r} is not hexadecimal: {prefix!r}"
             ) from None
-        if value < 0x1000:
-            raise ValueError(
-                f"{source} hextet {h!r} is below 0x1000: every hextet must "
-                f"be 0x1000 or more so the address always renders at full "
-                f"width (eight four-digit groups, no '::').  Short "
-                f"addresses are exactly what the IPv6 test coverage exists "
-                f"to avoid."
-            )
     return prefix
 
 
@@ -422,9 +416,8 @@ def _read_extra_subnet6() -> str:
     """Return the /64 prefix every extra (--nic) NIC is addressed from.
 
     Overridable with ``$LTVM_EXTRA_SUBNET6`` or ``VM_DIR/extra-subnet6``,
-    mirroring ``_read_extra_subnet()``.  The override is validated: a
-    prefix with a hextet below 0x1000 would silently give the whole
-    cluster short addresses.
+    mirroring ``_read_extra_subnet()``.  The default keeps every address
+    at full width; an override is taken as given.
     """
     env = os.environ.get("LTVM_EXTRA_SUBNET6")
     if env:

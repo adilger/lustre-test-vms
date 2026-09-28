@@ -376,24 +376,40 @@ class TestNicIp6:
 
 
 class TestExtraSubnet6Validation:
-    """An override that breaks the width invariant is refused at read
-    time, because nothing downstream would notice a short address."""
+    """An override is checked for shape only; the full-width rule holds
+    for the default prefix, not for a prefix the operator chose."""
 
-    def test_hextet_below_0x1000_rejected(self) -> None:
+    def test_short_hextets_accepted_on_override(self) -> None:
         from ltvm_pkg import vm_state
 
         with patch.dict("os.environ", {"LTVM_EXTRA_SUBNET6": "fd00:1:2:3"}):
+            assert vm_state._read_extra_subnet6() == "fd00:1:2:3"
+
+    def test_short_override_gives_a_valid_address(self) -> None:
+        import ipaddress
+
+        from ltvm_pkg import vm_state
+
+        with patch("ltvm_pkg.vm_state.EXTRA_SUBNET6", "fd00:0:0:0"):
+            a = vm_state.nic_ip6("172.16.100.23")
+        assert ipaddress.IPv6Address(a) == ipaddress.IPv6Address(
+            "fd00::f172:f016:f100:f023"
+        )
+
+    def test_overlong_hextet_rejected(self) -> None:
+        from ltvm_pkg import vm_state
+
+        with patch.dict(
+            "os.environ", {"LTVM_EXTRA_SUBNET6": "fd17:2016:1000:10000"}
+        ):
             with pytest.raises(ValueError) as e:
                 vm_state._read_extra_subnet6()
         assert "LTVM_EXTRA_SUBNET6" in str(e.value)
-        assert "0x1000" in str(e.value)
 
     def test_wrong_hextet_count_rejected(self) -> None:
         from ltvm_pkg import vm_state
 
-        with patch.dict(
-            "os.environ", {"LTVM_EXTRA_SUBNET6": "fd17:2016:1000"}
-        ):
+        with patch.dict("os.environ", {"LTVM_EXTRA_SUBNET6": "fd17:2016:1000"}):
             with pytest.raises(ValueError) as e:
                 vm_state._read_extra_subnet6()
         assert "LTVM_EXTRA_SUBNET6" in str(e.value)
