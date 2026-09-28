@@ -46,6 +46,11 @@ a podman-managed Linux VM + QEMU microvms. A few things differ from Linux:
 - **Do not use `sudo`** for `./ltvm install` on macOS -- run it as your
   user; it prompts for sudo internally only where it needs it (e.g.
   `/opt/qemu`, `/usr/local/bin/ltvm`).
+- **VMs need no sudo** after `./ltvm install`, which puts `/opt/qemu-vms`
+  in an `ltvm` group and adds you to it (a new terminal may be needed
+  before that takes). QEMU runs as you on socket_vmnet, and a launchd job
+  reloads ltvm's dnsmasq when a VM name is added. `ltvm doctor` reports
+  anything missing.
 - **Install Python deps first** with [uv](https://docs.astral.sh/uv/);
   the system Python lacks PyYAML. `./ltvm` auto-uses `.venv/` when present.
 - **podman backend is pinned to `applehv`** (Apple's Hypervisor.framework).
@@ -61,7 +66,7 @@ brew install uv && uv sync              # Python deps into .venv/
 ltvm doctor                             # sanity-check the host
 
 ltvm target fetch rocky9 --arch aarch64 --kernel 5.14-rhel9.5
-ltvm create co1-single --kernel 5.14-rhel9.5   # prompts for sudo internally
+ltvm create co1-single --kernel 5.14-rhel9.5   # no sudo once installed
 ltvm llmount co1-single                 # mount Lustre inside the VM
 ```
 

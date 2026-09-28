@@ -200,17 +200,18 @@ If `doctor` reports that this user is not in the `ltvm` group, that is
 for the human to fix (`sudo usermod -aG ltvm <user>`, then a new login);
 do not try to work around it.
 
-**macOS** has no shared layout. Guests reach the network through
-socket_vmnet, run by launchd, and resolve each other through ltvm's own
-dnsmasq; both come from `./ltvm install`. The lifecycle commands still
-run as the user, but elevate individual steps through sudo: every
-`create` and `start` launches QEMU as root, `stop` and `destroy` signal
-it as root, and the first `create` makes `/opt/qemu-vms` and each one
-updates `/etc/hosts`. You cannot answer a sudo password prompt, so when
-one of these fails for want of a password, ask the human to run that
-same command in their own terminal -- where sudo can prompt and then
-remember the password for a few minutes -- rather than working around
-it. Never edit sudoers.
+**macOS** has the shared layout too, once `./ltvm install` has set it
+up (`ltvm doctor` says whether it has): QEMU runs as the user and reaches
+the network through socket_vmnet, and VM names go to `hosts.d/`, which
+ltvm's dnsmasq is reloaded from by launchd. Without it, the lifecycle
+commands elevate individual steps through sudo: `create` and `start`
+launch QEMU as root, `stop` and `destroy` signal it as root, and each
+`create` updates `/etc/hosts`. A VM started as root before the host was
+set up still needs sudo to stop; once restarted it is the user's. You
+cannot answer a sudo password prompt, so when one of these fails for want
+of a password, ask the human to run that same command in their own
+terminal -- where sudo can prompt and then remember the password for a
+few minutes -- rather than working around it. Never edit sudoers.
 
 ## Talking to a VM
 

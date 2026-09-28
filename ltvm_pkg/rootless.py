@@ -11,6 +11,13 @@ need no root for the VM lifecycle:
 * dnsmasq serves the VM names in ``hosts.d/``, which it watches, so
   registering a VM needs neither /etc/hosts nor a reload signal.
 
+macOS gets the same directories and group.  QEMU there reaches the
+network through socket_vmnet's socket, which launchd creates for the
+``staff`` group, so there is no helper to install.  Homebrew's dnsmasq
+has no inotify and cannot watch ``hosts.d``; it reads the directory as
+``addn-hosts`` instead, and a root LaunchDaemon with ``WatchPaths`` on
+it sends dnsmasq the SIGHUP that the user may not.
+
 ``ready()`` says whether this process can work that way.  When it
 cannot, callers keep elevating each host operation with sudo.
 """
@@ -35,6 +42,12 @@ KVM_DEVICE = Path("/dev/kvm")
 BRIDGE_ACL = Path("/etc/qemu/bridge.conf")
 
 # Debian/Ubuntu, then Fedora/RHEL.  ltvm's prebuilt QEMU ships no helper.
+# The root LaunchDaemon that reloads dnsmasq when hosts.d changes.
+DNSMASQ_RELOAD_LABEL = "io.github.ltvm.dnsmasq-reload"
+DNSMASQ_RELOAD_PLIST = Path(
+    f"/Library/LaunchDaemons/{DNSMASQ_RELOAD_LABEL}.plist"
+)
+
 HELPER_CANDIDATES = (
     Path("/usr/lib/qemu/qemu-bridge-helper"),
     Path("/usr/libexec/qemu-bridge-helper"),
@@ -130,8 +143,12 @@ class Readiness:
 def readiness() -> Readiness:
     """Can this process run VMs with no root at all?"""
     r = Readiness()
-    if platform.system() != "Linux":
-        r.problems.append("unprivileged VMs are Linux-only")
+    system = platform.system()
+    if system == "Darwin":
+        _macos_readiness(r)
+        return r
+    if system != "Linux":
+        r.problems.append("unprivileged VMs need Linux or macOS")
         return r
     r.helper = bridge_helper()
     if r.helper is None:
@@ -142,6 +159,13 @@ def readiness() -> Readiness:
             r.problems.append(f"{found} is not setuid root")
     elif not bridge_allowed():
         r.problems.append(f"{BRIDGE_ACL} does not allow {BRIDGE}")
+    _check_shared_dirs(r)
+    if KVM_DEVICE.exists() and not _accessible(KVM_DEVICE, os.R_OK | os.W_OK):
+        r.problems.append(f"{KVM_DEVICE} is not accessible -- join 'kvm'")
+    return r
+
+
+def _check_shared_dirs(r: Readiness) -> None:
     for d in shared_dirs():
         if not _accessible(d, os.W_OK | os.X_OK):
             r.problems.append(
@@ -149,9 +173,19 @@ def readiness() -> Readiness:
                 f"'{GROUP}' group"
             )
             break
-    if KVM_DEVICE.exists() and not _accessible(KVM_DEVICE, os.R_OK | os.W_OK):
-        r.problems.append(f"{KVM_DEVICE} is not accessible -- join 'kvm'")
-    return r
+
+
+def _macos_readiness(r: Readiness) -> None:
+    from .host_setup import socket_vmnet_socket_path
+
+    sock = socket_vmnet_socket_path()
+    if not _accessible(sock, os.R_OK | os.W_OK):
+        r.problems.append(f"{sock} is not usable by this user")
+    _check_shared_dirs(r)
+    if not DNSMASQ_RELOAD_PLIST.exists():
+        r.problems.append(
+            f"{DNSMASQ_RELOAD_PLIST} is missing -- VM names would not resolve"
+        )
 
 
 def ready() -> bool:
@@ -159,12 +193,25 @@ def ready() -> bool:
     return os.geteuid() != 0 and readiness().ok
 
 
+def _join_groups(user: pwd.struct_passwd) -> None:
+    """Take *user*'s supplementary groups.
+
+    macOS caps setgroups() at 16 groups, fewer than an admin account
+    is in once it joins ltvm; its initgroups() hands the rest to the
+    kernel's membership lookup instead of failing with EINVAL.
+    """
+    if platform.system() == "Darwin":
+        os.initgroups(user.pw_name, user.pw_gid)
+    else:
+        os.setgroups(os.getgrouplist(user.pw_name, user.pw_gid))
+
+
 @contextmanager
 def _acting_as(user: pwd.struct_passwd) -> Iterator[None]:
     """Take *user*'s effective ids for access checks, then restore."""
     saved_groups = os.getgroups()
     saved_gid = os.getegid()
-    os.setgroups(os.getgrouplist(user.pw_name, user.pw_gid))
+    _join_groups(user)
     os.setegid(user.pw_gid)
     os.seteuid(user.pw_uid)
     try:
@@ -172,7 +219,10 @@ def _acting_as(user: pwd.struct_passwd) -> Iterator[None]:
     finally:
         os.seteuid(0)
         os.setegid(saved_gid)
-        os.setgroups(saved_groups)
+        if platform.system() == "Darwin":
+            os.initgroups(pwd.getpwuid(0).pw_name, saved_gid)
+        else:
+            os.setgroups(saved_groups)
 
 
 def sudo_user() -> pwd.struct_passwd | None:
@@ -195,16 +245,14 @@ def drop_to(user: pwd.struct_passwd) -> bool:
     can do the whole job unprivileged.  Returns True when the process is
     now *user*.
     """
-    # Off Linux readiness() always says no, and trying costs more than
-    # the answer: macOS's getgroups() reports the directory-service
-    # group list rather than what setgroups() set, and for root that is
-    # more than the 16 setgroups() will take back.
-    if platform.system() != "Linux":
+    # Elsewhere readiness() always says no, and trying the user's
+    # identity would cost more than the answer.
+    if platform.system() not in ("Linux", "Darwin"):
         return False
     with _acting_as(user):
         if not readiness().ok:
             return False
-    os.setgroups(os.getgrouplist(user.pw_name, user.pw_gid))
+    _join_groups(user)
     os.setgid(user.pw_gid)
     os.setuid(user.pw_uid)
     os.environ.update(HOME=user.pw_dir, USER=user.pw_name, LOGNAME=user.pw_name)

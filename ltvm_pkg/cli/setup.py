@@ -144,10 +144,14 @@ def cmd_setup(args: argparse.Namespace) -> int:
     if args.verify:
         try:
             # verify reports on what is configured, so with no flag it
-            # asks about the range the install actually chose.
-            results = host_setup.verify(
-                subnet=host_setup.choose_subnet(args.subnet)
+            # asks about the range the install actually chose.  macOS
+            # has no bridge subnet, and no `ip` to look one up with.
+            subnet = (
+                host_setup.DEFAULT_SUBNET
+                if host_setup.is_macos()
+                else host_setup.choose_subnet(args.subnet)
             )
+            results = host_setup.verify(subnet=subnet)
         except Exception as e:
             return _error(str(e), use_json)
         if use_json:

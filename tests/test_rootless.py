@@ -166,6 +166,51 @@ class TestReadiness:
             assert not rootless.ready()
 
 
+@pytest.mark.usefixtures("real_rootless")
+class TestMacosReadiness:
+    @pytest.fixture
+    def host(self, tmp_path: Path) -> Iterator[dict[str, Path]]:
+        dirs = [tmp_path / n for n in ("vm", "overlays", "sockets", "hosts.d")]
+        for d in dirs:
+            d.mkdir()
+        sock = tmp_path / "socket_vmnet"
+        sock.touch()
+        plist = tmp_path / "reload.plist"
+        plist.touch()
+        with (
+            patch.object(rootless, "shared_dirs", return_value=tuple(dirs)),
+            patch.object(rootless.platform, "system", return_value="Darwin"),
+            patch.object(rootless, "DNSMASQ_RELOAD_PLIST", plist),
+            patch.object(
+                host_setup, "socket_vmnet_socket_path", return_value=sock
+            ),
+        ):
+            yield {"sock": sock, "plist": plist, "sockets": dirs[2]}
+        for d in dirs:
+            d.chmod(0o755)
+
+    def test_ready_without_a_helper(self, host: dict[str, Path]) -> None:
+        r = rootless.readiness()
+        assert r.ok, r.problems
+        assert r.helper is None
+
+    def test_missing_socket(self, host: dict[str, Path]) -> None:
+        host["sock"].unlink()
+        r = rootless.readiness()
+        assert r.problems == [f"{host['sock']} is not usable by this user"]
+
+    def test_missing_reload_job(self, host: dict[str, Path]) -> None:
+        host["plist"].unlink()
+        r = rootless.readiness()
+        assert "VM names would not resolve" in r.problems[0]
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root can write anything")
+    def test_unwritable_dir(self, host: dict[str, Path]) -> None:
+        host["sockets"].chmod(0o555)
+        r = rootless.readiness()
+        assert "'ltvm' group" in r.problems[0]
+
+
 # ── dropping root ────────────────────────────────────────
 
 
@@ -189,7 +234,14 @@ class TestDropToSudoUser:
             patch.object(rootless.os, "getgroups", return_value=[0]),
             patch.object(rootless.os, "getegid", return_value=0),
         ):
-            for fn in ("setgroups", "setegid", "seteuid", "setgid", "setuid"):
+            for fn in (
+                "setgroups",
+                "initgroups",
+                "setegid",
+                "seteuid",
+                "setgid",
+                "setuid",
+            ):
                 p = patch.object(rootless.os, fn)
                 mocks[fn] = p.start()
             yield mocks
@@ -217,16 +269,34 @@ class TestDropToSudoUser:
         assert as_sudo_root["seteuid"].call_args_list[-1].args == (0,)
         assert os.environ["SUDO_USER"] == "alice"
 
-    def test_stays_root_off_linux_without_touching_groups(
+    def test_stays_root_elsewhere_without_touching_groups(
         self, as_sudo_root: dict
     ) -> None:
-        # macOS: root's getgroups() is longer than setgroups() takes
-        # back, so even trying the user's identity raised ValueError.
-        with patch.object(rootless.platform, "system", return_value="Darwin"):
+        with patch.object(rootless.platform, "system", return_value="FreeBSD"):
             assert not rootless.drop_to_sudo_user()
-        for fn in ("setgroups", "setegid", "seteuid", "setgid", "setuid"):
+        for fn in (
+            "setgroups",
+            "initgroups",
+            "setegid",
+            "seteuid",
+            "setgid",
+            "setuid",
+        ):
             as_sudo_root[fn].assert_not_called()
         assert os.environ["SUDO_USER"] == "alice"
+
+    def test_macos_joins_groups_through_initgroups(
+        self, as_sudo_root: dict
+    ) -> None:
+        """setgroups() takes at most 16 groups there: EINVAL for an
+        admin account that has joined ltvm."""
+        with (
+            patch.object(rootless.platform, "system", return_value="Darwin"),
+            patch.object(rootless, "readiness", return_value=_ready()),
+        ):
+            assert rootless.drop_to_sudo_user()
+        as_sudo_root["setgroups"].assert_not_called()
+        as_sudo_root["initgroups"].assert_called_with("alice", 1234)
 
 
 class TestDropToOwner:
@@ -366,6 +436,44 @@ class TestHelperLaunch:
         assert "tap,id=net0,ifname=tap-co1-pt,script=no,downscript=no" in (
             h.qemu_args
         )
+
+    def test_not_ready_keeps_the_root_path(self, tmp_vmdir: Path) -> None:
+        vm = _make_vm(tmp_vmdir)
+        h = self._launch(vm, _not_ready())
+        assert h.qemu_args is not None
+        assert h.qemu_args[0] == "sudo"
+
+
+class TestMacosLaunch:
+    """socket_vmnet needs no helper: a ready Mac runs QEMU as the user."""
+
+    _SOCK = Path("/opt/homebrew/var/run/socket_vmnet")
+
+    def _launch(self, vm: Any, ready: rootless.Readiness) -> _LaunchHarness:
+        h = _LaunchHarness()
+        with (
+            patch.object(rootless, "readiness", return_value=ready),
+            patch("ltvm_pkg.qemu_run.is_macos", return_value=True),
+            patch(
+                "ltvm_pkg.qemu_run.socket_vmnet_socket_path",
+                return_value=self._SOCK,
+            ),
+            patch(
+                "ltvm_pkg.host_setup.ensure_socket_vmnet_running",
+                return_value=None,
+            ),
+        ):
+            _run_launch(vm, h)
+        return h
+
+    def test_qemu_runs_as_the_user(self, tmp_vmdir: Path) -> None:
+        vm = _make_vm(tmp_vmdir)
+        h = self._launch(vm, rootless.Readiness())
+        assert h.qemu_args is not None
+        assert h.qemu_args[0] != "sudo"
+        assert f"addr.path={self._SOCK}" in " ".join(h.qemu_args)
+        flat = [" ".join(c) for c in h.run_calls]
+        assert not any("chown" in c or c.startswith("touch") for c in flat)
 
     def test_not_ready_keeps_the_root_path(self, tmp_vmdir: Path) -> None:
         vm = _make_vm(tmp_vmdir)
@@ -759,6 +867,85 @@ class TestInstall:
         assert ["usermod", "-aG", "ltvm,kvm", "alice"] in [
             c.args[0] for c in run.mock_calls
         ]
+
+    def test_macos_shared_dirs_and_membership(self, tmp_path: Path) -> None:
+        vm_dir = tmp_path / "vm"
+        not_member = MagicMock(returncode=1)
+        with (
+            patch.object(host_setup, "VM_DIR", vm_dir),
+            patch.object(host_setup, "_sudo_prime"),
+            patch.object(host_setup, "_sudo_run") as sudo,
+            patch.object(host_setup, "_run_quiet", return_value=not_member),
+            patch("grp.getgrnam", side_effect=KeyError("ltvm")),
+            patch("getpass.getuser", return_value="alice"),
+        ):
+            host_setup._setup_shared_vm_dirs_macos()
+        cmds = [c.args[0] for c in sudo.mock_calls]
+        dirs = [str(vm_dir)] + [
+            str(vm_dir / n) for n in ("overlays", "sockets", "hosts.d")
+        ]
+        assert cmds[0][:3] == ["dseditgroup", "-o", "create"]
+        assert ["chown", "-h", "root:ltvm", *dirs] in cmds
+        assert ["chmod", "-h", "3775", *dirs] in cmds
+        assert [
+            "dseditgroup",
+            "-o",
+            "edit",
+            "-a",
+            "alice",
+            "-t",
+            "user",
+            "ltvm",
+        ] in cmds
+
+    def test_macos_shared_dir_symlink_refused(self, tmp_path: Path) -> None:
+        vm_dir = tmp_path / "vm"
+        vm_dir.mkdir()
+        (vm_dir / "sockets").symlink_to(tmp_path)
+        with (
+            patch.object(host_setup, "VM_DIR", vm_dir),
+            patch.object(host_setup, "_sudo_prime"),
+            patch.object(host_setup, "_sudo_run") as sudo,
+            patch("grp.getgrnam"),
+            pytest.raises(RuntimeError, match="symlink"),
+        ):
+            host_setup._setup_shared_vm_dirs_macos()
+        assert not any(
+            c.args[0][0] in ("chown", "chmod") for c in sudo.mock_calls
+        )
+
+    def test_macos_reload_job_watches_hosts_d(self, tmp_path: Path) -> None:
+        plist = tmp_path / "reload.plist"
+        installed: list[str] = []
+
+        def sudo(cmd: list[str], **_kw: Any) -> MagicMock:
+            if cmd[0] == "install":
+                installed.append(Path(cmd[-2]).read_text())
+            return MagicMock(returncode=0)
+
+        with (
+            patch.object(rootless, "DNSMASQ_RELOAD_PLIST", plist),
+            patch.object(host_setup, "VM_DIR", tmp_path / "vm"),
+            patch.object(host_setup, "_sudo_prime"),
+            patch.object(host_setup, "_sudo_run", side_effect=sudo) as run,
+            patch.object(
+                host_setup, "_run_quiet", return_value=MagicMock(returncode=1)
+            ),
+        ):
+            host_setup.install_dnsmasq_reload_macos()
+        text = installed[0]
+        assert f"<string>{tmp_path / 'vm' / 'hosts.d'}</string>" in text
+        assert "<string>system/io.github.ltvm.dnsmasq</string>" in text
+        assert "@" not in text
+        assert ["launchctl", "bootstrap", "system", str(plist)] in [
+            c.args[0] for c in run.mock_calls
+        ]
+
+    def test_macos_dnsmasq_reads_hosts_d(self) -> None:
+        text = (
+            host_setup.HOST_CONFIG_DIR / "ltvm-dnsmasq-macos.conf"
+        ).read_text()
+        assert "addn-hosts=@HOSTS_DIR@" in text.splitlines()
 
     def test_root_file_write_replaces_a_symlink(self, tmp_path: Path) -> None:
         target = tmp_path / "target"
