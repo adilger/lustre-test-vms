@@ -542,6 +542,7 @@ class TestClusterDeployNeverPrompts:
                 "_deploy_one_node",
                 side_effect=lambda name, *a, **k: (name, 0, ""),
             ),
+            patch.object(vm_cluster, "probe_mgs_lnet"),
             patch.object(vm_cluster, "generate_local_sh", return_value=""),
             patch.object(
                 vm_cluster,

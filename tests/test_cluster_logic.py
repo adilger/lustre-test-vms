@@ -262,6 +262,70 @@ class TestGenerateLocalSh:
 # ── _validate_lustre_source ──────────────────────────────
 
 
+# ── the MGS's LNet net, as the node reports it ──────────
+
+
+# `ip -o addr show` on a node with one extra NIC.
+_ADDRS = (
+    "1: lo    inet 127.0.0.1/8 scope host lo\\       valid_lft forever\n"
+    "1: lo    inet6 ::1/128 scope host \\       valid_lft forever\n"
+    "2: eth0    inet 192.168.122.10/24 brd 192.168.122.255 scope global "
+    "eth0\\       valid_lft forever\n"
+    "3: eth1    inet 172.16.100.23/24 brd 172.16.100.255 scope global "
+    "eth1\\       valid_lft forever\n"
+    "3: eth1    inet6 fd17:2016:1000:f100:f172:f016:f100:f023/64 scope "
+    "global \\       valid_lft forever\n"
+)
+
+
+def _probe(networks: str) -> str:
+    return f"{networks}\n--\n{_ADDRS}"
+
+
+class TestLnetFromProbe:
+    """lnet_from_probe names the net and NID the MGS actually runs."""
+
+    def test_no_extra_nic_runs_tcp_on_mgmt(self) -> None:
+        lnet = vm_cluster.lnet_from_probe(_probe("tcp0(eth0)"))
+        assert lnet.nettype == "tcp"
+        assert lnet.mgsnid == "192.168.122.10@tcp"
+
+    def test_extra_tcp_nic_carries_the_nid(self) -> None:
+        # With any --nic, the boot emitter takes eth0 out of LNet, so
+        # the mgmt address is not a NID of the MGS.
+        lnet = vm_cluster.lnet_from_probe(_probe("tcp0(eth1)"))
+        assert lnet.mgsnid == "172.16.100.23@tcp"
+
+    def test_softroce_runs_o2ib(self) -> None:
+        lnet = vm_cluster.lnet_from_probe(_probe("o2ib0(eth1)"))
+        assert lnet.nettype == "o2ib"
+        assert lnet.mgsnid == "172.16.100.23@o2ib"
+
+    def test_first_net_and_first_interface_win(self) -> None:
+        lnet = vm_cluster.lnet_from_probe(_probe("tcp0(eth1,eth0),o2ib0(eth0)"))
+        assert lnet.mgsnid == "172.16.100.23@tcp"
+
+    def test_nonzero_net_index_is_kept(self) -> None:
+        lnet = vm_cluster.lnet_from_probe(_probe("tcp1(eth1)"))
+        assert lnet.nettype == "tcp"
+        assert lnet.mgsnid == "172.16.100.23@tcp1"
+
+    def test_no_lnet_conf_is_tcp_on_eth0(self) -> None:
+        lnet = vm_cluster.lnet_from_probe(f"--\n{_ADDRS}")
+        assert lnet.mgsnid == "192.168.122.10@tcp"
+
+    def test_unresolved_passthrough_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="@ib-of-eth1"):
+            vm_cluster.lnet_from_probe(_probe("o2ib0(@ib-of-eth1))"))
+
+    def test_generate_local_sh_writes_the_probed_net(self) -> None:
+        c = _cluster(("n-mds", ["mgs", "mds"], 1, 0, "192.168.122.10"))
+        lnet = vm_cluster.lnet_from_probe(_probe("o2ib0(eth1)"))
+        text = vm_cluster.generate_local_sh(c, lnet=lnet)
+        assert "NETTYPE=o2ib" in text
+        assert "MGSNID=172.16.100.23@o2ib" in text
+
+
 class TestValidateLustreSource:
     """_validate_lustre_source catches obvious non-Lustre-tree inputs."""
 

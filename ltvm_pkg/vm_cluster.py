@@ -5,10 +5,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -92,6 +94,71 @@ def parse_node_spec(spec: str) -> ClusterNode:
     )
 
 
+# What a node's LNet will run on: the networks= value of its lnet.conf,
+# a separator, then every address the node holds.  rc.local composes
+# lnet.conf at boot from the node's NICs (setup-lnet-config.sh), so
+# asking the node keeps that rule in one place.
+LNET_PROBE = (
+    'sed -n \'s/.*networks="\\([^"]*\\)".*/\\1/p\' '
+    "/etc/modprobe.d/lnet.conf 2>/dev/null | head -n 1; "
+    "echo --; ip -o addr show"
+)
+
+# The first net of a networks= value: its type ("o2ib" holds a digit,
+# so the index is the digits that end the name), then the interfaces.
+_NET_RE = re.compile(r"\s*([a-z][a-z0-9]*?)(\d*)\s*(?:\(([^)]*)\)|(?=,)|$)")
+
+
+@dataclass(frozen=True)
+class ClusterLnet:
+    """The LNet net a cluster's local.sh names, as its MGS runs it."""
+
+    nettype: str
+    mgsnid: str
+
+
+def lnet_from_probe(output: str) -> ClusterLnet:
+    """Read LNET_PROBE output from the MGS into its NETTYPE and MGSNID.
+
+    The first net in lnet.conf is the one the MGS NID is on, and its
+    first interface is the one that carries it.  With no lnet.conf,
+    LNet runs tcp on the first interface, which is eth0.
+
+    Raises ValueError when the MGS has no usable address for that net.
+    """
+    networks, _, addrs = output.partition("--\n")
+    m = _NET_RE.match(networks.strip() or "tcp0(eth0)")
+    if not m:
+        raise ValueError(f"cannot parse lnet.conf networks={networks!r}")
+    nettype, index, ifaces = m.group(1), m.group(2), m.group(3) or "eth0"
+    iface = ifaces.split(",")[0].strip()
+    # Every generated config names the net without its index, and
+    # "tcp" and "tcp0" are the same net to Lustre.
+    net = nettype if index in ("", "0") else f"{nettype}{index}"
+
+    for line in addrs.splitlines():
+        fields = line.split()
+        if len(fields) >= 4 and fields[1] == iface and fields[2] == "inet":
+            ip = fields[3].split("/")[0]
+            return ClusterLnet(nettype=nettype, mgsnid=f"{ip}@{net}")
+    raise ValueError(f"no IPv4 address on {iface}, which carries {net}")
+
+
+def probe_mgs_lnet(cluster: ClusterInfo) -> ClusterLnet:
+    """Ask the cluster's MGS which net and address its NID is on."""
+    mgs = cluster.mgs_node()
+    r = run_ssh(mgs.ip, LNET_PROBE, timeout=30)
+    if r.returncode != 0:
+        die(
+            f"cannot read the LNet config of MGS {mgs.name}: "
+            f"{(r.stderr or r.stdout).strip()}"
+        )
+    try:
+        return lnet_from_probe(r.stdout)
+    except ValueError as e:
+        die(f"MGS {mgs.name}: {e}")
+
+
 CLUSTER_BLOCK_BEGIN = "# --- Cluster configuration"
 CLUSTER_BLOCK_END = "# --- END cluster configuration"
 
@@ -100,6 +167,7 @@ def generate_local_sh(
     cluster: ClusterInfo,
     os_family: str = "rhel",
     fstype: str = "ldiskfs",
+    lnet: ClusterLnet | None = None,
 ) -> str:
     """Generate the cluster block for cfg/local.sh.
 
@@ -113,10 +181,15 @@ def generate_local_sh(
     ZFS: the MDSDEV*/OSTDEV* written above are the *vdevs* ZFS builds
     its pools on (test-framework.sh's mdsvdevname/ostvdevname), and the
     dataset names default to ``$FSNAME-mdt<n>/mdt<n>``.
+
+    ``lnet`` is the net the MGS runs, from probe_mgs_lnet().  Without
+    it, the MGS NID is its mgmt address on tcp.
     """
     if fstype not in ("ldiskfs", "zfs"):
         raise ValueError(f"unsupported fstype: {fstype!r}")
     mgs = cluster.mgs_node()
+    if lnet is None:
+        lnet = ClusterLnet(nettype="tcp", mgsnid=f"{mgs.ip}@tcp")
     mds_list = cluster.mds_nodes()
     oss_list = cluster.oss_nodes()
     client_list = cluster.client_nodes()
@@ -127,7 +200,7 @@ def generate_local_sh(
         f"# Cluster: {cluster.name}",
         "",
         "FSNAME=lustre",
-        "NETTYPE=tcp",
+        f"NETTYPE={lnet.nettype}",
         "",
         f"LUSTRE={lustre_dir}",
         f"RLUSTRE={lustre_dir}",
@@ -136,7 +209,7 @@ def generate_local_sh(
     ]
 
     lines.append(f"mgs_HOST={mgs.name}")
-    lines.append(f"MGSNID={mgs.ip}@tcp")
+    lines.append(f"MGSNID={lnet.mgsnid}")
 
     combined = mgs.is_mds
     if not combined:
@@ -820,6 +893,10 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
     ):
         die("--server-only requires --mount")
 
+    # Before the build: a cluster whose MGS cannot name its NID is an
+    # error to report now, not after every node is deployed.
+    lnet = probe_mgs_lnet(cluster)
+
     # Derive os_family and target+kernel+arch from the first node's
     # metadata (all nodes in a cluster share the same target).  We also
     # pull the kernel name and arch off the VM so build-lustre uses the
@@ -975,7 +1052,9 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
         )
 
     # After each node's own disk block, so the cluster topology wins.
-    local_sh = generate_local_sh(cluster, os_family=os_family, fstype=fstype)
+    local_sh = generate_local_sh(
+        cluster, os_family=os_family, fstype=fstype, lnet=lnet
+    )
     print("\n--- Distributing cluster config (local.sh)...")
     print(local_sh)
 
