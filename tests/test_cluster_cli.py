@@ -574,6 +574,20 @@ class TestClusterDeployArgs:
         assert ns.lustre_source == "/x"
         assert ns.mount and ns.server_only and ns.force_compat
 
+    def test_ip_family_flag(self) -> None:
+        cmd_cluster(_ns("deploy", "co1", "--ip-family", "ipv6"))
+        assert self._ns_call().ip_family == "ipv6"
+
+    def test_ip_family_default_is_none(self) -> None:
+        # None, not ipv4: a bare deploy keeps the cluster's recorded family.
+        cmd_cluster(_ns("deploy", "co1"))
+        assert self._ns_call().ip_family is None
+
+    def test_invalid_ip_family_errors(self) -> None:
+        err = _expect_usage_error("deploy", "co1", "--ip-family", "ipv5")
+        assert "invalid choice" in err
+        assert not self.handler.called
+
     def test_unknown_flag_errors(self) -> None:
         err = _expect_usage_error("deploy", "co1", "--frob")
         assert "--frob" in err
@@ -1203,6 +1217,71 @@ class TestCmdClusterDeployBuildsForTheNodes:
             "5.14-rhel9.3-5.14.0-362.18.1.el9_3"
         )
         assert build[build.index("--variant") + 1] == "mofed"
+
+
+class TestCmdClusterDeployIpFamily:
+    """--ip-family reaches the MGS probe and outlives the deploy."""
+
+    def _deploy(self, cluster: ClusterInfo, ip_family: str | None) -> MagicMock:
+        class _TC:
+            os_family = "rhel"
+
+        node = MagicMock(
+            os_id="rocky9",
+            arch="x86_64",
+            variant="base",
+            kernel="/a/kernels/k/vmlinuz",
+            ip="10.0.0.5",
+        )
+        with (
+            patch.object(ClusterInfo, "load", return_value=cluster),
+            patch.object(vm_cluster.VMInfo, "load", return_value=node),
+            patch.object(vm_cluster, "_validate_lustre_source"),
+            patch("ltvm_pkg.target_config.TargetConfig", return_value=_TC()),
+            patch.object(
+                vm_cluster.subprocess,
+                "run",
+                return_value=MagicMock(returncode=0),
+            ),
+            patch.object(
+                vm_cluster,
+                "_deploy_one_node",
+                side_effect=lambda name, *a, **k: (name, 0, ""),
+            ),
+            patch.object(vm_cluster, "probe_mgs_lnet") as probe,
+            patch.object(vm_cluster, "generate_local_sh", return_value=""),
+            patch.object(
+                vm_cluster,
+                "_write_cluster_local_sh",
+                side_effect=lambda name, *a, **k: (name, 0, ""),
+            ),
+        ):
+            vm_cluster.cmd_cluster_deploy(
+                argparse.Namespace(
+                    name="co3",
+                    lustre_source="/tmp",
+                    mount=False,
+                    ip_family=ip_family,
+                )
+            )
+        return probe
+
+    def test_flag_is_recorded(self) -> None:
+        cluster = ClusterInfo(
+            name="co3", nodes=[{"name": "co3-mds", "roles": ["mgs", "mds"]}]
+        )
+        probe = self._deploy(cluster, "ipv6")
+        assert probe.call_args.args[1] == "ipv6"
+        assert cluster.ip_family == "ipv6"
+
+    def test_bare_redeploy_keeps_the_family(self) -> None:
+        cluster = ClusterInfo(
+            name="co3",
+            nodes=[{"name": "co3-mds", "roles": ["mgs", "mds"]}],
+            ip_family="ipv6",
+        )
+        probe = self._deploy(cluster, None)
+        assert probe.call_args.args[1] == "ipv6"
 
 
 class TestCmdClusterExecBehavior:

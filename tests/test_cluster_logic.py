@@ -318,6 +318,43 @@ class TestLnetFromProbe:
         with pytest.raises(ValueError, match="@ib-of-eth1"):
             vm_cluster.lnet_from_probe(_probe("o2ib0(@ib-of-eth1))"))
 
+    def test_ipv6_takes_the_global_address(self) -> None:
+        lnet = vm_cluster.lnet_from_probe(_probe("tcp0(eth1)"), "ipv6")
+        assert lnet.mgsnid == "fd17:2016:1000:f100:f172:f016:f100:f023@tcp"
+        assert lnet.force_large_nid
+
+    def test_ipv4_does_not_force_large_nids(self) -> None:
+        lnet = vm_cluster.lnet_from_probe(_probe("tcp0(eth1)"), "ipv4")
+        assert not lnet.force_large_nid
+
+    def test_ipv6_on_o2ib_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="only supported by tcp"):
+            vm_cluster.lnet_from_probe(_probe("o2ib0(eth1)"), "ipv6")
+
+    def test_ipv6_on_mgmt_is_refused(self) -> None:
+        # eth0 is IPv4 only; its link-local address is not a NID.
+        probe = _probe("tcp0(eth0)") + (
+            "2: eth0    inet6 fe80::1/64 scope link \\  valid_lft forever\n"
+        )
+        with pytest.raises(ValueError, match="no global IPv6 address on eth0"):
+            vm_cluster.lnet_from_probe(probe, "ipv6")
+
+    def test_local_sh_forces_large_nids_for_ipv6_only(self) -> None:
+        c = _cluster(("n-mds", ["mgs", "mds"], 1, 0, "192.168.122.10"))
+        v6 = vm_cluster.lnet_from_probe(_probe("tcp0(eth1)"), "ipv6")
+        assert "FORCE_LARGE_NID=true" in vm_cluster.generate_local_sh(
+            c, lnet=v6
+        )
+        # An explicit false, so a true from an earlier deploy cannot stay.
+        assert "FORCE_LARGE_NID=false" in vm_cluster.generate_local_sh(c)
+
+    def test_cluster_records_its_family(self, tmp_path: Path) -> None:
+        with patch("ltvm_pkg.vm_state.SOCKETS", tmp_path):
+            ClusterInfo(name="c6", nodes=[], ip_family="ipv6").save()
+            assert ClusterInfo.load("c6").ip_family == "ipv6"
+            ClusterInfo(name="c4", nodes=[]).save()
+            assert ClusterInfo.load("c4").ip_family == ""
+
     def test_generate_local_sh_writes_the_probed_net(self) -> None:
         c = _cluster(("n-mds", ["mgs", "mds"], 1, 0, "192.168.122.10"))
         lnet = vm_cluster.lnet_from_probe(_probe("o2ib0(eth1)"))

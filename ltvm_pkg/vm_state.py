@@ -916,6 +916,10 @@ class ClusterInfo:
     # Copied to every member VM at create time.  None accepts cluster state
     # written before owner metadata existed.
     owner_id: str | None = None
+    # The address family ("ipv4" / "ipv6") of the NIDs the last
+    # `cluster deploy` wrote, so a bare redeploy keeps it.  "" for a
+    # cluster never deployed with --ip-family.
+    ip_family: str = ""
 
     @property
     def path(self) -> Path:
@@ -934,6 +938,8 @@ class ClusterInfo:
             "nodes": self.nodes,
             "owner_id": self.owner_id,
         }
+        if self.ip_family:
+            data["ip_family"] = self.ip_family
         text = json.dumps(data, indent=2) + "\n"
         _atomic_write(self.path, text)
 
@@ -965,6 +971,7 @@ class ClusterInfo:
             name=data.get("name", name),
             nodes=data["nodes"],
             owner_id=data.get("owner_id"),
+            ip_family=data.get("ip_family", ""),
         )
 
     @staticmethod
