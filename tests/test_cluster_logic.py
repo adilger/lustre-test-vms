@@ -112,6 +112,37 @@ def _cluster(*nodes) -> ClusterInfo:
 class TestGenerateLocalSh:
     """generate_local_sh produces a valid cfg/local.sh for Lustre tests."""
 
+    def test_disk_sizes_reach_the_cluster_block(self) -> None:
+        """The client formats every target, so it needs the sizes too."""
+        c = _cluster(
+            ("co9-mds", ["mgs", "mds"], 1, 0, "10.0.0.10"),
+            ("co9-oss", ["oss"], 0, 4, "10.0.0.11"),
+            ("co9-client", ["client"], 0, 0, "10.0.0.12"),
+        )
+        sizes = {"co9-mds": 4 << 30, "co9-oss": 8 << 30, "co9-client": 0}
+        text = vm_cluster.generate_local_sh(c, disk_sizes=sizes)
+        assert "MDSSIZE=4194304" in text
+        assert "OSTSIZE=8388608" in text
+
+    def test_disk_sizes_use_smallest_oss(self) -> None:
+        c = _cluster(
+            ("co2-mds", ["mgs", "mds"], 1, 0, "10.0.0.10"),
+            ("co2-oss1", ["oss"], 0, 2, "10.0.0.11"),
+            ("co2-oss2", ["oss"], 0, 2, "10.0.0.12"),
+        )
+        sizes = {"co2-mds": 1 << 30, "co2-oss1": 8 << 30, "co2-oss2": 2 << 30}
+        text = vm_cluster.generate_local_sh(c, disk_sizes=sizes)
+        assert "OSTSIZE=2097152" in text
+
+    def test_no_disk_sizes_leaves_framework_default(self) -> None:
+        c = _cluster(
+            ("co2-mds", ["mgs", "mds"], 1, 0, "10.0.0.10"),
+            ("co2-oss", ["oss"], 0, 3, "10.0.0.11"),
+        )
+        text = vm_cluster.generate_local_sh(c)
+        assert "OSTSIZE" not in text
+        assert "MDSSIZE" not in text
+
     def test_combined_mgs_mds_plus_oss(self) -> None:
         """Classic MGS+MDS on one node, OSS on another."""
         c = _cluster(

@@ -190,11 +190,22 @@ CLUSTER_BLOCK_BEGIN = "# --- Cluster configuration"
 CLUSTER_BLOCK_END = "# --- END cluster configuration"
 
 
+def _min_disk_kb(
+    nodes: list[ClusterNode], disk_sizes: dict[str, int] | None
+) -> int:
+    """Smallest per-disk size among ``nodes`` in KB, or 0 if unknown."""
+    sizes = [(disk_sizes or {}).get(n.name, 0) for n in nodes]
+    if not sizes or not all(sizes):
+        return 0
+    return min(sizes) // 1024
+
+
 def generate_local_sh(
     cluster: ClusterInfo,
     os_family: str = "rhel",
     fstype: str = "ldiskfs",
     lnet: ClusterLnet | None = None,
+    disk_sizes: dict[str, int] | None = None,
 ) -> str:
     """Generate the cluster block for cfg/local.sh.
 
@@ -211,6 +222,11 @@ def generate_local_sh(
 
     ``lnet`` is the net the MGS runs, from probe_mgs_lnet().  Without
     it, the MGS NID is its mgmt address on tcp.
+
+    ``disk_sizes`` maps node name to its per-disk size in bytes.  The
+    sizes go in this block because it is the only one a client gets,
+    and llmount formats every target from the first client: without
+    them it falls back to the framework's few-hundred-MB defaults.
     """
     if fstype not in ("ldiskfs", "zfs"):
         raise ValueError(f"unsupported fstype: {fstype!r}")
@@ -250,6 +266,9 @@ def generate_local_sh(
         lines.append(f"mds_HOST={mds_list[0].name}")
         total_mdts = sum(n.mdt_disks for n in mds_list)
         lines.append(f"MDSCOUNT={total_mdts}")
+        mds_kb = _min_disk_kb(mds_list, disk_sizes)
+        if mds_kb:
+            lines.append(f"MDSSIZE={mds_kb}")
 
         mdt_idx = 1
         for mds_node in mds_list:
@@ -274,6 +293,9 @@ def generate_local_sh(
         lines.append(f"ost_HOST={oss_list[0].name}")
         total_osts = sum(n.ost_disks for n in oss_list)
         lines.append(f"OSTCOUNT={total_osts}")
+        ost_kb = _min_disk_kb(oss_list, disk_sizes)
+        if ost_kb:
+            lines.append(f"OSTSIZE={ost_kb}")
 
         ost_idx = 1
         for oss_node in oss_list:
@@ -1083,8 +1105,18 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
         )
 
     # After each node's own disk block, so the cluster topology wins.
+    disk_sizes = {}
+    for node in nodes:
+        try:
+            disk_sizes[node.name] = VMInfo.load(node.name).disk_size
+        except VMNotFound:
+            pass
     local_sh = generate_local_sh(
-        cluster, os_family=os_family, fstype=fstype, lnet=lnet
+        cluster,
+        os_family=os_family,
+        fstype=fstype,
+        lnet=lnet,
+        disk_sizes=disk_sizes,
     )
     print("\n--- Distributing cluster config (local.sh)...")
     print(local_sh)
