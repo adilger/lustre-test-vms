@@ -144,7 +144,7 @@ nothing elevates, and it is found without running `brew`.
   ZFS, when built, lands at `kernels/<kver>/zfs/<version>/`.
 - `docs/` -- operator notes (getting started, releasing
   prebuilt QEMU, nested virtualization, SoftRoCE setup,
-  system test plan, VM ownership).
+  system test plan, VM ownership, IPv6).
 
 ## Quick Start
 
@@ -873,6 +873,8 @@ gh issue list / view <n> / create --title ... --body ...
 
 - [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) --
   first-time setup walkthrough.
+- [docs/IPV6.md](docs/IPV6.md) -- a cluster's NIDs on IPv6,
+  with `cluster deploy --ip-family`.
 - [docs/RELEASING.md](docs/RELEASING.md) -- rebuilding the
   pre-built QEMU tarballs.
 - [docs/NESTED_VIRTUALIZATION.md](docs/NESTED_VIRTUALIZATION.md)

@@ -147,6 +147,19 @@ def _isolate_user_state(
 
 
 @pytest.fixture(autouse=True)
+def _isolate_vm_state(tmp_path_factory: pytest.TempPathFactory) -> object:
+    """Keep VM and cluster records out of the host's real sockets dir.
+
+    Tests name their fixtures after real clusters (co2, co3), so a save
+    that no test patches overwrites a real record.  It happened: a new
+    ClusterInfo.save() in cluster deploy rewrote co3.cluster.  A test
+    that needs its own directory patches SOCKETS again inside this one.
+    """
+    with patch("ltvm_pkg.vm_state.SOCKETS", tmp_path_factory.mktemp("sockets")):
+        yield
+
+
+@pytest.fixture(autouse=True)
 def _neutralize_podman_preflight() -> object:
     """Suppress the macOS podman-machine preflight for unit tests.
 

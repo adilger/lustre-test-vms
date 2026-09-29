@@ -210,6 +210,7 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> int:
             zfs=args.zfs,
             zfs_version=args.zfs_version,
             fstype=args.fstype,
+            ip_family=args.ip_family,
         ),
         use_json,
     )

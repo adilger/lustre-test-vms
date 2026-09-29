@@ -250,6 +250,7 @@ try:
     from ltvm_pkg.shell_completion import (  # noqa: E402
         SHELLS as SHELL_COMPLETION_SHELLS,
     )
+    from ltvm_pkg.vm_cluster import IP_FAMILIES  # noqa: E402
 except ModuleNotFoundError as e:  # noqa: E402
     if e.name not in ("yaml", "argcomplete"):
         raise
@@ -2136,6 +2137,14 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["ldiskfs", "zfs"],
         default=None,
         help="OSD backend written into the cluster's cfg/local.sh",
+    )
+    cdpl.add_argument(
+        "--ip-family",
+        dest="ip_family",
+        choices=list(IP_FAMILIES),
+        default=None,
+        help="Address family of the cluster's NIDs; ipv6 needs a tcp "
+        "extra NIC (default: the family of the last deploy, else ipv4)",
     )
     cdpl.set_defaults(func=cmd_cluster_deploy)
 
