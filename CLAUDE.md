@@ -813,10 +813,18 @@ records which source each verbatim-installed staged file came
 from (`.ltvm-staging-sources.json`, matched by identical
 content), and every `deploy-lustre` compares the pairs by
 content and copies across what changed, `--userspace-only`
-included (`ltvm_pkg/staging_sources.py`).  A staging from
-before the manifest still gets `lustre/tests/` checked by path.
-Mtimes are not trusted for this: an mtime-preserving copy slips
-past the `find -newer` fast path.
+included (`ltvm_pkg/staging_sources.py`).  Sources come from
+`git ls-files --cached --others --exclude-standard` in a git
+tree, so gitignored build output (files generated from `.in`)
+is never a source; ELF, `!<arch>` archives, `.a`/`.la`/`.pc`
+and anything under `.libs/` are left out either way.  A staging
+from before the manifest still gets `lustre/tests/` checked by
+path.  Refresh writes its temp files in a
+`.ltvm-refresh-*` dir beside the staging tree, never inside the
+one deploy streams.  Mtimes are not trusted for this: an
+mtime-preserving copy slips past the `find -newer` fast path.
+`--userspace-only`'s warning about sources it cannot ship
+counts only files git tracks.
 
 Incremental by default: repeating the command rebuilds
 only what changed.  `make distclean` runs for `--force`,

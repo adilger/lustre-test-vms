@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -27,8 +28,22 @@ _MANIFEST_VERSION = 1
 
 # Directories in a Lustre tree that never hold an installed source.
 _PRUNE_DIRS = frozenset(
-    {".git", ".ltvm-staging", "autom4te.cache", "_lpb", "kconftest.dir"}
+    {
+        ".git",
+        ".libs",
+        ".ltvm-staging",
+        "autom4te.cache",
+        "_lpb",
+        "kconftest.dir",
+    }
 )
+
+# Build output that is not ELF but is still compiled or generated.
+_BUILT_SUFFIXES = (".a", ".la", ".pc", ".o", ".ko")
+
+# Where refresh stages its temp files: beside the staging tree, never in
+# it, so nothing half-written can be streamed into a VM.
+_TMP_PREFIX = ".ltvm-refresh-"
 
 # Where `make install` puts lustre/tests, for either libdir.
 _STAGED_TEST_DIRS = ("usr/lib64/lustre/tests", "usr/lib/lustre/tests")
@@ -47,12 +62,51 @@ def _same_content(a: Path, b: Path) -> bool:
                 return True
 
 
-def _is_elf(path: Path) -> bool:
+def _is_built(path: Path) -> bool:
+    """ELF objects, ar archives and libtool/pkg-config output."""
+    if path.name.endswith(_BUILT_SUFFIXES) or ".libs" in path.parts:
+        return True
     try:
         with path.open("rb") as f:
-            return f.read(4) == b"\x7fELF"
+            head = f.read(8)
     except OSError:
         return False
+    return head[:4] == b"\x7fELF" or head == b"!<arch>\n"
+
+
+def _git_ls(tree: Path, *extra: str) -> set[str] | None:
+    """Paths ``git ls-files`` reports for ``tree``, or None if not a repo."""
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(tree), "ls-files", "-z", *extra],
+            capture_output=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0:
+        return None
+    raw: object = r.stdout
+    if isinstance(raw, bytes):
+        raw = raw.decode(errors="replace")
+    if not isinstance(raw, str):
+        return None
+    # ltvm's own state, in case the tree's git exclude lacks it.
+    return {p for p in raw.split("\0") if p and not p.startswith(".ltvm-")}
+
+
+def tracked_files(tree: Path) -> set[str] | None:
+    """Files git tracks in ``tree`` (relative paths), or None."""
+    return _git_ls(tree)
+
+
+def _source_files(tree: Path) -> set[str] | None:
+    """Tracked files plus untracked ones git does not ignore.
+
+    Build output is ignored by the tree's .gitignore, so this is the
+    source and nothing generated from it.
+    """
+    return _git_ls(tree, "--cached", "--others", "--exclude-standard")
 
 
 def _staged_candidates(staging: Path) -> list[Path]:
@@ -67,9 +121,7 @@ def _staged_candidates(staging: Path) -> list[Path]:
             p = d / name
             if rel_dir == Path(".") and name.startswith(".ltvm-"):
                 continue
-            if p.is_symlink() or not p.is_file() or name.endswith(".ko"):
-                continue
-            if _is_elf(p):
+            if p.is_symlink() or not p.is_file() or _is_built(p):
                 continue
             out.append(p)
     return out
@@ -77,6 +129,12 @@ def _staged_candidates(staging: Path) -> list[Path]:
 
 def _tree_index(tree: Path) -> dict[str, list[Path]]:
     index: dict[str, list[Path]] = {}
+    sources = _source_files(tree)
+    if sources is not None:
+        for rel in sources:
+            p = tree / rel
+            index.setdefault(p.name, []).append(p)
+        return index
     for dirpath, dirnames, filenames in os.walk(tree):
         dirnames[:] = [n for n in dirnames if n not in _PRUNE_DIRS]
         d = Path(dirpath)
@@ -113,7 +171,11 @@ def build_manifest(staging: Path, tree: Path) -> dict[str, str]:
         same = []
         for c in cands:
             try:
-                if not c.is_symlink() and _same_content(staged, c):
+                if (
+                    not c.is_symlink()
+                    and not _is_built(c)
+                    and _same_content(staged, c)
+                ):
                     same.append(c)
             except OSError:
                 continue
@@ -163,6 +225,7 @@ def _test_dir_pairs(staging: Path, tree: Path) -> dict[str, str]:
     """
     pairs: dict[str, str] = {}
     src_root = tree / "lustre" / "tests"
+    sources = _source_files(tree)
     for rel_dir in _STAGED_TEST_DIRS:
         staged_root = staging / rel_dir
         if not staged_root.is_dir():
@@ -177,8 +240,13 @@ def _test_dir_pairs(staging: Path, tree: Path) -> dict[str, str]:
                     staged.is_symlink()
                     or src.is_symlink()
                     or not src.is_file()
-                    or _is_elf(staged)
-                    or _is_elf(src)
+                    or _is_built(staged)
+                    or _is_built(src)
+                ):
+                    continue
+                if (
+                    sources is not None
+                    and str(src.relative_to(tree)) not in sources
                 ):
                     continue
                 pairs[str(staged.relative_to(staging))] = str(
@@ -196,9 +264,9 @@ def source_pairs(staging: Path, tree: Path) -> dict[str, str]:
     return pairs
 
 
-def _replace_from(src: Path, dest: Path) -> None:
+def _replace_from(src: Path, dest: Path, tmp_dir: Path) -> None:
     mode = dest.stat().st_mode & 0o7777
-    fd, tmp_str = tempfile.mkstemp(dir=str(dest.parent), prefix=".ltvm-")
+    fd, tmp_str = tempfile.mkstemp(dir=str(tmp_dir), prefix="f.")
     os.close(fd)
     tmp = Path(tmp_str)
     try:
@@ -218,6 +286,7 @@ def refresh(staging: Path, tree: Path) -> list[str]:
     rewritten, since carrying on would deploy the stale copy.
     """
     refreshed: list[str] = []
+    stale = []
     for rel_staged, rel_src in sorted(source_pairs(staging, tree).items()):
         staged = staging / rel_staged
         src = tree / rel_src
@@ -225,10 +294,21 @@ def refresh(staging: Path, tree: Path) -> list[str]:
             continue
         if not src.is_file() or src.is_symlink():
             continue
-        if _same_content(staged, src):
-            continue
-        _replace_from(src, staged)
-        refreshed.append(rel_src)
+        if not _same_content(staged, src):
+            stale.append((src, staged, rel_src))
+    if not stale:
+        return refreshed
+    # Same filesystem as staging, so the rename is atomic, but outside
+    # the tree deploy streams.
+    tmp_dir = Path(
+        tempfile.mkdtemp(dir=str(staging.parent), prefix=_TMP_PREFIX)
+    )
+    try:
+        for src, staged, rel_src in stale:
+            _replace_from(src, staged, tmp_dir)
+            refreshed.append(rel_src)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
     return refreshed
 
 

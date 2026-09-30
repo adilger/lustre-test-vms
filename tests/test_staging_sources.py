@@ -8,6 +8,8 @@ sanity-quota.sh, because nothing but a rebuild ever rewrote staging.
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -253,7 +255,7 @@ class TestDeployRefreshes:
 
     @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores modes")
     def test_a_refresh_that_fails_fails_the_deploy(
-        self, tmp_sockets: Path, tmp_path: Path
+        self, tmp_sockets: Path, tmp_path: Path, capsys
     ) -> None:
         tree, staging = _tree_and_staging(tmp_path)
         ss.write_manifest(staging, tree)
@@ -267,3 +269,111 @@ class TestDeployRefreshes:
             tests_dir.chmod(0o755)
         assert rc != 0
         assert "script" not in seen
+        err = capsys.readouterr()
+        text = err.out + err.err
+        assert "is not writable by" in text
+        assert "ltvm build lustre" in text
+
+
+needs_git = pytest.mark.skipif(shutil.which("git") is None, reason="no git")
+
+
+def _git_init(tree: Path) -> None:
+    def git(*a: str) -> None:
+        subprocess.run(
+            ["git", "-C", str(tree), *a], check=True, capture_output=True
+        )
+
+    git("init", "-q")
+    (tree / ".git/info/exclude").write_text("/.ltvm-*\n")
+    (tree / ".gitignore").write_text("lustre/scripts/lnet\n")
+    git("add", "-A")
+
+
+class TestOnlySourcesAreMapped:
+    def test_archives_and_libtool_output_are_left_out(
+        self, tmp_path: Path
+    ) -> None:
+        tree, staging = _tree_and_staging(tmp_path)
+        (tree / "lustre/utils/.libs").mkdir()
+        for name, data in (
+            ("liblustreapi.a", b"!<arch>\nobj"),
+            ("liblustreapi.la", b"# libtool\n"),
+            ("lustre.pc", b"prefix=/usr\n"),
+            ("oddly-named", b"!<arch>\nobj"),
+        ):
+            (tree / "lustre/utils" / name).write_bytes(data)
+            (staging / "usr/bin" / name).write_bytes(data)
+        (tree / "lustre/utils/.libs/lfs-helper").write_text("x\n")
+        (staging / "usr/bin/lfs-helper").write_text("x\n")
+        m = ss.build_manifest(staging, tree)
+        for name in (
+            "liblustreapi.a",
+            "liblustreapi.la",
+            "lustre.pc",
+            "oddly-named",
+            "lfs-helper",
+        ):
+            assert f"usr/bin/{name}" not in m
+
+    @needs_git
+    def test_git_tree_maps_only_non_ignored_files(self, tmp_path: Path) -> None:
+        """Generated files are gitignored; a rebuild owns those."""
+        tree, staging = _tree_and_staging(tmp_path)
+        (tree / "lustre/scripts").mkdir()
+        (tree / "lustre/scripts/lnet").write_text("#!/bin/sh\n# generated\n")
+        (staging / "usr/sbin").mkdir(parents=True)
+        (staging / "usr/sbin/lnet").write_text("#!/bin/sh\n# generated\n")
+        _git_init(tree)
+        m = ss.build_manifest(staging, tree)
+        assert "usr/sbin/lnet" not in m
+        assert m[f"{_TESTS}/sanity-quota.sh"] == "lustre/tests/sanity-quota.sh"
+
+
+class TestRefreshTempFiles:
+    def test_temp_files_are_never_inside_staging(self, tmp_path: Path) -> None:
+        tree, staging = _tree_and_staging(tmp_path)
+        ss.write_manifest(staging, tree)
+        (tree / "lustre/tests/sanity-quota.sh").write_text("echo v2\n")
+        seen: list[Path] = []
+        real = shutil.copyfile
+
+        def spy(src, dst, *a, **k):
+            seen.append(Path(dst))
+            return real(src, dst, *a, **k)
+
+        with patch.object(ss.shutil, "copyfile", side_effect=spy):
+            assert ss.refresh(staging, tree)
+        assert seen
+        for p in seen:
+            assert staging not in p.parents
+            assert p.parent.parent == staging.parent
+        assert not list(staging.parent.glob(".ltvm-refresh-*"))
+
+
+class TestUserspaceOnlyWarning:
+    @needs_git
+    def test_counts_only_tracked_files(
+        self, tmp_sockets: Path, tmp_path: Path, capsys
+    ) -> None:
+        tree, staging = _tree_and_staging(tmp_path)
+        _git_init(tree)
+        ss.write_manifest(staging, tree)
+        _mark_staging_fresh(staging, tree, _stub_tc())
+        old = time.time() - 120
+        for p in tree.rglob("*"):
+            os.utime(p, (old, old))
+        stamp = staging / ".ltvm-staging-stamp"
+        os.utime(stamp, (old + 60, old + 60))
+        (tree / "scratch.log").write_text("junk\n")
+        (tree / "lustre/utils/lfs.c").write_text("int main(void){return 2;}\n")
+
+        rc, _seen = TestDeployRefreshes()._run(
+            tree, staging, userspace_only=True
+        )
+
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "lustre/utils/lfs.c" in err
+        assert "scratch.log" not in err
+        assert "1 source file(s)" in err

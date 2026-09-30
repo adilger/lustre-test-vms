@@ -127,6 +127,16 @@ def _refresh_staged_sources(
 
     try:
         refreshed = staging_sources.refresh(staging, tree)
+    except PermissionError as e:
+        import getpass
+
+        return (
+            f"staging {staging} is not writable by {getpass.getuser()}, "
+            f"so edited sources cannot be copied into it ({e}).  It was "
+            f"built by another user or under sudo: fix its ownership, or "
+            f"remove it and rebuild as yourself with `ltvm build lustre "
+            f"--lustre-tree {tree} --force`."
+        )
     except OSError as e:
         return f"could not refresh staged files from {tree}: {e}"
     if refreshed and not quiet:
@@ -140,10 +150,15 @@ def _refresh_staged_sources(
         for s in staging_sources.source_pairs(staging, tree).values()
     }
     newer = _sources_newer_than(tree, stamp, first_only=False) or []
+    # Only files git tracks: untracked logs and scratch files are not
+    # something a rebuild would ship.
+    tracked = staging_sources.tracked_files(tree)
     rest = sorted(
-        str(Path(p).relative_to(tree))
-        for p in newer
-        if p not in covered and os.path.isfile(p)
+        rel
+        for rel in (str(Path(p).relative_to(tree)) for p in newer)
+        if str(tree / rel) not in covered
+        and (tree / rel).is_file()
+        and (tracked is None or rel in tracked)
     )
     if rest:
         print(
