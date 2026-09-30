@@ -1239,6 +1239,14 @@ fi""")
         indent=2,
     )
     (host_staging / ".ltvm-staging-meta.json").write_text(meta_text + "\n")
+    # Which source each verbatim-installed file came from, so deploy can
+    # catch a script edited after this install (see staging_sources).
+    from .staging_sources import write_manifest
+
+    try:
+        write_manifest(host_staging, lustre_tree)
+    except OSError as e:
+        print(f"--- WARNING: could not record staged sources: {e}")
 
     ko_files = list(host_staging.rglob("*.ko"))
     print(f"--- Build complete: {len(ko_files)} kernel modules")

@@ -793,6 +793,17 @@ Builds inside the target's build container against the
 target's kernel build tree.  Output goes to the Lustre
 tree's `.ltvm-staging/<target>/<arch>/<kernel>[/<variant>]/`.
 
+Uncompiled installs -- test scripts, cfg files, man pages,
+headers -- are also kept in step without a rebuild: the build
+records which source each verbatim-installed staged file came
+from (`.ltvm-staging-sources.json`, matched by identical
+content), and every `deploy-lustre` compares the pairs by
+content and copies across what changed, `--userspace-only`
+included (`ltvm_pkg/staging_sources.py`).  A staging from
+before the manifest still gets `lustre/tests/` checked by path.
+Mtimes are not trusted for this: an mtime-preserving copy slips
+past the `find -newer` fast path.
+
 Incremental by default: repeating the command rebuilds
 only what changed.  `make distclean` runs for `--force`,
 or when `.ltvm-last-build` -- a claim stamp naming the

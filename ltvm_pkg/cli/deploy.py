@@ -33,6 +33,129 @@ def _cli_attr(name: str) -> Any:
     return getattr(_cli, name)
 
 
+def _sources_newer_than(
+    src: Path, stamp: Path, *, first_only: bool
+) -> list[str] | None:
+    """Source files in ``src`` modified after ``stamp``; None if find failed.
+
+    Build products, VCS dirs and ltvm's own state are skipped.
+    ``first_only`` stops at the first hit, which is all a yes/no needs.
+    """
+    tail = ["-print", "-quit"] if first_only else ["-print"]
+    r = subprocess.run(
+        [
+            "find",
+            str(src),
+            "-path",
+            "*/.git",
+            "-prune",
+            "-o",
+            "-path",
+            "*/autom4te.cache",
+            "-prune",
+            "-o",
+            "-path",
+            "*/_lpb",
+            "-prune",
+            "-o",
+            "-path",
+            "*/kconftest.dir",
+            "-prune",
+            "-o",
+            "(",
+            "-name",
+            "*.o",
+            "-o",
+            "-name",
+            "*.ko",
+            "-o",
+            "-name",
+            "*.a",
+            "-o",
+            "-name",
+            "*.so",
+            "-o",
+            "-name",
+            "*.so.*",
+            "-o",
+            "-name",
+            "*.cmd",
+            "-o",
+            "-name",
+            "*.d",
+            "-o",
+            "-name",
+            "*.tmp_*",
+            "-o",
+            "-name",
+            "conftest*",
+            "-o",
+            "-name",
+            "config.log",
+            "-o",
+            "-name",
+            "config.status",
+            "-o",
+            "-name",
+            ".ltvm-*",
+            ")",
+            "-prune",
+            "-o",
+            "-newer",
+            str(stamp),
+            *tail,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        return None
+    return [ln for ln in r.stdout.splitlines() if ln]
+
+
+def _refresh_staged_sources(
+    staging: Path, tree: Path, *, userspace_only: bool, quiet: bool
+) -> str | None:
+    """Copy edited scripts and other verbatim sources into staging.
+
+    Returns an error message when a staged file cannot be refreshed.
+    Under --userspace-only, which never rebuilds, also warns about any
+    other source changed since the build: what is compiled from it is
+    not in staging.
+    """
+    from ltvm_pkg import staging_sources
+
+    try:
+        refreshed = staging_sources.refresh(staging, tree)
+    except OSError as e:
+        return f"could not refresh staged files from {tree}: {e}"
+    if refreshed and not quiet:
+        print(staging_sources.describe(refreshed))
+
+    stamp = staging / ".ltvm-staging-stamp"
+    if not userspace_only or not stamp.is_file():
+        return None
+    covered = {
+        str(tree / s)
+        for s in staging_sources.source_pairs(staging, tree).values()
+    }
+    newer = _sources_newer_than(tree, stamp, first_only=False) or []
+    rest = sorted(
+        str(Path(p).relative_to(tree))
+        for p in newer
+        if p not in covered and os.path.isfile(p)
+    )
+    if rest:
+        print(
+            f"warning: {len(rest)} source file(s) changed since this "
+            f"staging was built, and --userspace-only does not rebuild: "
+            f"{staging_sources.sample(rest)}\n"
+            "  Deploy without --userspace-only to build and ship them.",
+            file=sys.stderr,
+        )
+    return None
+
+
 def cmd_deploy(args: argparse.Namespace) -> int:
     use_json = args.json
     target = getattr(args, "target", None)
@@ -320,78 +443,8 @@ def cmd_deploy(args: argparse.Namespace) -> int:
             return False
         if not _staging_matches_kernel_and_flags(staging):
             return False
-        # Staging is outside the source tree so the find exclusions are
-        # simpler -- just skip build artifacts and VCS dirs.
-        r = subprocess.run(
-            [
-                "find",
-                str(src),
-                "-path",
-                "*/.git",
-                "-prune",
-                "-o",
-                "-path",
-                "*/autom4te.cache",
-                "-prune",
-                "-o",
-                "-path",
-                "*/_lpb",
-                "-prune",
-                "-o",
-                "-path",
-                "*/kconftest.dir",
-                "-prune",
-                "-o",
-                "(",
-                "-name",
-                "*.o",
-                "-o",
-                "-name",
-                "*.ko",
-                "-o",
-                "-name",
-                "*.a",
-                "-o",
-                "-name",
-                "*.so",
-                "-o",
-                "-name",
-                "*.so.*",
-                "-o",
-                "-name",
-                "*.cmd",
-                "-o",
-                "-name",
-                "*.d",
-                "-o",
-                "-name",
-                "*.tmp_*",
-                "-o",
-                "-name",
-                "conftest*",
-                "-o",
-                "-name",
-                "config.log",
-                "-o",
-                "-name",
-                "config.status",
-                "-o",
-                "-name",
-                ".ltvm-*",
-                ")",
-                "-prune",
-                "-o",
-                "-newer",
-                str(stamp),
-                "-print",
-                "-quit",
-            ],
-            capture_output=True,
-            text=True,
-        )
-        if r.returncode != 0:
-            return False  # treat find errors conservatively as stale
-        return r.stdout.strip() == ""
+        newer = _sources_newer_than(src, stamp, first_only=True)
+        return newer == []
 
     if userspace_only:
         # No compat gate here: --userspace-only installs userspace RPMs
@@ -539,6 +592,13 @@ def cmd_deploy(args: argparse.Namespace) -> int:
             "fetch`, which is published without ZFS.  Pass "
             "--lustre-tree <source tree> to build one with it.",
         )
+
+    if bundled_snapshot is None:
+        err = _refresh_staged_sources(
+            staging, build_path, userspace_only=userspace_only, quiet=use_json
+        )
+        if err is not None:
+            return _error(err, use_json)
 
     try:
         _cli_attr("deploy_to_vm")(
