@@ -335,6 +335,43 @@ def _arches_for_target(target: str, arch_flag: str | None) -> list[str]:
     return sorted(d.name for d in target_dir.iterdir() if d.is_dir())
 
 
+def _scan_user_zfs(target_arg: str | None) -> _TargetReport:
+    """This user's own ZFS builds whose kernel is gone from artifacts.
+
+    ZFS falls back to ~/.cache/ltvm/zfs/ for a user who cannot write the
+    shared kernel artifacts; each build there is ~900 MB, and nothing
+    else removes one when its kernel is pruned.
+    """
+    from ltvm_pkg.target_config import ARTIFACTS_DIR
+    from ltvm_pkg.zfs_build import user_cache_root
+
+    report = _TargetReport(target=target_arg or "*", arch="*")
+    root = user_cache_root() / "zfs"
+    if not root.is_dir():
+        return report
+    for tdir in sorted(p for p in root.iterdir() if p.is_dir()):
+        if target_arg and tdir.name != target_arg:
+            continue
+        for adir in sorted(p for p in tdir.iterdir() if p.is_dir()):
+            for kdir in sorted(p for p in adir.iterdir() if p.is_dir()):
+                kernel = ARTIFACTS_DIR / tdir.name / adir.name / "kernels"
+                if (kernel / kdir.name).is_dir():
+                    continue
+                report.candidates.append(
+                    _Candidate(
+                        target=tdir.name,
+                        arch=adir.name,
+                        kind="user-zfs",
+                        path=kdir,
+                        bytes=_dir_size_bytes(kdir),
+                        reason=f"kernel {kdir.name} is no longer in "
+                        f"{ARTIFACTS_DIR}",
+                        age_days=_entry_age_days(kdir),
+                    )
+                )
+    return report
+
+
 def cmd_prune(args: argparse.Namespace) -> int:
     """Smart prune of stale per-target artifacts (top-level ``ltvm clean``)."""
     use_json = args.json
@@ -366,6 +403,11 @@ def cmd_prune(args: argparse.Namespace) -> int:
         targets = list(list_targets())
 
     reports: list[_TargetReport] = []
+    if getattr(args, "user_zfs", False):
+        # Only this user's cache: a slot user on a shared host has no
+        # business pruning the shared artifacts, and cannot anyway.
+        targets = []
+        reports.append(_scan_user_zfs(target_arg))
     for t in targets:
         for a in _arches_for_target(t, arch_flag):
             r = _scan_target(

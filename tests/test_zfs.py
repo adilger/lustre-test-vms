@@ -13,6 +13,8 @@ properties worth pinning down are:
 
 from __future__ import annotations
 
+import gzip
+import hashlib
 import json
 import platform
 import tarfile
@@ -261,9 +263,12 @@ class TestStaleness:
 
 
 def _tarball_bytes(top: str) -> bytes:
-    """A minimal .tar.gz with one top-level directory."""
+    """A minimal .tar.gz with one top-level directory, byte-stable."""
     buf = BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+    with (
+        gzip.GzipFile(fileobj=buf, mode="wb", mtime=0) as gz,
+        tarfile.open(fileobj=gz, mode="w") as tf,
+    ):
         info = tarfile.TarInfo(f"{top}/zfs.release.in")
         payload = b"zfs\n"
         info.size = len(payload)
@@ -271,15 +276,30 @@ def _tarball_bytes(top: str) -> bytes:
     return buf.getvalue()
 
 
+def _sha(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+_REAL_EXPECTED_SHA256 = zb.expected_sha256
+
+
+@pytest.fixture(autouse=True)
+def _release_sums(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The fake release tarballs here stand in for the real ones."""
+    monkeypatch.setattr(
+        zb, "expected_sha256", lambda v: _sha(_tarball_bytes(f"zfs-{v}"))
+    )
+
+
 class TestFetch:
     def test_cached_tarball_is_reused(self, tmp_path: Path) -> None:
         cache = tmp_path / "cache"
         cache.mkdir()
-        (cache / "zfs-2.4.0.tar.gz").write_bytes(b"cached")
+        (cache / "zfs-2.4.0.tar.gz").write_bytes(_tarball_bytes("zfs-2.4.0"))
         with patch.object(zb.urllib.request, "urlopen") as uo:
             got = zb.fetch_tarball("2.4.0", cache)
         uo.assert_not_called()
-        assert got.read_bytes() == b"cached"
+        assert got.read_bytes() == _tarball_bytes("zfs-2.4.0")
 
     def test_empty_cached_tarball_is_not_reused(self, tmp_path: Path) -> None:
         """A zero-byte file is the shape a killed download leaves."""
@@ -562,26 +582,7 @@ class TestPodmanInvocation:
         )
 
 
-# ── shared artifacts this user cannot write ──────────────
-
-
-needs_non_root = pytest.mark.skipif(
-    __import__("os").geteuid() == 0, reason="root writes a read-only dir"
-)
-
-
-@pytest.fixture
-def readonly_kernel(tmp_targets: Path):
-    """A kernel artifact owned by someone else: readable, not writable.
-
-    What a slot user on a shared host sees -- the kernel dirs under
-    /opt/ltvm/artifacts are the artifacts owner's, mode 2755.
-    """
-    tc = _zfs_tc(tmp_targets)
-    kdir = _seed_kernel(tc)
-    kdir.chmod(0o555)
-    yield tc, kdir
-    kdir.chmod(0o755)
+# ── shared artifacts owned by someone else ───────────────
 
 
 def _fake_podman_into_mounts(cmd, **kw):
@@ -599,148 +600,280 @@ def _fake_podman_into_mounts(cmd, **kw):
     return SimpleNamespace(returncode=0)
 
 
-def _build(tc, tb: Path, **kw):
+def _build(tc, tmp: Path, *, podman=_fake_podman_into_mounts, **kw):
+    tb = tmp / "zfs-2.4.0.tar.gz"
+    tb.write_bytes(_tarball_bytes("zfs-2.4.0"))
     with (
         patch.object(zb.subprocess, "run") as run,
         patch.object(zb, "fetch_tarball", return_value=tb),
-        patch.object(
-            zb, "run_podman_with_cleanup", side_effect=_fake_podman_into_mounts
-        ) as podman,
+        patch.object(zb, "run_podman_with_cleanup", side_effect=podman) as pm,
     ):
         run.return_value = SimpleNamespace(returncode=0)
         out = zb.build_zfs(tc, version="2.4.0", **kw)
-    return out, podman
+    return out, pm
 
 
-@needs_non_root
-class TestReadOnlySharedKernel:
-    def test_builds_into_the_user_cache(
-        self, readonly_kernel, tmp_targets: Path
+@pytest.fixture
+def not_owner():
+    """Run as a user who does not own the kernel artifacts."""
+    real = zb.os.geteuid()
+    with patch.object(zb.os, "geteuid", return_value=real + 4242):
+        yield
+
+
+def _seed_complete(d: Path, version: str = "2.4.0") -> Path:
+    mod = d / "staging" / "lib" / "modules" / _KVER
+    mod.mkdir(parents=True, exist_ok=True)
+    (mod / "zfs.ko").write_bytes(b"\x7fELF")
+    (d / "meta.json").write_text(json.dumps({"zfs_version": version}))
+    return d / "staging"
+
+
+class TestOnlyTheOwnerBuildsShared:
+    def test_other_user_builds_into_own_cache(
+        self, tmp_targets: Path, not_owner
     ) -> None:
-        """The PermissionError a pw-agent slot hit: zfs/ could not be
-        made under the shared kernel dir.  The build goes to the user's
-        own cache instead, and the shared dir is left as it was."""
-        tc, kdir = readonly_kernel
-        tb = tmp_targets / "zfs-2.4.0.tar.gz"
-        tb.write_bytes(_tarball_bytes("zfs-2.4.0"))
+        """Even when the directories would let them write: on a shared
+        host `zfs/` can be group-writable through a default ACL, and a
+        slot user building there would own what everyone else loads."""
+        tc = _zfs_tc(tmp_targets)
+        kdir = _seed_kernel(tc)
+        (kdir / "zfs").mkdir()
+        (kdir / "zfs").chmod(0o777)
 
-        out, podman = _build(tc, tb)
+        out, pm = _build(tc, tmp_targets)
 
-        podman.assert_called_once()
+        pm.assert_called_once()
         assert out == zb.user_zfs_dir(tc, None, "2.4.0")
         assert zb.user_cache_root() in out.parents
-        assert not (kdir / "zfs").exists()
-        assert kdir.stat().st_mode & 0o777 == 0o555
+        assert list((kdir / "zfs").iterdir()) == []
         assert not zb.is_stale(tc, None, "2.4.0", out_dir=out)
 
-    def test_a_fresh_user_build_is_reused(
-        self, readonly_kernel, tmp_targets: Path
+    def test_other_users_build_is_reused(
+        self, tmp_targets: Path, not_owner
     ) -> None:
-        tc, _kdir = readonly_kernel
-        tb = tmp_targets / "zfs-2.4.0.tar.gz"
-        tb.write_bytes(_tarball_bytes("zfs-2.4.0"))
-        first, _ = _build(tc, tb)
-
-        again, podman = _build(tc, tb)
-        podman.assert_not_called()
+        tc = _zfs_tc(tmp_targets)
+        _seed_kernel(tc)
+        first, _ = _build(tc, tmp_targets)
+        again, pm = _build(tc, tmp_targets)
+        pm.assert_not_called()
         assert again == first
-
         with patch.object(zb, "build_zfs") as build:
-            src, staging, _ver = zb.ensure_zfs(tc, version="2.4.0")
+            src, staging, _v = zb.ensure_zfs(tc, version="2.4.0")
         build.assert_not_called()
-        assert src == first / "src"
-        assert staging == first / "staging"
+        assert (src, staging) == (first / "src", first / "staging")
 
-    def test_force_rebuilds_in_the_user_cache(
-        self, readonly_kernel, tmp_targets: Path
+    def test_force_rebuilds_the_users_own(
+        self, tmp_targets: Path, not_owner
     ) -> None:
-        tc, kdir = readonly_kernel
-        tb = tmp_targets / "zfs-2.4.0.tar.gz"
-        tb.write_bytes(_tarball_bytes("zfs-2.4.0"))
-        _build(tc, tb)
-        out, podman = _build(tc, tb, force=True)
-        podman.assert_called_once()
+        tc = _zfs_tc(tmp_targets)
+        kdir = _seed_kernel(tc)
+        _build(tc, tmp_targets)
+        out, pm = _build(tc, tmp_targets, force=True)
+        pm.assert_called_once()
         assert out == zb.user_zfs_dir(tc, None, "2.4.0")
         assert not (kdir / "zfs").exists()
 
-    def test_permission_error_deeper_down_falls_back(
+    def test_owner_builds_into_shared(self, tmp_targets: Path) -> None:
+        tc = _zfs_tc(tmp_targets)
+        _seed_kernel(tc)
+        out, _ = _build(tc, tmp_targets)
+        assert out == zb.zfs_dir(tc, None, "2.4.0")
+        assert not zb.user_zfs_dir(tc, None, "2.4.0").exists()
+
+    def test_zfs_dir_made_by_another_user_is_not_ours(
         self, tmp_targets: Path
     ) -> None:
-        """A shared zfs/<ver> another user built: the version dir is
-        writable, but its src/ tree is not ours to replace."""
+        tc = _zfs_tc(tmp_targets)
+        kdir = _seed_kernel(tc)
+        shared = zb.zfs_dir(tc, None, "2.4.0")
+        # "/" stands in for a directory someone else owns.
+        assert not zb._shared_is_ours(shared, Path("/"))
+        assert zb._shared_is_ours(shared, kdir)
+
+    def test_owner_permission_error_falls_back(self, tmp_targets: Path) -> None:
         tc = _zfs_tc(tmp_targets)
         _seed_kernel(tc)
         shared = _seed_zfs(tc, "2.4.0", "stalehash")
-        tb = tmp_targets / "zfs-2.4.0.tar.gz"
-        tb.write_bytes(_tarball_bytes("zfs-2.4.0"))
-        with (
-            patch.object(zb, "_can_write", return_value=True),
-            patch.object(
-                zb.shutil, "rmtree", side_effect=PermissionError("not ours")
-            ),
-        ):
-            out, _ = _build(tc, tb)
+        real_rmtree = zb.shutil.rmtree
+
+        def rmtree(p, *a, **k):
+            if shared in Path(p).parents or Path(p) == shared / "src":
+                raise PermissionError("not ours")
+            return real_rmtree(p, *a, **k)
+
+        with patch.object(zb.shutil, "rmtree", side_effect=rmtree):
+            out, _ = _build(tc, tmp_targets)
         assert out == zb.user_zfs_dir(tc, None, "2.4.0")
         assert (shared / "src" / "zfs_config.h").is_file()
 
 
-class TestSharedArtifactPreferred:
-    def test_fresh_shared_wins_over_user(self, tmp_targets: Path) -> None:
-        """A ZFS prebuilt by the artifacts owner saves everyone the build."""
+class TestSharedTreeStaysReadOnly:
+    def test_takes_the_kernel_dirs_write_bits(self, tmp_targets: Path) -> None:
+        """A shared host's default ACL makes new dirs group-writable."""
+        tc = _zfs_tc(tmp_targets)
+        kdir = _seed_kernel(tc)
+        kdir.chmod(0o755)
+        (kdir / "build-tree").chmod(0o775)
+
+        def group_writable(cmd, **kw):
+            r = _fake_podman_into_mounts(cmd, **kw)
+            for p in (kdir / "zfs").rglob("*"):
+                p.chmod(0o775 if p.is_dir() else 0o664)
+            (kdir / "zfs").chmod(0o775)
+            return r
+
+        out, _ = _build(tc, tmp_targets, podman=group_writable)
+
+        assert out == zb.zfs_dir(tc, None, "2.4.0")
+        for p in [kdir / "zfs", *(kdir / "zfs").rglob("*")]:
+            assert not p.stat().st_mode & 0o022, p
+        # Only the ZFS tree is touched, not the rest of the kernel dir.
+        assert (kdir / "build-tree").stat().st_mode & 0o777 == 0o775
+
+    def test_tightened_after_a_failed_build(self, tmp_targets: Path) -> None:
+        tc = _zfs_tc(tmp_targets)
+        kdir = _seed_kernel(tc)
+        kdir.chmod(0o755)
+
+        def fails_group_writable(cmd, **kw):
+            (kdir / "zfs").chmod(0o775)
+            for p in (kdir / "zfs").rglob("*"):
+                p.chmod(0o775 if p.is_dir() else 0o664)
+            return SimpleNamespace(returncode=2)
+
+        with pytest.raises(zb.ZfsBuildError):
+            _build(tc, tmp_targets, podman=fails_group_writable)
+        for p in [kdir / "zfs", *(kdir / "zfs").rglob("*")]:
+            assert not p.stat().st_mode & 0o022, p
+
+    def test_a_group_writable_kernel_dir_is_left_alone(
+        self, tmp_targets: Path
+    ) -> None:
+        tc = _zfs_tc(tmp_targets)
+        kdir = _seed_kernel(tc)
+        kdir.chmod(0o775)
+        (kdir / "zfs" / "2.4.0").mkdir(parents=True)
+        (kdir / "zfs" / "2.4.0").chmod(0o775)
+        zb._no_more_writable_than(kdir / "zfs", kdir)
+        assert (kdir / "zfs" / "2.4.0").stat().st_mode & 0o777 == 0o775
+
+
+class TestSharedBuildIsOnlyUsedWhenTrusted:
+    def test_group_writable_shared_is_ignored(
+        self, tmp_targets: Path, capsys
+    ) -> None:
+        tc = _zfs_tc(tmp_targets)
+        kdir = _seed_kernel(tc)
+        kdir.chmod(0o755)
+        shared = _seed_zfs(tc, "2.4.0", _fresh_hash(tc, "2.4.0"))
+        (shared / "staging").chmod(0o777)
+        assert zb.fresh_zfs_dir(tc, None, "2.4.0") is None
+        assert "ignoring the shared ZFS" in capsys.readouterr().err
+
+    def test_foreign_owned_shared_is_untrusted(self, tmp_targets: Path) -> None:
         tc = _zfs_tc(tmp_targets)
         _seed_kernel(tc)
-        fresh = _fresh_hash(tc, "2.4.0")
-        _seed_zfs(tc, "2.4.0", fresh)
-        user = zb.user_zfs_dir(tc, None, "2.4.0")
-        (user / "staging").mkdir(parents=True)
+        shared = _seed_zfs(tc, "2.4.0", _fresh_hash(tc, "2.4.0"))
+        assert "not owned" in (zb._untrusted(shared, Path("/")) or "")
+
+    def test_trusted_shared_wins_over_user(self, tmp_targets: Path) -> None:
+        tc = _zfs_tc(tmp_targets)
+        _seed_kernel(tc)
+        _seed_zfs(tc, "2.4.0", _fresh_hash(tc, "2.4.0"))
+        (zb.user_zfs_dir(tc, None, "2.4.0") / "staging").mkdir(parents=True)
         assert zb.fresh_zfs_dir(tc, None, "2.4.0") == zb.zfs_dir(
             tc, None, "2.4.0"
         )
 
-    def test_writable_shared_is_where_a_build_goes(
+
+class TestBuildLock:
+    def test_a_waiting_build_uses_the_one_that_finished(
+        self, tmp_targets: Path
+    ) -> None:
+        import threading
+
+        tc = _zfs_tc(tmp_targets)
+        _seed_kernel(tc)
+        shared = zb.zfs_dir(tc, None, "2.4.0")
+        result: dict = {}
+        with zb._build_lock(shared):
+            t = threading.Thread(
+                target=lambda: result.update(
+                    zip(("out", "pm"), _build(tc, tmp_targets))
+                )
+            )
+            t.start()
+            t.join(0.5)
+            assert t.is_alive(), "the second build did not wait"
+            _seed_zfs(tc, "2.4.0", _fresh_hash(tc, "2.4.0"))
+        t.join(10)
+        assert result["out"] == shared
+        result["pm"].assert_not_called()
+
+
+class TestFindZfsStaging:
+    def test_the_recorded_build_is_used(self, tmp_targets: Path) -> None:
+        tc = _zfs_tc(tmp_targets)
+        _seed_kernel(tc)
+        _seed_complete(zb.zfs_dir(tc, None, "2.4.0"))
+        mine = _seed_complete(zb.user_zfs_dir(tc, None, "2.4.0"))
+        got = zb.find_zfs_staging(tc, None, "2.4.0", recorded=str(mine.parent))
+        assert got == mine
+
+    def test_an_incomplete_recorded_build_is_an_error(
+        self, tmp_targets: Path
+    ) -> None:
+        """No quiet swap to another ZFS: osd_zfs.ko links against this."""
+        tc = _zfs_tc(tmp_targets)
+        _seed_kernel(tc)
+        _seed_complete(zb.zfs_dir(tc, None, "2.4.0"))
+        mine = _seed_complete(zb.user_zfs_dir(tc, None, "2.4.0")).parent
+        (mine / "meta.json").unlink()
+        with pytest.raises(zb.ZfsBuildError, match=str(mine)):
+            zb.find_zfs_staging(tc, None, "2.4.0", recorded=str(mine))
+
+    def test_a_recorded_build_of_another_version_is_an_error(
+        self, tmp_targets: Path
+    ) -> None:
+        tc = _zfs_tc(tmp_targets)
+        mine = _seed_complete(zb.user_zfs_dir(tc, None, "2.4.0"), "2.3.4")
+        with pytest.raises(zb.ZfsBuildError, match="2.3.4"):
+            zb.find_zfs_staging(tc, None, "2.4.0", recorded=str(mine.parent))
+
+    def test_half_installed_staging_is_never_shipped(
         self, tmp_targets: Path
     ) -> None:
         tc = _zfs_tc(tmp_targets)
         _seed_kernel(tc)
-        tb = tmp_targets / "zfs-2.4.0.tar.gz"
-        tb.write_bytes(_tarball_bytes("zfs-2.4.0"))
-        out, _ = _build(tc, tb)
-        assert out == zb.zfs_dir(tc, None, "2.4.0")
-        assert not zb.user_zfs_dir(tc, None, "2.4.0").exists()
+        shared = _seed_complete(zb.zfs_dir(tc, None, "2.4.0")).parent
+        (shared / "meta.json").unlink()
+        with pytest.raises(zb.ZfsBuildError, match="no complete"):
+            zb.find_zfs_staging(tc, None, "2.4.0")
 
-
-class TestFindZfsStaging:
-    def _mods(self, d: Path) -> Path:
-        mod = d / "staging" / "lib" / "modules" / _KVER
-        mod.mkdir(parents=True, exist_ok=True)
-        (mod / "zfs.ko").write_bytes(b"\x7fELF")
-        return d / "staging"
-
-    def test_the_recorded_build_wins(self, tmp_targets: Path) -> None:
-        """osd_zfs.ko is linked against the ZFS the Lustre build used."""
+    def test_unrecorded_takes_shared_then_user(self, tmp_targets: Path) -> None:
         tc = _zfs_tc(tmp_targets)
-        self._mods(zb.zfs_dir(tc, None, "2.4.0"))
-        mine = self._mods(zb.user_zfs_dir(tc, None, "2.4.0"))
-        got = zb.find_zfs_staging(tc, None, "2.4.0", recorded=str(mine.parent))
-        assert got == mine
-
-    def test_shared_then_user(self, tmp_targets: Path) -> None:
-        tc = _zfs_tc(tmp_targets)
-        mine = self._mods(zb.user_zfs_dir(tc, None, "2.4.0"))
+        _seed_kernel(tc)
+        mine = _seed_complete(zb.user_zfs_dir(tc, None, "2.4.0"))
         assert zb.find_zfs_staging(tc, None, "2.4.0") == mine
-        shared = self._mods(zb.zfs_dir(tc, None, "2.4.0"))
+        shared = _seed_complete(zb.zfs_dir(tc, None, "2.4.0"))
         assert zb.find_zfs_staging(tc, None, "2.4.0") == shared
 
-    def test_nothing_built_names_the_shared_path(
+    def test_an_untrusted_recorded_shared_build_is_an_error(
         self, tmp_targets: Path
     ) -> None:
         tc = _zfs_tc(tmp_targets)
-        got = zb.find_zfs_staging(tc, None, "2.4.0", recorded=None)
-        assert got == zb.zfs_staging_dir(tc, None, "2.4.0")
+        kdir = _seed_kernel(tc)
+        kdir.chmod(0o755)
+        shared = _seed_complete(zb.zfs_dir(tc, None, "2.4.0")).parent
+        (shared / "staging").chmod(0o777)
+        with pytest.raises(zb.ZfsBuildError, match="writable"):
+            zb.find_zfs_staging(tc, None, "2.4.0", recorded=str(shared))
 
     def test_a_non_string_record_is_ignored(self, tmp_targets: Path) -> None:
         tc = _zfs_tc(tmp_targets)
-        shared = self._mods(zb.zfs_dir(tc, None, "2.4.0"))
+        _seed_kernel(tc)
+        shared = _seed_complete(zb.zfs_dir(tc, None, "2.4.0"))
         assert zb.find_zfs_staging(tc, None, "2.4.0", recorded=7) == shared
 
     def test_lustre_staging_meta_records_the_zfs_dir(self) -> None:
@@ -750,7 +883,60 @@ class TestFindZfsStaging:
         )
 
 
-@needs_non_root
+class TestTarballChecksum:
+    def test_pinned_versions(self) -> None:
+        assert _REAL_EXPECTED_SHA256("2.4.0").startswith("7bdf13de")
+        assert _REAL_EXPECTED_SHA256("2.3.4").startswith("9ec397cf")
+
+    def test_unpinned_version_uses_the_releases_sums(self) -> None:
+        body = (
+            "-----BEGIN PGP SIGNED MESSAGE-----\nHash: SHA512\n\n"
+            + "ab" * 32
+            + "  zfs-9.9.9.tar.gz\n-----BEGIN PGP SIGNATURE-----\n"
+        ).encode()
+        with patch.object(zb.urllib.request, "urlopen") as uo:
+            uo.return_value.__enter__.return_value = BytesIO(body)
+            assert _REAL_EXPECTED_SHA256("9.9.9") == "ab" * 32
+        # Kept in the user's own cache, so the second ask is offline.
+        with patch.object(zb.urllib.request, "urlopen") as uo:
+            assert _REAL_EXPECTED_SHA256("9.9.9") == "ab" * 32
+        uo.assert_not_called()
+        saved = zb.user_cache_root() / "zfs-sums" / "zfs-9.9.9.sha256"
+        assert saved.read_text().strip() == "ab" * 32
+
+    def test_a_tampered_cache_entry_is_not_used(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        cache = tmp_path / "cache"
+        cache.mkdir()
+        (cache / "zfs-2.4.0.tar.gz").write_bytes(b"not the release")
+        payload = _tarball_bytes("zfs-2.4.0")
+        with patch.object(zb.urllib.request, "urlopen") as uo:
+            uo.return_value.__enter__.return_value = BytesIO(payload)
+            got = zb.fetch_tarball("2.4.0", cache)
+        assert got.read_bytes() == payload
+        assert "sha256" in capsys.readouterr().err
+
+    def test_a_bad_download_is_refused(self, tmp_path: Path) -> None:
+        cache = tmp_path / "cache"
+        with patch.object(zb.urllib.request, "urlopen") as uo:
+            uo.return_value.__enter__.return_value = BytesIO(b"evil")
+            with pytest.raises(zb.ZfsBuildError, match="sha256"):
+                zb.fetch_tarball("2.4.0", cache)
+        assert list(cache.iterdir()) == []
+
+    def test_unpack_checks_what_it_reads(self, tmp_path: Path) -> None:
+        tb = tmp_path / "zfs-2.4.0.tar.gz"
+        tb.write_bytes(_tarball_bytes("zfs-2.4.0"))
+        with pytest.raises(zb.ZfsBuildError, match="sha256"):
+            zb._unpack(tb, "2.4.0", tmp_path / "src", "00" * 32)
+        zb._unpack(tb, "2.4.0", tmp_path / "src", _sha(tb.read_bytes()))
+        assert (tmp_path / "src" / "zfs.release.in").is_file()
+
+
+@pytest.mark.skipif(
+    __import__("os").geteuid() == 0, reason="root writes a read-only dir"
+)
 class TestTarballCacheFallback:
     def test_readonly_shared_cache_downloads_to_user_cache(
         self, tmp_path: Path
@@ -769,13 +955,12 @@ class TestTarballCacheFallback:
         finally:
             shared.chmod(0o755)
         assert got == zb.user_tarball_cache_dir() / "zfs-2.4.0.tar.gz"
-        assert got.read_bytes() == payload
         assert list(shared.iterdir()) == []
 
     def test_readonly_shared_cache_is_still_read(self, tmp_path: Path) -> None:
         shared = tmp_path / "shared-cache"
         shared.mkdir()
-        (shared / "zfs-2.4.0.tar.gz").write_bytes(b"cached")
+        (shared / "zfs-2.4.0.tar.gz").write_bytes(_tarball_bytes("zfs-2.4.0"))
         shared.chmod(0o555)
         try:
             with (
@@ -787,53 +972,3 @@ class TestTarballCacheFallback:
             shared.chmod(0o755)
         uo.assert_not_called()
         assert got == shared / "zfs-2.4.0.tar.gz"
-
-
-class TestSharedBuildStaysReadOnly:
-    def test_takes_the_kernel_dirs_write_bits(self, tmp_targets: Path) -> None:
-        """A shared host's default ACL makes new dirs group-writable;
-        a ZFS built into a kernel artifact others may only read must not
-        become something any group member can rewrite."""
-        tc = _zfs_tc(tmp_targets)
-        kdir = _seed_kernel(tc)
-        kdir.chmod(0o755)
-        (kdir / "build-tree").chmod(0o775)
-        tb = tmp_targets / "zfs-2.4.0.tar.gz"
-        tb.write_bytes(_tarball_bytes("zfs-2.4.0"))
-
-        def _group_writable_podman(cmd, **kw):
-            r = _fake_podman_into_mounts(cmd, **kw)
-            for p in (kdir / "zfs").rglob("*"):
-                p.chmod(0o775 if p.is_dir() else 0o664)
-            (kdir / "zfs").chmod(0o775)
-            return r
-
-        with (
-            patch.object(zb.subprocess, "run") as run,
-            patch.object(zb, "fetch_tarball", return_value=tb),
-            patch.object(
-                zb,
-                "run_podman_with_cleanup",
-                side_effect=_group_writable_podman,
-            ),
-        ):
-            run.return_value = SimpleNamespace(returncode=0)
-            out = zb.build_zfs(tc, version="2.4.0")
-
-        assert out == zb.zfs_dir(tc, None, "2.4.0")
-        for p in [kdir / "zfs", *(kdir / "zfs").rglob("*")]:
-            assert not p.stat().st_mode & 0o022, p
-        assert kdir.stat().st_mode & 0o777 == 0o755
-        # Only the ZFS tree is touched, not the rest of the kernel dir.
-        assert (kdir / "build-tree").stat().st_mode & 0o777 == 0o775
-
-    def test_a_group_writable_kernel_dir_is_left_alone(
-        self, tmp_targets: Path
-    ) -> None:
-        tc = _zfs_tc(tmp_targets)
-        kdir = _seed_kernel(tc)
-        kdir.chmod(0o775)
-        (kdir / "zfs" / "2.4.0").mkdir(parents=True)
-        (kdir / "zfs" / "2.4.0").chmod(0o775)
-        zb._no_more_writable_than(kdir / "zfs", kdir)
-        assert (kdir / "zfs" / "2.4.0").stat().st_mode & 0o777 == 0o775

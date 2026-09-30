@@ -80,6 +80,7 @@ def _run_prune(
     older_than: str | None = None,
     force: bool = False,
     use_json: bool = False,
+    user_zfs: bool = False,
 ) -> int:
     from ltvm_pkg.cli import cmd_prune
 
@@ -91,6 +92,7 @@ def _run_prune(
         older_than=older_than,
         force=force,
         json=use_json,
+        user_zfs=user_zfs,
     )
     with (
         _patch_paths(tmp_targets)[0],
@@ -314,3 +316,52 @@ class TestCmdPrune:
         payload = json.loads(captured.out)
         assert payload["candidates"] == []
         assert "failed to load" in captured.err
+
+
+class TestUserZfs:
+    """--user-zfs prunes this user's fallback ZFS builds, and only them."""
+
+    def _seed(self, tmp_targets: Path) -> tuple[Path, Path, Path]:
+        from ltvm_pkg.zfs_build import user_cache_root
+
+        arch_dir = tmp_targets / "artifacts" / "rocky9" / "x86_64"
+        live = _make_kernel_dir(arch_dir, "5.14-rhel9.7-5.14.0-611.55.1.el9_7")
+        root = user_cache_root() / "zfs" / "rocky9" / "x86_64"
+        kept = root / live.name / "2.4.0"
+        gone = root / "5.14-rhel9.5-5.14.0-503.40.1.el9_5" / "2.4.0"
+        for d in (kept, gone):
+            (d / "staging").mkdir(parents=True)
+            (d / "staging" / "zfs.ko").write_bytes(b"x" * 100)
+        return live, kept, gone
+
+    def test_preview_names_only_orphans(
+        self, tmp_targets: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        live, kept, gone = self._seed(tmp_targets)
+        rc = _run_prune(tmp_targets, user_zfs=True, use_json=True)
+        assert rc == EXIT_OK
+        out = json.loads(capsys.readouterr().out)
+        paths = [c["path"] for c in out["candidates"]]
+        assert paths == [str(gone.parent)]
+        assert out["candidates"][0]["kind"] == "user-zfs"
+        assert gone.exists() and kept.exists() and live.exists()
+
+    def test_apply_removes_orphans_and_leaves_artifacts(
+        self, tmp_targets: Path
+    ) -> None:
+        live, kept, gone = self._seed(tmp_targets)
+        # A superseded shared kernel would be a candidate without
+        # --user-zfs; with it, shared artifacts are not touched.
+        _make_kernel_dir(
+            tmp_targets / "artifacts" / "rocky9" / "x86_64",
+            "5.14-rhel9.7-5.14.0-611.13.1.el9_7",
+            built_at=datetime.now(timezone.utc) - timedelta(days=90),
+        )
+        rc = _run_prune(tmp_targets, user_zfs=True, apply=True)
+        assert rc == EXIT_OK
+        assert not gone.parent.exists()
+        assert kept.exists()
+        assert (
+            tmp_targets
+            / "artifacts/rocky9/x86_64/kernels/5.14-rhel9.7-5.14.0-611.13.1.el9_7"
+        ).exists()

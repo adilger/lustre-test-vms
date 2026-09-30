@@ -584,26 +584,26 @@ def cmd_deploy(args: argparse.Namespace) -> int:
         else None
     )
     if staged_zfs_version and not userspace_only:
-        from ltvm_pkg.zfs_build import find_zfs_staging
+        from ltvm_pkg.zfs_build import ZfsBuildError, find_zfs_staging
 
-        zfs_staging = find_zfs_staging(
-            tc,
-            deploy_kernel,
-            staged_zfs_version,
-            recorded=(
-                staged_meta.get("zfs_dir")
-                if isinstance(staged_meta, dict)
-                else None
-            ),
-        )
-        if not any((zfs_staging / "lib" / "modules").rglob("zfs.ko*")):
+        try:
+            zfs_staging = find_zfs_staging(
+                tc,
+                deploy_kernel,
+                staged_zfs_version,
+                recorded=(
+                    staged_meta.get("zfs_dir")
+                    if isinstance(staged_meta, dict)
+                    else None
+                ),
+            )
+        except ZfsBuildError as e:
             return _error(
-                f"Lustre staging was built against ZFS "
-                f"{staged_zfs_version}, but its build artifact is missing "
-                f"from {zfs_staging}",
+                str(e),
                 use_json,
-                hint=f"Run: ltvm build zfs {target} --kernel "
-                f"{deploy_kernel} --zfs-version {staged_zfs_version}",
+                hint=f"Rebuild Lustre with it: ltvm build lustre {target} "
+                f"--lustre-tree {build_path} --kernel {deploy_kernel} "
+                f"--zfs-version {staged_zfs_version} --force",
             )
         if not use_json:
             print(f"  Shipping ZFS {staged_zfs_version}")

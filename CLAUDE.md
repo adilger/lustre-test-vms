@@ -370,7 +370,14 @@ target's `zfs.version` in targets.yaml, which in turn
 overrides `DEFAULT_ZFS_VERSION` in
 [ltvm_pkg/zfs_build.py](ltvm_pkg/zfs_build.py).  Release
 tarballs come from openzfs/zfs and cache globally under
-`artifacts/cache/zfs/`.
+`artifacts/cache/zfs/`.  That cache is group-writable on a
+shared host, so every tarball is checked against a sha256
+before use -- on download, on a cache hit, and again from the
+same open file as it is unpacked.  The sums are pinned in
+`_PINNED_SHA256` (from the release assets' published digests);
+**add one there when a target moves to a new ZFS version**.  An
+unpinned version takes its sum from the release's
+`zfs-<ver>.sha256.asc` and keeps it in the user's own cache.
 
 rocky8 pins 2.3.4 rather than 2.4.0: 2.4 dropped support
 for the 4.18 EL8 kernel.
@@ -391,19 +398,36 @@ The ZFS a VM receives is never chosen by the command line:
 (`zfs_dir`) in the staging meta and deploy ships exactly that
 one, since osd_zfs.ko is linked against one specific ZFS build.
 
-**Shared artifacts a user cannot write.**  On a multi-user
-host the kernel artifact dirs belong to the artifacts' owner
-(mode 2755), so a slot user cannot create `zfs/` under them.
-That user's build goes to
+**Shared artifacts on a multi-user host.**  Only the kernel
+artifact's owner (or root) builds ZFS into it, and only over a
+`zfs/` it owns: ownership decides, not access(), because a
+default ACL can make `zfs/` group-writable and a group member
+building there would own what every other user loads.  Anyone
+else builds into
 `$XDG_CACHE_HOME/ltvm/zfs/<target>/<arch>/<kver>/<version>/`
-(default `~/.cache/ltvm/...`), same layout, and the tarball to
-`~/.cache/ltvm/cache/zfs/` when the shared cache is not
-writable either.  A fresh shared build always wins over the
-user's, so the owner can save every user the build (1-5
-minutes) and its ~900 MB (700 MB `src/`, 180 MB `staging/`)
-by prebuilding: `ltvm build zfs <target> --kernel
-<k>` as the account that owns the artifacts.  Nothing
-loosens the shared dirs' permissions.
+(default `~/.cache/ltvm/...`), same layout, and downloads the
+tarball to `~/.cache/ltvm/cache/zfs/` when the shared cache is
+not writable.  After every owner's build, failed ones included,
+`zfs/` loses the group/other write bits the kernel dir lacks.
+
+A shared build is used only when it has `meta.json`, belongs
+to the kernel dir's owner, and nothing in it is writable beyond
+what the kernel dir allows; otherwise it is ignored with a
+warning and the user's own is built.  A fresh trusted shared
+build wins over the user's, so the owner saves every user the
+build (1-5 minutes) and its ~900 MB (700 MB `src/`, 180 MB
+`staging/`) by prebuilding: `ltvm build zfs <target> --kernel
+<k>` as the account that owns the artifacts.  Builds into one
+dir are serialized by a `.<version>.lock` beside it.
+
+Deploy ships the ZFS dir the Lustre staging recorded, and fails
+naming it when that dir has no complete build (no `meta.json`,
+another version, no zfs.ko) rather than substitute another.
+
+Per-user builds are never pruned with their kernel: `ltvm
+clean --user-zfs` previews those whose kernel is gone from
+artifacts (~900 MB each) and `--apply` removes them.  It only
+touches the user's own cache.
 
 Both rhel and debian build containers work; the inner
 script picks dnf or apt for its extra build deps and takes

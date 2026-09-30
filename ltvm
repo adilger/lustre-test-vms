@@ -1650,6 +1650,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Allow pruning the latest entry of a default-kernel or "
         "variant-pinned group",
     )
+    sp.add_argument(
+        "--user-zfs",
+        dest="user_zfs",
+        action="store_true",
+        default=False,
+        help="Instead prune this user's own ZFS builds "
+        "(~/.cache/ltvm/zfs, ~900 MB each) for kernels no longer in "
+        "artifacts",
+    )
     sp.set_defaults(func=cmd_prune)
 
     # -- deploy-lustre --

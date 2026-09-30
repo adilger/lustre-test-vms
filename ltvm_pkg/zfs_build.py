@@ -32,6 +32,7 @@ import json
 import logging
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -39,9 +40,10 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, BinaryIO
 
 from .paths import load_meta_safe
 from .podman_run import run_podman_with_cleanup
@@ -110,8 +112,56 @@ def zfs_staging_dir(tc: TargetConfig, kernel: str | None, version: str) -> Path:
     return zfs_dir(tc, kernel, version) / "staging"
 
 
-def _has_modules(out_dir: Path) -> bool:
-    return any((out_dir / "staging" / "lib" / "modules").rglob("zfs.ko*"))
+def _incomplete(out_dir: Path, version: str) -> str | None:
+    """Why ``out_dir`` holds no finished ZFS ``version`` build, or None.
+
+    meta.json is written last, so without it the tree is a build that
+    failed, was interrupted or is still running.
+    """
+    meta = load_meta_safe(out_dir / "meta.json")
+    if meta is None:
+        return "it has no meta.json (the build failed or is still running)"
+    built = meta.get("zfs_version")
+    if built is not None and built != version:
+        return f"it holds ZFS {built}, not {version}"
+    if not any((out_dir / "staging" / "lib" / "modules").rglob("zfs.ko*")):
+        return "its staging has no zfs.ko"
+    return None
+
+
+def _untrusted(out_dir: Path, kdir: Path) -> str | None:
+    """Why a ZFS tree in the shared artifacts must not be used, or None.
+
+    It has to belong to the kernel artifact's owner and be writable by
+    nobody the kernel dir itself does not let write: otherwise another
+    user of a shared host built or can rewrite the modules everyone
+    else would load.
+    """
+    try:
+        kst = kdir.stat()
+    except OSError as e:
+        return f"cannot stat {kdir}: {e}"
+    extra = ~kst.st_mode & 0o022
+
+    def entries() -> Iterator[Path]:
+        yield out_dir.parent
+        for dirpath, _dirnames, filenames in os.walk(out_dir):
+            yield Path(dirpath)
+            for f in filenames:
+                yield Path(dirpath) / f
+
+    for p in entries():
+        try:
+            st = p.lstat()
+        except OSError:
+            continue
+        if st.st_uid != kst.st_uid:
+            return (
+                f"{p} is not owned by the artifacts' owner (uid {kst.st_uid})"
+            )
+        if not stat.S_ISLNK(st.st_mode) and st.st_mode & extra:
+            return f"{p} is writable by group or others"
+    return None
 
 
 def find_zfs_staging(
@@ -123,41 +173,61 @@ def find_zfs_staging(
     """The ZFS staging tree to ship alongside a Lustre build.
 
     ``recorded`` is the artifact directory the Lustre build used (its
-    staging meta's ``zfs_dir``), which is the one osd_zfs.ko was linked
-    against; failing that, the shared artifact, then this user's.  When
-    none has modules the shared path is returned, for the caller's
-    error message.
+    staging meta's ``zfs_dir``): osd_zfs.ko is linked against that one,
+    so it is the only candidate, and anything wrong with it is an error.
+    Staging from before the record existed takes the shared artifact,
+    then this user's.  Raises ZfsBuildError when there is nothing
+    complete to ship.
     """
-    candidates = [
-        zfs_dir(tc, kernel, version),
-        user_zfs_dir(tc, kernel, version),
-    ]
+    kdir = tc.kernel_output_dir(kernel)
+    shared = zfs_dir(tc, kernel, version)
     if isinstance(recorded, str) and recorded:
-        candidates.insert(0, Path(recorded))
-    for d in candidates:
-        if _has_modules(d):
-            return d / "staging"
-    return candidates[-2] / "staging"
+        d = Path(recorded)
+        why = _incomplete(d, version)
+        if why is None and d == shared:
+            why = _untrusted(d, kdir)
+        if why is not None:
+            raise ZfsBuildError(
+                f"Lustre staging was built against the ZFS in {d}, but {why}"
+            )
+        return d / "staging"
+    if _incomplete(shared, version) is None:
+        why = _untrusted(shared, kdir)
+        if why is None:
+            return shared / "staging"
+        _warn(f"ignoring the shared ZFS in {shared}: {why}")
+    user = user_zfs_dir(tc, kernel, version)
+    if _incomplete(user, version) is None:
+        return user / "staging"
+    raise ZfsBuildError(
+        f"no complete ZFS {version} build in {shared} or {user}"
+    )
 
 
-def _can_write(path: Path) -> bool:
-    """Could this user create or replace ``path``?
+def _warn(msg: str) -> None:
+    print(f"warning: {msg}", file=sys.stderr)
 
-    Checks ``path`` and the two trees a rebuild replaces when it
-    exists, else the nearest ancestor that does.  Anything deeper that
-    is not ours surfaces as a PermissionError, which build_zfs also
-    treats as "use the per-user directory".
+
+def _shared_is_ours(shared_dir: Path, kdir: Path) -> bool:
+    """May this user build into ``shared_dir``?
+
+    Only the kernel artifact's owner (or root) does, and only over a
+    ``zfs/`` tree it owns.  access() is not the test: on a shared host
+    a directory can be group-writable through a default ACL, and a
+    group member building there would then own what every other user
+    loads.
     """
-    if path.exists():
-        return all(
-            os.access(p, os.W_OK | os.X_OK)
-            for p in (path, path / "src", path / "staging")
-            if p.exists()
-        )
-    for parent in path.parents:
-        if parent.exists():
-            return os.access(parent, os.W_OK | os.X_OK)
-    return False
+    euid = os.geteuid()
+    if euid == 0:
+        return True
+    for p in (kdir, shared_dir.parent, shared_dir):
+        try:
+            st = p.lstat()
+        except FileNotFoundError:
+            continue
+        if st.st_uid != euid or stat.S_ISLNK(st.st_mode):
+            return False
+    return True
 
 
 def resolve_zfs_version(tc: TargetConfig, override: str | None = None) -> str:
@@ -248,30 +318,119 @@ def is_stale(
 def fresh_zfs_dir(
     tc: TargetConfig, kernel: str | None, version: str
 ) -> Path | None:
-    """The up-to-date ZFS artifact for this kernel: shared, else the user's."""
-    for d in (zfs_dir(tc, kernel, version), user_zfs_dir(tc, kernel, version)):
-        if not is_stale(tc, kernel, version, out_dir=d):
-            return d
+    """The up-to-date ZFS artifact for this kernel: shared, else the user's.
+
+    A shared one that another user could have written is skipped, with a
+    warning.
+    """
+    shared = zfs_dir(tc, kernel, version)
+    if not is_stale(tc, kernel, version, out_dir=shared):
+        why = _untrusted(shared, tc.kernel_output_dir(kernel))
+        if why is None:
+            return shared
+        _warn(f"ignoring the shared ZFS in {shared}: {why}")
+    user = user_zfs_dir(tc, kernel, version)
+    if not is_stale(tc, kernel, version, out_dir=user):
+        return user
     return None
 
 
+# sha256 of each release tarball ltvm pins, from the digests GitHub
+# publishes for the release assets (and the signed zfs-<ver>.sha256.asc).
+# Other versions take their sum from that .sha256.asc.
+_PINNED_SHA256 = {
+    "2.4.0": "7bdf13de0a71d95554c0e3e47d5e8f50786c30d4f4b63b7c593b1d11af75c9ee",
+    "2.3.4": "9ec397cf360133161a1180035f3e7d6962186ed2b3457953a28d45aa883fa495",
+}
+
+_SUMS_URL = (
+    "https://github.com/openzfs/zfs/releases/download/"
+    "zfs-{ver}/zfs-{ver}.sha256.asc"
+)
+
+
+def expected_sha256(version: str) -> str:
+    """The release tarball's sha256: pinned, else the release's own list.
+
+    A fetched sum is kept in this user's cache, not the shared one,
+    which any group member can write.
+    """
+    if version in _PINNED_SHA256:
+        return _PINNED_SHA256[version]
+    saved = user_cache_root() / "zfs-sums" / f"zfs-{version}.sha256"
+    try:
+        text = saved.read_text().strip()
+        if len(text) == 64:
+            return text
+    except OSError:
+        pass
+    url = _SUMS_URL.format(ver=version)
+    try:
+        with urllib.request.urlopen(url, timeout=60) as resp:
+            body = str(resp.read().decode("utf-8", errors="replace"))
+    except (urllib.error.URLError, OSError) as e:
+        raise ZfsBuildError(
+            f"No pinned checksum for ZFS {version}, and fetching {url} "
+            f"failed: {e}"
+        ) from e
+    want = f"zfs-{version}.tar.gz"
+    for line in body.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1].lstrip("*") == want:
+            digest = parts[0].lower()
+            if len(digest) == 64 and all(
+                c in "0123456789abcdef" for c in digest
+            ):
+                saved.parent.mkdir(parents=True, exist_ok=True)
+                saved.write_text(digest + "\n")
+                return digest
+    raise ZfsBuildError(f"No sha256 for {want} in {url}")
+
+
+def _sha256_of(fp: BinaryIO) -> str:
+    h = hashlib.sha256()
+    for chunk in iter(lambda: fp.read(1 << 20), b""):
+        h.update(chunk)
+    return h.hexdigest()
+
+
+def _matches(tarball: Path, want: str) -> bool:
+    try:
+        with tarball.open("rb") as f:
+            return _sha256_of(f) == want
+    except OSError:
+        return False
+
+
+def _dir_writable(path: Path) -> bool:
+    for p in (path, *path.parents):
+        if p.exists():
+            return os.access(p, os.W_OK | os.X_OK)
+    return False
+
+
 def fetch_tarball(version: str, dest_dir: Path | None = None) -> Path:
-    """Download the OpenZFS release tarball, or reuse the cached copy."""
+    """Download the OpenZFS release tarball, or reuse a cached copy.
+
+    Either way the result matches :func:`expected_sha256`; a cached copy
+    that does not is ignored.  _unpack checks it again as it reads it.
+    """
+    want = expected_sha256(version)
+    name = f"zfs-{version}.tar.gz"
     if dest_dir is not None:
-        cache = dest_dir
+        caches = [dest_dir]
     else:
-        cache = tarball_cache_dir()
-        shared = cache / f"zfs-{version}.tar.gz"
-        if shared.is_file() and shared.stat().st_size > 0:
-            log.info("Using cached ZFS tarball %s", shared)
-            return shared
-        if not _can_write(cache):
-            cache = user_tarball_cache_dir()
+        caches = [tarball_cache_dir(), user_tarball_cache_dir()]
+    for c in caches:
+        t = c / name
+        if t.is_file():
+            if _matches(t, want):
+                log.info("Using cached ZFS tarball %s", t)
+                return t
+            _warn(f"ignoring {t}: its sha256 is not the release's")
+    cache = next((c for c in caches if _dir_writable(c)), caches[-1])
     cache.mkdir(parents=True, exist_ok=True)
-    tarball = cache / f"zfs-{version}.tar.gz"
-    if tarball.is_file() and tarball.stat().st_size > 0:
-        log.info("Using cached ZFS tarball %s", tarball)
-        return tarball
+    tarball = cache / name
 
     url = _RELEASE_URL.format(ver=version)
     log.info("Downloading %s", url)
@@ -289,6 +448,10 @@ def fetch_tarball(version: str, dest_dir: Path | None = None) -> Path:
             shutil.copyfileobj(resp, out)
         if tmp.stat().st_size == 0:
             raise ZfsBuildError(f"Downloaded an empty tarball from {url}")
+        if not _matches(tmp, want):
+            raise ZfsBuildError(
+                f"{url} does not match the release sha256 {want}"
+            )
         # mkstemp gives 0600; the cache is shared, and the next user to
         # build this version should reuse the download rather than be
         # unable to read it.
@@ -306,17 +469,36 @@ def fetch_tarball(version: str, dest_dir: Path | None = None) -> Path:
     except (urllib.error.URLError, OSError) as e:
         tmp.unlink(missing_ok=True)
         raise ZfsBuildError(f"Download of {url} failed: {e}") from e
+    except ZfsBuildError:
+        tmp.unlink(missing_ok=True)
+        raise
     return tarball
 
 
-def _unpack(tarball: Path, version: str, src_dir: Path) -> None:
-    """Unpack the tarball so its contents land directly in ``src_dir``."""
+def _unpack(
+    tarball: Path, version: str, src_dir: Path, sha256: str | None = None
+) -> None:
+    """Unpack the tarball so its contents land directly in ``src_dir``.
+
+    With ``sha256``, the bytes are checked and then extracted through
+    the same open file, so a cache entry replaced in between is not
+    what gets built.
+    """
     if src_dir.exists():
         shutil.rmtree(src_dir)
     src_dir.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(dir=str(src_dir.parent)) as td:
+    with (
+        tempfile.TemporaryDirectory(dir=str(src_dir.parent)) as td,
+        tarball.open("rb") as raw,
+    ):
         tmp = Path(td)
-        with tarfile.open(tarball, "r:gz") as tf:
+        if sha256 is not None:
+            if _sha256_of(raw) != sha256:
+                raise ZfsBuildError(
+                    f"{tarball} does not match the release sha256 {sha256}"
+                )
+            raw.seek(0)
+        with tarfile.open(fileobj=raw, mode="r:gz") as tf:
             # data filter: refuse absolute paths and ../ escapes rather
             # than trusting a downloaded archive to stay in its dir.
             # Python 3.12+ defaults to it; 3.10/3.11 need it named.
@@ -426,6 +608,12 @@ def build_zfs(
 
     shared_dir = zfs_dir(tc, kernel, ver)
     user_dir = user_zfs_dir(tc, kernel, ver)
+    kdir = tc.kernel_output_dir(kernel)
+    # Only the kernel artifact's owner builds into it; anyone else gets
+    # a build of their own, however the directory modes read.
+    ours = _shared_is_ours(shared_dir, kdir)
+    if ours and shared_dir.parent.is_dir():
+        _no_more_writable_than(shared_dir.parent, kdir)
     if not force:
         fresh = fresh_zfs_dir(tc, kernel, ver)
         if fresh is not None:
@@ -439,26 +627,105 @@ def build_zfs(
             return fresh
 
     tarball = fetch_tarball(ver)
-
-    # The shared kernel artifact may belong to another account; then
-    # this user's build goes to their own cache rather than failing.
-    out_dir = shared_dir if _can_write(shared_dir) else user_dir
-    try:
-        _prepare_out_dir(tarball, ver, out_dir)
-    except PermissionError as e:
-        if out_dir == user_dir:
-            raise
-        log.info("Cannot build ZFS in %s (%s); using %s", out_dir, e, user_dir)
-        out_dir = user_dir
-        _prepare_out_dir(tarball, ver, out_dir)
-    if out_dir == user_dir:
+    if not ours:
         print(
-            f"  ZFS: {shared_dir} is not writable here; building into "
+            f"  ZFS: {kdir} belongs to another user; building into {user_dir}",
+            file=sys.stderr,
+        )
+        return _locked_build(
+            tc, kernel, kver, ver, expected_hash, tarball, user_dir, force, jobs
+        )
+    try:
+        return _locked_build(
+            tc,
+            kernel,
+            kver,
+            ver,
+            expected_hash,
+            tarball,
+            shared_dir,
+            force,
+            jobs,
+        )
+    except PermissionError as e:
+        print(
+            f"  ZFS: cannot build in {shared_dir} ({e}); building into "
             f"{user_dir}",
             file=sys.stderr,
         )
+        return _locked_build(
+            tc, kernel, kver, ver, expected_hash, tarball, user_dir, force, jobs
+        )
+    finally:
+        # Also after a failed build: its half-made tree must not be left
+        # writable to the group.
+        if shared_dir.parent.is_dir():
+            _no_more_writable_than(shared_dir.parent, kdir)
+
+
+@contextlib.contextmanager
+def _build_lock(out_dir: Path) -> Iterator[None]:
+    """Serialize builds into one ZFS dir; the lock sits beside it."""
+    import fcntl
+
+    out_dir.parent.mkdir(parents=True, exist_ok=True)
+    lock = out_dir.parent / f".{out_dir.name}.lock"
+    with lock.open("a") as fp:
+        try:
+            fcntl.flock(fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print(
+                f"  ZFS: waiting for another build of {out_dir}...",
+                file=sys.stderr,
+            )
+            fcntl.flock(fp, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fp, fcntl.LOCK_UN)
+
+
+def _locked_build(
+    tc: TargetConfig,
+    kernel: str | None,
+    kver: str,
+    ver: str,
+    expected_hash: str,
+    tarball: Path,
+    out_dir: Path,
+    force: bool,
+    jobs: int | None,
+) -> Path:
+    """Build ZFS into ``out_dir`` under its lock, unless a build that
+    finished while this one waited already made it fresh."""
+    with _build_lock(out_dir):
+        if (
+            not force
+            and not is_stale(tc, kernel, ver, out_dir=out_dir)
+            and (
+                out_dir != zfs_dir(tc, kernel, ver)
+                or _untrusted(out_dir, tc.kernel_output_dir(kernel)) is None
+            )
+        ):
+            return out_dir
+        _prepare_out_dir(tarball, ver, out_dir)
+        _run_build(tc, kernel, kver, ver, expected_hash, out_dir, jobs)
+    return out_dir
+
+
+def _run_build(
+    tc: TargetConfig,
+    kernel: str | None,
+    kver: str,
+    ver: str,
+    expected_hash: str,
+    out_dir: Path,
+    jobs: int | None,
+) -> None:
+    """Run the container build into a prepared ``out_dir``; write meta."""
     src_dir = out_dir / "src"
     staging_dir = out_dir / "staging"
+    build_tree = tc.kernel_output_dir(kernel) / "build-tree"
 
     log.info("Building ZFS %s for %s (kernel=%s)...", ver, tc.name, kver)
     t0 = time.monotonic()
@@ -487,7 +754,7 @@ def build_zfs(
         f"{staging_dir}:/zfs-staging",
         "--entrypoint",
         "bash",
-        container_tag,
+        tc.container_tag,
         "/zfs-build-inner.sh",
     ]
     r = run_podman_with_cleanup(cmd)
@@ -511,8 +778,6 @@ def build_zfs(
         "modules": kmods,
     }
     _atomic_write_json(out_dir / "meta.json", meta)
-    if out_dir == shared_dir:
-        _no_more_writable_than(shared_dir.parent, tc.kernel_output_dir(kernel))
     log.info(
         "ZFS %s built: %d modules in %s (%.0fs)",
         ver,
@@ -520,7 +785,6 @@ def build_zfs(
         out_dir,
         elapsed,
     )
-    return out_dir
 
 
 def _no_more_writable_than(root: Path, like: Path) -> None:
@@ -554,7 +818,7 @@ def _prepare_out_dir(tarball: Path, version: str, out_dir: Path) -> None:
     # Unpack fresh: the tree carries a configure cache keyed to the
     # kernel it was configured against, and reaching here at all means
     # something in the input hash moved.
-    _unpack(tarball, version, out_dir / "src")
+    _unpack(tarball, version, out_dir / "src", expected_sha256(version))
     if staging_dir.exists():
         shutil.rmtree(staging_dir)
     staging_dir.mkdir(parents=True, exist_ok=True)

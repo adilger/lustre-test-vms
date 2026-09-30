@@ -1056,16 +1056,22 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
                 "ZFS was requested but the Lustre build produced no ZFS "
                 "record -- rerun with --force to reconfigure"
             )
-        zfs_staging = find_zfs_staging(
-            tc,
-            kernel_name,
-            staged_zfs,
-            recorded=meta.get("zfs_dir") if isinstance(meta, dict) else None,
-        )
-        if not any((zfs_staging / "lib" / "modules").rglob("zfs.ko*")):
+        from .zfs_build import ZfsBuildError
+
+        try:
+            zfs_staging = find_zfs_staging(
+                tc,
+                kernel_name,
+                staged_zfs,
+                recorded=meta.get("zfs_dir")
+                if isinstance(meta, dict)
+                else None,
+            )
+        except ZfsBuildError as e:
             die(
-                f"Lustre was built against ZFS {staged_zfs} but its "
-                f"build artifact is missing from {zfs_staging}"
+                f"{e}\n  Rebuild Lustre with it: ltvm build lustre {target} "
+                f"--lustre-tree {build} --kernel {kernel_name} "
+                f"--zfs-version {staged_zfs} --force"
             )
         print(f"    ZFS: {staged_zfs}")
 
