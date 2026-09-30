@@ -12,6 +12,12 @@ Output layout:
         staging/     `make install DESTDIR=` tree (deploy-lustre)
         meta.json    input_hash, zfs_version, build_date
 
+A user who cannot write the kernel artifact -- a slot user on a host
+whose artifacts another account owns -- builds into the same layout
+under ``$XDG_CACHE_HOME/ltvm/zfs/<target>/<arch>/<kver>/<version>/``
+instead.  A fresh build in the shared place is always preferred, so
+prebuilding it there as the artifacts' owner saves every user the build.
+
 Inputs in the hash: the kernel's release string AND its recorded
 input_hash (kmods link against Module.symvers, which changes when a
 kernel patch or config option does without changing kernel.release),
@@ -20,12 +26,14 @@ the ZFS version, and the inner script's bytes.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
 import os
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import time
@@ -68,7 +76,7 @@ class ZfsBuildError(RuntimeError):
 
 
 def zfs_dir(tc: TargetConfig, kernel: str | None, version: str) -> Path:
-    """Per-(kernel, version) ZFS artifact directory.
+    """Per-(kernel, version) ZFS artifact directory in the shared artifacts.
 
     Keyed under the kernel dir, like mofed-kmods: the modules are a
     property of (kernel build-tree, ZFS version) and are unaffected by
@@ -76,6 +84,20 @@ def zfs_dir(tc: TargetConfig, kernel: str | None, version: str) -> Path:
     against the kernel, which is itself variant-independent.
     """
     return tc.kernel_output_dir(kernel) / "zfs" / version
+
+
+def user_cache_root() -> Path:
+    """This user's ltvm cache, for what the shared artifacts cannot hold."""
+    base = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
+    return Path(base) / "ltvm"
+
+
+def user_zfs_dir(tc: TargetConfig, kernel: str | None, version: str) -> Path:
+    """The per-user fallback for :func:`zfs_dir`."""
+    kdir = tc.kernel_output_dir(kernel)
+    return (
+        user_cache_root() / "zfs" / tc.name / str(tc.arch) / kdir.name / version
+    )
 
 
 def zfs_src_dir(tc: TargetConfig, kernel: str | None, version: str) -> Path:
@@ -86,6 +108,56 @@ def zfs_src_dir(tc: TargetConfig, kernel: str | None, version: str) -> Path:
 def zfs_staging_dir(tc: TargetConfig, kernel: str | None, version: str) -> Path:
     """The DESTDIR install tree, for deploying into a VM."""
     return zfs_dir(tc, kernel, version) / "staging"
+
+
+def _has_modules(out_dir: Path) -> bool:
+    return any((out_dir / "staging" / "lib" / "modules").rglob("zfs.ko*"))
+
+
+def find_zfs_staging(
+    tc: TargetConfig,
+    kernel: str | None,
+    version: str,
+    recorded: object = None,
+) -> Path:
+    """The ZFS staging tree to ship alongside a Lustre build.
+
+    ``recorded`` is the artifact directory the Lustre build used (its
+    staging meta's ``zfs_dir``), which is the one osd_zfs.ko was linked
+    against; failing that, the shared artifact, then this user's.  When
+    none has modules the shared path is returned, for the caller's
+    error message.
+    """
+    candidates = [
+        zfs_dir(tc, kernel, version),
+        user_zfs_dir(tc, kernel, version),
+    ]
+    if isinstance(recorded, str) and recorded:
+        candidates.insert(0, Path(recorded))
+    for d in candidates:
+        if _has_modules(d):
+            return d / "staging"
+    return candidates[-2] / "staging"
+
+
+def _can_write(path: Path) -> bool:
+    """Could this user create or replace ``path``?
+
+    Checks ``path`` and the two trees a rebuild replaces when it
+    exists, else the nearest ancestor that does.  Anything deeper that
+    is not ours surfaces as a PermissionError, which build_zfs also
+    treats as "use the per-user directory".
+    """
+    if path.exists():
+        return all(
+            os.access(p, os.W_OK | os.X_OK)
+            for p in (path, path / "src", path / "staging")
+            if p.exists()
+        )
+    for parent in path.parents:
+        if parent.exists():
+            return os.access(parent, os.W_OK | os.X_OK)
+    return False
 
 
 def resolve_zfs_version(tc: TargetConfig, override: str | None = None) -> str:
@@ -105,6 +177,11 @@ def tarball_cache_dir() -> Path:
     from .target_config import ARTIFACTS_DIR
 
     return ARTIFACTS_DIR / "cache" / "zfs"
+
+
+def user_tarball_cache_dir() -> Path:
+    """Tarball cache for a user who cannot write the shared one."""
+    return user_cache_root() / "cache" / "zfs"
 
 
 def _kver_from_build_tree(build_tree: Path) -> str:
@@ -136,11 +213,15 @@ def _input_hash(kver: str, version: str, kernel_hash: str) -> str:
 
 
 def is_stale(
-    tc: TargetConfig, kernel: str | None = None, version: str | None = None
+    tc: TargetConfig,
+    kernel: str | None = None,
+    version: str | None = None,
+    out_dir: Path | None = None,
 ) -> bool:
-    """Does the ZFS artifact need (re)building?"""
+    """Does the ZFS artifact (shared, unless ``out_dir``) need (re)building?"""
     ver = resolve_zfs_version(tc, version)
-    out_dir = zfs_dir(tc, kernel, ver)
+    if out_dir is None:
+        out_dir = zfs_dir(tc, kernel, ver)
     meta = load_meta_safe(out_dir / "meta.json")
     if meta is None:
         return True
@@ -155,8 +236,8 @@ def is_stale(
     # A failed or half-deleted build can leave the matching meta.json
     # over an empty tree, which the hash alone would call fresh.  Probe
     # what the two consumers actually read.
-    src = zfs_src_dir(tc, kernel, ver)
-    staging = zfs_staging_dir(tc, kernel, ver)
+    src = out_dir / "src"
+    staging = out_dir / "staging"
     if not (src / "zfs_config.h").is_file():
         return True
     if not (src / "module" / "Module.symvers").is_file():
@@ -164,9 +245,28 @@ def is_stale(
     return not any((staging / "lib" / "modules").rglob("zfs.ko*"))
 
 
+def fresh_zfs_dir(
+    tc: TargetConfig, kernel: str | None, version: str
+) -> Path | None:
+    """The up-to-date ZFS artifact for this kernel: shared, else the user's."""
+    for d in (zfs_dir(tc, kernel, version), user_zfs_dir(tc, kernel, version)):
+        if not is_stale(tc, kernel, version, out_dir=d):
+            return d
+    return None
+
+
 def fetch_tarball(version: str, dest_dir: Path | None = None) -> Path:
     """Download the OpenZFS release tarball, or reuse the cached copy."""
-    cache = dest_dir if dest_dir is not None else tarball_cache_dir()
+    if dest_dir is not None:
+        cache = dest_dir
+    else:
+        cache = tarball_cache_dir()
+        shared = cache / f"zfs-{version}.tar.gz"
+        if shared.is_file() and shared.stat().st_size > 0:
+            log.info("Using cached ZFS tarball %s", shared)
+            return shared
+        if not _can_write(cache):
+            cache = user_tarball_cache_dir()
     cache.mkdir(parents=True, exist_ok=True)
     tarball = cache / f"zfs-{version}.tar.gz"
     if tarball.is_file() and tarball.stat().st_size > 0:
@@ -324,30 +424,44 @@ def build_zfs(
     kver = _kver_from_build_tree(build_tree)
     expected_hash = _input_hash(kver, ver, _kernel_input_hash(tc, kernel))
 
-    out_dir = zfs_dir(tc, kernel, ver)
-    if not force and not is_stale(tc, kernel, ver):
-        log.info("ZFS %s for %s (kernel=%s) is up to date", ver, tc.name, kver)
-        return out_dir
-
-    src_dir = zfs_src_dir(tc, kernel, ver)
-    staging_dir = zfs_staging_dir(tc, kernel, ver)
+    shared_dir = zfs_dir(tc, kernel, ver)
+    user_dir = user_zfs_dir(tc, kernel, ver)
+    if not force:
+        fresh = fresh_zfs_dir(tc, kernel, ver)
+        if fresh is not None:
+            log.info(
+                "ZFS %s for %s (kernel=%s) is up to date in %s",
+                ver,
+                tc.name,
+                kver,
+                fresh,
+            )
+            return fresh
 
     tarball = fetch_tarball(ver)
 
+    # The shared kernel artifact may belong to another account; then
+    # this user's build goes to their own cache rather than failing.
+    out_dir = shared_dir if _can_write(shared_dir) else user_dir
+    try:
+        _prepare_out_dir(tarball, ver, out_dir)
+    except PermissionError as e:
+        if out_dir == user_dir:
+            raise
+        log.info("Cannot build ZFS in %s (%s); using %s", out_dir, e, user_dir)
+        out_dir = user_dir
+        _prepare_out_dir(tarball, ver, out_dir)
+    if out_dir == user_dir:
+        print(
+            f"  ZFS: {shared_dir} is not writable here; building into "
+            f"{user_dir}",
+            file=sys.stderr,
+        )
+    src_dir = out_dir / "src"
+    staging_dir = out_dir / "staging"
+
     log.info("Building ZFS %s for %s (kernel=%s)...", ver, tc.name, kver)
     t0 = time.monotonic()
-
-    # Unpack fresh: the tree carries a configure cache keyed to the
-    # kernel it was configured against, and reaching here at all means
-    # something in the input hash moved.
-    _unpack(tarball, ver, src_dir)
-    if staging_dir.exists():
-        shutil.rmtree(staging_dir)
-    staging_dir.mkdir(parents=True, exist_ok=True)
-    # Drop any stale meta before the build: if the build dies partway,
-    # the next run must see a stale artifact rather than a meta.json
-    # vouching for a half-built tree.
-    (out_dir / "meta.json").unlink(missing_ok=True)
 
     cmd = [
         "podman",
@@ -397,6 +511,8 @@ def build_zfs(
         "modules": kmods,
     }
     _atomic_write_json(out_dir / "meta.json", meta)
+    if out_dir == shared_dir:
+        _no_more_writable_than(shared_dir.parent, tc.kernel_output_dir(kernel))
     log.info(
         "ZFS %s built: %d modules in %s (%.0fs)",
         ver,
@@ -405,6 +521,43 @@ def build_zfs(
         elapsed,
     )
     return out_dir
+
+
+def _no_more_writable_than(root: Path, like: Path) -> None:
+    """Drop from ``root``'s tree the group/other write bits ``like`` lacks.
+
+    A kernel artifact that other users may only read keeps its ZFS that
+    way too.  The directories a build creates would otherwise take the
+    shared tree's default ACL (group rwx on a multi-user host), letting
+    any group member rewrite modules every other user then loads.
+    """
+    strip = ~like.stat().st_mode & 0o022
+    if not strip:
+        return
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for p in [Path(dirpath), *(Path(dirpath) / f for f in filenames)]:
+            if p.is_symlink():
+                continue
+            mode = p.stat().st_mode & 0o7777
+            if mode & strip:
+                with contextlib.suppress(PermissionError):
+                    os.chmod(p, mode & ~strip)
+
+
+def _prepare_out_dir(tarball: Path, version: str, out_dir: Path) -> None:
+    """Unpack a fresh source tree and empty staging under ``out_dir``."""
+    staging_dir = out_dir / "staging"
+    # Drop any stale meta before the build: if the build dies partway,
+    # the next run must see a stale artifact rather than a meta.json
+    # vouching for a half-built tree.
+    (out_dir / "meta.json").unlink(missing_ok=True)
+    # Unpack fresh: the tree carries a configure cache keyed to the
+    # kernel it was configured against, and reaching here at all means
+    # something in the input hash moved.
+    _unpack(tarball, version, out_dir / "src")
+    if staging_dir.exists():
+        shutil.rmtree(staging_dir)
+    staging_dir.mkdir(parents=True, exist_ok=True)
 
 
 def ensure_zfs(
@@ -417,13 +570,10 @@ def ensure_zfs(
 ) -> tuple[Path, Path, str]:
     """Build ZFS if stale; return (src_dir, staging_dir, version)."""
     ver = resolve_zfs_version(tc, version)
-    if force or is_stale(tc, kernel, ver):
-        build_zfs(tc, kernel, version=ver, force=force, jobs=jobs)
-    return (
-        zfs_src_dir(tc, kernel, ver),
-        zfs_staging_dir(tc, kernel, ver),
-        ver,
-    )
+    out_dir = None if force else fresh_zfs_dir(tc, kernel, ver)
+    if out_dir is None:
+        out_dir = build_zfs(tc, kernel, version=ver, force=force, jobs=jobs)
+    return out_dir / "src", out_dir / "staging", ver
 
 
 def _atomic_write_json(path: Path, payload: dict) -> None:

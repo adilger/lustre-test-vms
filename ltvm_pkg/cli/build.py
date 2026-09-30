@@ -700,8 +700,6 @@ def cmd_build_zfs(args: argparse.Namespace) -> int:
         ZfsBuildError,
         build_zfs,
         resolve_zfs_version,
-        zfs_src_dir,
-        zfs_staging_dir,
     )
 
     # No client-target gate here.  Building ZFS against a kernel is not
@@ -729,7 +727,7 @@ def cmd_build_zfs(args: argparse.Namespace) -> int:
     except (ZfsBuildError, FileNotFoundError, ValueError) as e:
         return _error(f"ZFS build failed: {e}", use_json)
 
-    staging = zfs_staging_dir(tc, kernel, version)
+    staging = out_dir / "staging"
     modules = sorted(
         p.name for p in (staging / "lib" / "modules").rglob("*.ko*")
     )
@@ -739,7 +737,7 @@ def cmd_build_zfs(args: argparse.Namespace) -> int:
             "kernel": tc.resolve_kernel(kernel),
             "zfs_version": version,
             "path": str(out_dir),
-            "src": str(zfs_src_dir(tc, kernel, version)),
+            "src": str(out_dir / "src"),
             "staging": str(staging),
             "modules": modules,
         },

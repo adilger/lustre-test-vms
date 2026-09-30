@@ -569,9 +569,18 @@ def cmd_deploy(args: argparse.Namespace) -> int:
         else None
     )
     if staged_zfs_version and not userspace_only:
-        from ltvm_pkg.zfs_build import zfs_staging_dir
+        from ltvm_pkg.zfs_build import find_zfs_staging
 
-        zfs_staging = zfs_staging_dir(tc, deploy_kernel, staged_zfs_version)
+        zfs_staging = find_zfs_staging(
+            tc,
+            deploy_kernel,
+            staged_zfs_version,
+            recorded=(
+                staged_meta.get("zfs_dir")
+                if isinstance(staged_meta, dict)
+                else None
+            ),
+        )
         if not any((zfs_staging / "lib" / "modules").rglob("zfs.ko*")):
             return _error(
                 f"Lustre staging was built against ZFS "

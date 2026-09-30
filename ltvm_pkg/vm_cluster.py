@@ -1038,7 +1038,7 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
         from .lustre_build import read_staging_meta
         from .lustre_build import staging_path as _staging_path
         from .target_config import TargetConfig
-        from .zfs_build import zfs_staging_dir
+        from .zfs_build import find_zfs_staging
 
         tc = TargetConfig(target, arch=arch, variant=first_vm.variant)
         meta = read_staging_meta(
@@ -1056,7 +1056,12 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
                 "ZFS was requested but the Lustre build produced no ZFS "
                 "record -- rerun with --force to reconfigure"
             )
-        zfs_staging = zfs_staging_dir(tc, kernel_name, staged_zfs)
+        zfs_staging = find_zfs_staging(
+            tc,
+            kernel_name,
+            staged_zfs,
+            recorded=meta.get("zfs_dir") if isinstance(meta, dict) else None,
+        )
         if not any((zfs_staging / "lib" / "modules").rglob("zfs.ko*")):
             die(
                 f"Lustre was built against ZFS {staged_zfs} but its "

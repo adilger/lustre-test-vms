@@ -246,7 +246,7 @@ wheels = [
 
 [[package]]
 name = "lustre-test-vms"
-version = "0.5.72"
+version = "0.5.73"
 source = { virtual = "." }
 dependencies = [
     { name = "argcomplete" },

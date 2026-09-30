@@ -174,12 +174,9 @@ def _build_lustre_locally(
 
     meta["lustre_tree"] = str(lustre_tree)
     if zfs_version:
-        from ltvm_pkg.zfs_build import zfs_staging_dir
-
         meta["zfs_version"] = zfs_version
-        meta["zfs_staging"] = str(
-            zfs_staging_dir(tc, image.kernel, zfs_version)
-        )
+        assert zfs_src is not None
+        meta["zfs_staging"] = str(Path(zfs_src).parent / "staging")
     return meta, None
 
 

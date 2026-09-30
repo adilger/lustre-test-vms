@@ -387,9 +387,23 @@ kernel's release string **and** the kernel artifact's
 kernel.release changing.
 
 The ZFS a VM receives is never chosen by the command line:
-`build lustre` records the version in the staging meta and
-deploy ships exactly that one, since osd_zfs.ko is linked
-against one specific ZFS build.
+`build lustre` records the version and the artifact directory
+(`zfs_dir`) in the staging meta and deploy ships exactly that
+one, since osd_zfs.ko is linked against one specific ZFS build.
+
+**Shared artifacts a user cannot write.**  On a multi-user
+host the kernel artifact dirs belong to the artifacts' owner
+(mode 2755), so a slot user cannot create `zfs/` under them.
+That user's build goes to
+`$XDG_CACHE_HOME/ltvm/zfs/<target>/<arch>/<kver>/<version>/`
+(default `~/.cache/ltvm/...`), same layout, and the tarball to
+`~/.cache/ltvm/cache/zfs/` when the shared cache is not
+writable either.  A fresh shared build always wins over the
+user's, so the owner can save every user the build (1-5
+minutes) and its ~900 MB (700 MB `src/`, 180 MB `staging/`)
+by prebuilding: `ltvm build zfs <target> --kernel
+<k>` as the account that owns the artifacts.  Nothing
+loosens the shared dirs' permissions.
 
 Both rhel and debian build containers work; the inner
 script picks dnf or apt for its extra build deps and takes

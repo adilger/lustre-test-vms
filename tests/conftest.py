@@ -113,6 +113,7 @@ def _isolate_user_state(
     root = tmp_path_factory.mktemp("xdg")
     monkeypatch.setenv("XDG_CONFIG_HOME", str(root / "config"))
     monkeypatch.setenv("XDG_STATE_HOME", str(root / "state"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(root / "cache"))
     monkeypatch.setenv("LTVM_TELEMETRY", "0")
     monkeypatch.setenv("LTVM_SITE_CONFIG", str(root / "no-such-ltvm.conf"))
     # Tab completion installs into /etc/bash_completion.d and the zsh

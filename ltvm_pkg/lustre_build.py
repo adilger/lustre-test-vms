@@ -1235,6 +1235,9 @@ fi""")
             # matching ZFS artifact alongside these modules -- osd_zfs.ko
             # and mount_osd_zfs.so are useless in a VM without it.
             "zfs_version": zfs_version,
+            # The ZFS artifact it was linked against: the shared one or,
+            # for a user who cannot write that, their own copy.
+            "zfs_dir": str(Path(zfs_src).parent) if zfs_src else None,
         },
         indent=2,
     )
