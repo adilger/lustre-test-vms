@@ -79,6 +79,42 @@ def _read_meminfo_mb(key: str) -> int:
     return 0
 
 
+_CGROUP_ROOT = Path("/sys/fs/cgroup")
+
+
+def _cgroup_memory_limit_mb(
+    proc_cgroup: Path = Path("/proc/self/cgroup"), root: Path = _CGROUP_ROOT
+) -> int:
+    """The tightest memory.max over this process's cgroup and its parents,
+    in MiB, or 0 for none.
+
+    In a container MemTotal is the host's, not what the container's QEMU
+    may use: past its limit the kernel kills a guest instead.
+    """
+    try:
+        text = proc_cgroup.read_text()
+    except OSError:
+        return 0
+    relative = next(
+        (line[3:] for line in text.splitlines() if line.startswith("0::")), None
+    )
+    if relative is None:
+        return 0
+    directory = root / relative.strip().lstrip("/")
+    limits = []
+    while True:
+        try:
+            value = (directory / "memory.max").read_text().strip()
+        except OSError:
+            value = "max"
+        if value.isdigit():
+            limits.append(int(value))
+        if directory == root or root not in directory.parents:
+            break
+        directory = directory.parent
+    return min(limits) // (1024 * 1024) if limits else 0
+
+
 # Reserve for the host kernel + userspace.  1 GiB or 10% of total RAM,
 # whichever is larger.  Host bookkeeping (page cache, sshd, the QEMU
 # monitor processes themselves) needs slack -- without it, the OOM
@@ -146,6 +182,10 @@ def _memory_shortfall(vm: VMInfo) -> _Shortfall | None:
         # Can't read /proc/meminfo (non-Linux test host?); skip the
         # check rather than block legitimate launches.
         return None
+    total_source = "MemTotal"
+    cgroup_mb = _cgroup_memory_limit_mb()
+    if 0 < cgroup_mb < host_total_mb:
+        host_total_mb, total_source = cgroup_mb, "cgroup memory.max"
 
     reserve_mb = max(_HOST_MEM_RESERVE_FLOOR_MB, host_total_mb // 10)
     budget_mb = host_total_mb - reserve_mb
@@ -192,7 +232,7 @@ def _memory_shortfall(vm: VMInfo) -> _Shortfall | None:
         f"  already used: {committed_mb} MiB across "
         f"{len(running)} running VM(s)",
         f"  host budget:  {budget_mb} MiB "
-        f"(MemTotal {host_total_mb} MiB - {reserve_mb} MiB reserve)",
+        f"({total_source} {host_total_mb} MiB - {reserve_mb} MiB reserve)",
     ]
     if overcommit != 1.0:
         lines.append(

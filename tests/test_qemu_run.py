@@ -823,8 +823,80 @@ class TestIsRunningMacos:
 # ── memory budget check ──────────────────────────────────
 
 
+class TestCgroupMemoryLimit:
+    def _tree(
+        self, tmp_path: Path, limits: dict[str, str]
+    ) -> tuple[Path, Path]:
+        root = tmp_path / "cgroup"
+        for relative, value in limits.items():
+            (root / relative).mkdir(parents=True, exist_ok=True)
+            (root / relative / "memory.max").write_text(value + "\n")
+        proc = tmp_path / "self-cgroup"
+        proc.write_text("0::/user.slice/run.scope\n")
+        return proc, root
+
+    def test_the_tightest_of_the_cgroup_and_its_parents(
+        self, tmp_path: Path
+    ) -> None:
+        proc, root = self._tree(
+            tmp_path,
+            {"user.slice": str(8 << 30), "user.slice/run.scope": "max"},
+        )
+        assert qemu_run._cgroup_memory_limit_mb(proc, root) == 8192
+
+    def test_no_limit_anywhere_is_none(self, tmp_path: Path) -> None:
+        proc, root = self._tree(tmp_path, {"user.slice/run.scope": "max"})
+        assert qemu_run._cgroup_memory_limit_mb(proc, root) == 0
+
+    def test_a_container_sees_its_own_root(self, tmp_path: Path) -> None:
+        root = tmp_path / "cgroup"
+        root.mkdir()
+        (root / "memory.max").write_text(f"{6 << 30}\n")
+        proc = tmp_path / "self-cgroup"
+        proc.write_text("0::/\n")
+        assert qemu_run._cgroup_memory_limit_mb(proc, root) == 6144
+
+    def test_unreadable_is_none(self, tmp_path: Path) -> None:
+        assert qemu_run._cgroup_memory_limit_mb(tmp_path / "no", tmp_path) == 0
+
+
 class TestMemoryBudgetCheck:
     """_memory_shortfall says when a launch would exceed the host."""
+
+    @pytest.fixture(autouse=True)
+    def _no_cgroup_limit(self) -> Iterator[None]:
+        with patch("ltvm_pkg.qemu_run._cgroup_memory_limit_mb", return_value=0):
+            yield
+
+    def test_a_cgroup_limit_below_memtotal_is_the_budget(
+        self, tmp_vmdir: Path
+    ) -> None:
+        """In a container with half the host's memory, a VM that fits the
+        host but not the container is refused, and the limit is named."""
+        vm = _make_vm(tmp_vmdir, name="big", mem=15360)
+        with (
+            patch("ltvm_pkg.qemu_run._read_meminfo_mb", return_value=32768),
+            patch(
+                "ltvm_pkg.qemu_run._cgroup_memory_limit_mb", return_value=16384
+            ),
+            patch.object(VMInfo, "all_names", return_value=[]),
+        ):
+            shortfall = qemu_run._memory_shortfall(vm)
+        assert shortfall is not None
+        assert "cgroup memory.max 16384 MiB" in shortfall.message
+
+    def test_a_cgroup_limit_above_memtotal_changes_nothing(
+        self, tmp_vmdir: Path
+    ) -> None:
+        vm = _make_vm(tmp_vmdir, mem=2048)
+        with (
+            patch("ltvm_pkg.qemu_run._read_meminfo_mb", return_value=8192),
+            patch(
+                "ltvm_pkg.qemu_run._cgroup_memory_limit_mb", return_value=65536
+            ),
+            patch.object(VMInfo, "all_names", return_value=[]),
+        ):
+            assert qemu_run._memory_shortfall(vm) is None
 
     def test_passes_when_budget_has_room(self, tmp_vmdir: Path) -> None:
         """Plenty of host RAM, no other VMs -> check returns silently."""
