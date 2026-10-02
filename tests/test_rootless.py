@@ -945,6 +945,21 @@ class TestInstall:
             c.args[0] for c in run.mock_calls
         ]
 
+    def test_socket_vmnet_found_without_running_brew(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """brew refuses to run with differing real and effective uids,
+        which is how `sudo ltvm` checks whether the user is ready."""
+        prefix = tmp_path / "opt" / "socket_vmnet"
+        (prefix / "bin").mkdir(parents=True)
+        (prefix / "bin" / "socket_vmnet").touch()
+        monkeypatch.setenv("HOMEBREW_PREFIX", str(tmp_path))
+        monkeypatch.delenv("LTVM_VMNET_SOCKET", raising=False)
+        with patch.object(host_setup, "_run_quiet") as run:
+            sock = host_setup.socket_vmnet_socket_path()
+        run.assert_not_called()
+        assert sock == prefix / "var" / "run" / "socket_vmnet"
+
     def test_macos_dnsmasq_reads_hosts_d(self) -> None:
         text = (
             host_setup.HOST_CONFIG_DIR / "ltvm-dnsmasq-macos.conf"

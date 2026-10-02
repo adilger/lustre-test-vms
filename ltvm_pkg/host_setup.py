@@ -680,7 +680,25 @@ def _brew_qemu_prefix() -> Path | None:
 
 
 def _brew_socket_vmnet_prefix() -> Path | None:
-    """Return the Homebrew prefix for the socket_vmnet package, or None."""
+    """Return the Homebrew prefix for the socket_vmnet package, or None.
+
+    The standard Homebrew locations are tried before running brew, which
+    refuses to run when the real and effective uids differ.  That is
+    exactly how `sudo ltvm` asks rootless.readiness() whether the user
+    could run the VM: with brew failing there, the socket was looked for
+    at /var/run, the user was judged not ready, and the VM was started
+    as root instead of being handed back to them.
+    """
+    for root in (
+        os.environ.get("HOMEBREW_PREFIX"),
+        "/opt/homebrew",
+        "/usr/local",
+    ):
+        if not root:
+            continue
+        p = Path(root) / "opt" / "socket_vmnet"
+        if (p / "bin" / "socket_vmnet").exists():
+            return p
     brew = shutil.which("brew")
     if not brew:
         return None
