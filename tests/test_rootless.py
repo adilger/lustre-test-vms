@@ -1122,6 +1122,63 @@ class TestOtherUsersVm:
         sp.assert_not_called()
 
 
+class TestRootQemu:
+    """Our own VM whose QEMU was started as root, before the host was set up
+    for unprivileged VMs."""
+
+    def _vm(self, tmp_vmdir: Path) -> Any:
+        vm = _make_vm(tmp_vmdir)
+        vm.pid = 51721
+        return vm
+
+    def _root_qemu(self) -> Any:
+        return patch.object(vm_commands.os, "kill", side_effect=PermissionError)
+
+    def test_refused_up_front_without_sudo(
+        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        vm = self._vm(tmp_vmdir)
+        with (
+            patch.object(vm_commands, "is_running", return_value=True),
+            self._root_qemu(),
+            patch.object(
+                vm_commands, "sudo_prime", side_effect=priv.SudoUnavailable("x")
+            ),
+            pytest.raises(SystemExit),
+        ):
+            vm_commands._require_signalable(vm, "stop")
+        assert "sudo ltvm stop co1-single" in capsys.readouterr().err
+
+    def test_sudoer_is_asked_once(self, tmp_vmdir: Path) -> None:
+        vm = self._vm(tmp_vmdir)
+        with (
+            patch.object(vm_commands, "is_running", return_value=True),
+            self._root_qemu(),
+            patch.object(vm_commands, "sudo_prime") as sp,
+        ):
+            vm_commands._require_signalable(vm, "destroy")
+        sp.assert_called_once()
+
+    def test_own_qemu_needs_nothing(self, tmp_vmdir: Path) -> None:
+        vm = self._vm(tmp_vmdir)
+        with (
+            patch.object(vm_commands, "is_running", return_value=True),
+            patch.object(vm_commands.os, "kill"),
+            patch.object(vm_commands, "sudo_prime") as sp,
+        ):
+            vm_commands._require_signalable(vm, "stop")
+        sp.assert_not_called()
+
+    def test_stopped_vm_needs_nothing(self, tmp_vmdir: Path) -> None:
+        vm = self._vm(tmp_vmdir)
+        with (
+            patch.object(vm_commands, "is_running", return_value=False),
+            patch.object(vm_commands, "sudo_prime") as sp,
+        ):
+            vm_commands._require_signalable(vm, "stop")
+        sp.assert_not_called()
+
+
 class TestStickyRename:
     def test_rename_refused_goes_through_sudo(self, tmp_path: Path) -> None:
         dest = tmp_path / "co1.info"
