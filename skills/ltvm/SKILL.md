@@ -272,7 +272,11 @@ never prompts.
 Create and start wait 30 seconds for a guest to answer ssh. On a loaded
 host, with several guests booting at once, that can run out while they
 are still booting ("SSH not ready after 30s"); export
-`LTVM_SSH_TIMEOUT=<seconds>` to wait longer rather than retrying.
+`LTVM_SSH_TIMEOUT=<seconds>` to wait longer rather than retrying. That
+error ends with the last thing ssh said: read it before blaming a slow
+boot. An ssh that fails on the host itself, such as a config file with
+bad owner or permissions, stops the wait at once with "fails on this
+host, not in the guest"; `ltvm doctor` checks the ssh client config.
 
 A cluster record whose VMs are all gone, because they were destroyed one
 by one, is removed with the last of them, and `cluster create` replaces

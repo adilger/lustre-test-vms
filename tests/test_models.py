@@ -630,6 +630,164 @@ class TestWaitForSsh:
             wait_for_ssh("192.168.100.50", max_wait=5)  # should not raise
 
 
+class _FakeClock:
+    """time.monotonic that only moves when wait_for_ssh sleeps."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, secs: float) -> None:
+        self.now += secs + 4  # each probe costs about its 5s timeout
+
+
+def _wait(results: list, max_wait: int = 30) -> tuple[MagicMock, str]:
+    """Run wait_for_ssh over *results* (the last one repeats).
+
+    Returns (the run_ssh mock, the error printed).
+    """
+    from ltvm_pkg.vm_net import wait_for_ssh
+
+    clock = _FakeClock()
+
+    def probe(*_a: object, **_kw: object) -> object:
+        r = results[min(probe.calls, len(results) - 1)]  # type: ignore[attr-defined]
+        probe.calls += 1  # type: ignore[attr-defined]
+        if isinstance(r, BaseException):
+            raise r
+        return r
+
+    probe.calls = 0  # type: ignore[attr-defined]
+    with (
+        patch("ltvm_pkg.vm_net.run_ssh", side_effect=probe) as mock,
+        patch("ltvm_pkg.vm_net.time.monotonic", side_effect=clock.monotonic),
+        patch("ltvm_pkg.vm_net.time.sleep", side_effect=clock.sleep),
+        patch("ltvm_pkg.vm_net.die", side_effect=SystemExit) as die,
+    ):
+        with pytest.raises(SystemExit):
+            wait_for_ssh("192.168.100.7", max_wait=max_wait)
+    return mock, die.call_args.args[0]
+
+
+def _ssh_result(rc: int, stderr: str) -> MagicMock:
+    return MagicMock(returncode=rc, stdout="", stderr=stderr)
+
+
+# What a booting guest answers with.  None of these may end the wait.
+_BOOT_TIME_ERRORS = [
+    "ssh: connect to host 192.168.100.7 port 22: Connection refused",
+    "ssh: connect to host 192.168.100.7 port 22: Connection timed out",
+    "ssh: connect to host 192.168.100.7 port 22: No route to host",
+    "kex_exchange_identification: read: Connection reset by peer",
+    "kex_exchange_identification: Connection closed by remote host",
+    "Connection closed by 192.168.100.7 port 22",
+    "Connection reset by 192.168.100.7 port 22",
+    "root@192.168.100.7: Permission denied (publickey,password).",
+    # Warnings ssh prints and then carries on to password auth.
+    'Load key "/home/u/.ssh/id_rsa": Permission denied\n'
+    "ssh: connect to host 192.168.100.7 port 22: Connection refused",
+    "no such identity: /home/u/.ssh/id_x: No such file or directory\n"
+    "ssh: connect to host 192.168.100.7 port 22: Connection refused",
+]
+
+# Failures on this host that no amount of waiting changes.
+_PERMANENT_ERRORS = [
+    (255, "Bad owner or permissions on /etc/ssh/ssh_config.d/pw-run.conf"),
+    (
+        255,
+        "/home/u/.ssh/config: line 3: Bad configuration option: bogus\n"
+        "/home/u/.ssh/config: terminating, 1 bad configuration options",
+    ),
+    (255, "Can't open user config file nope.conf: No such file or directory"),
+    (
+        255,
+        "Received disconnect from 192.168.100.7 port 22:2: Too many "
+        "authentication failures\nDisconnected from 192.168.100.7 port 22",
+    ),
+    (3, "Failed to get a pseudo terminal: No such file or directory"),
+]
+
+
+class TestSshPermanentFailure:
+    @pytest.mark.parametrize("stderr", _BOOT_TIME_ERRORS)
+    def test_boot_time_errors_are_not_permanent(self, stderr: str) -> None:
+        from ltvm_pkg.vm_net import ssh_permanent_failure
+
+        assert not ssh_permanent_failure(255, stderr)
+
+    @pytest.mark.parametrize(("rc", "stderr"), _PERMANENT_ERRORS)
+    def test_local_failures_are_permanent(self, rc: int, stderr: str) -> None:
+        from ltvm_pkg.vm_net import ssh_permanent_failure
+
+        assert ssh_permanent_failure(rc, stderr)
+
+    def test_message_without_the_matching_exit_code_is_not(self) -> None:
+        """rc 1 from the remote command, not ssh itself."""
+        from ltvm_pkg.vm_net import ssh_permanent_failure
+
+        assert not ssh_permanent_failure(1, "Bad configuration option: x")
+        assert not ssh_permanent_failure(
+            255, "PTY allocation request failed; pseudo terminal"
+        )
+
+
+class TestWaitForSshErrors:
+    def test_timeout_reports_the_last_ssh_error(self) -> None:
+        mock, msg = _wait(
+            [
+                _ssh_result(255, "ssh: connect to host x port 22: No route"),
+                _ssh_result(
+                    255,
+                    "ssh: connect to host 192.168.100.7 port 22: "
+                    "Connection refused\n",
+                ),
+            ]
+        )
+        assert mock.call_count > 2
+        assert "SSH not ready after" in msg
+        assert (
+            "last ssh error: rc=255: ssh: connect to host 192.168.100.7 "
+            "port 22: Connection refused" in msg
+        )
+        assert "No route" not in msg
+        assert "LTVM_SSH_TIMEOUT" in msg
+
+    def test_timeout_after_a_hung_probe_says_so(self) -> None:
+        _, msg = _wait([subprocess.TimeoutExpired("ssh", 5)])
+        assert "last ssh error: ssh probe timed out after 5s" in msg
+
+    def test_failure_with_no_stderr_reports_the_rc(self) -> None:
+        _, msg = _wait([_ssh_result(5, "")])
+        assert "last ssh error: rc=5" in msg
+
+    @pytest.mark.parametrize("stderr", _BOOT_TIME_ERRORS)
+    def test_boot_time_errors_wait_out_the_timeout(self, stderr: str) -> None:
+        mock, msg = _wait([_ssh_result(255, stderr)])
+        assert mock.call_count > 2
+        assert "SSH not ready after" in msg
+
+    @pytest.mark.parametrize(("rc", "stderr"), _PERMANENT_ERRORS)
+    def test_local_failure_stops_at_once(self, rc: int, stderr: str) -> None:
+        mock, msg = _wait([_ssh_result(rc, stderr)])
+        assert mock.call_count == 1
+        assert "SSH not ready" not in msg
+        assert "fails on this host, not in the guest" in msg
+        assert stderr.splitlines()[0] in msg
+
+    def test_local_failure_after_boot_errors_still_stops(self) -> None:
+        bad = "Bad owner or permissions on /etc/ssh/ssh_config.d/pw-run.conf"
+        mock, msg = _wait(
+            [
+                _ssh_result(255, "ssh: connect to host x: Connection refused"),
+                _ssh_result(255, bad),
+            ]
+        )
+        assert mock.call_count == 2
+        assert bad in msg
+
+
 class TestDeploySshKey:
     """deploy_ssh_key raises SystemExit (via die()) on SSH timeout."""
 

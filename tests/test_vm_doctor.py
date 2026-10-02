@@ -597,3 +597,109 @@ class TestDoctorSkillLinks:
         assert any("shadowed by a real directory" in i for i in issues)
         assert failures == 1  # --fix must not claim to have fixed it
         assert (mine / "SKILL.md").read_text() == "mine\n"
+
+
+# ── ssh client config ─────────────────────────────────────
+
+
+class TestSshClientConfigError:
+    """vm_net.ssh_client_config_error runs `ssh -G` and reads its rc."""
+
+    def _run(self, **result: object) -> tuple[str | None, MagicMock]:
+        from ltvm_pkg import vm_net
+
+        with patch(
+            "ltvm_pkg.vm_net.subprocess.run",
+            return_value=MagicMock(stdout="", **result),
+        ) as run:
+            return vm_net.ssh_client_config_error("192.168.100.2"), run
+
+    def test_parsed_config_is_fine(self) -> None:
+        err, run = self._run(returncode=0, stderr="")
+        assert err is None
+        from ltvm_pkg.vm_net import SSH_OPTS
+
+        argv = run.call_args.args[0]
+        assert argv[:2] == ["ssh", "-G"]
+        assert argv[2:-1] == SSH_OPTS
+        assert argv[-1] == "root@192.168.100.2"
+
+    def test_warning_on_success_is_not_an_error(self) -> None:
+        err, _ = self._run(
+            returncode=0,
+            stderr="Pseudo-terminal will not be allocated because stdin "
+            "is not a terminal.\n",
+        )
+        assert err is None
+
+    def test_bad_permissions_are_reported(self) -> None:
+        err, _ = self._run(
+            returncode=255,
+            stderr="Bad owner or permissions on "
+            "/etc/ssh/ssh_config.d/pw-run.conf\n",
+        )
+        assert err == (
+            "Bad owner or permissions on /etc/ssh/ssh_config.d/pw-run.conf"
+        )
+
+    def test_silent_failure_names_the_rc(self) -> None:
+        err, _ = self._run(returncode=255, stderr="")
+        assert err == "`ssh -G` exited 255"
+
+    def test_missing_ssh(self) -> None:
+        from ltvm_pkg import vm_net
+
+        with patch(
+            "ltvm_pkg.vm_net.subprocess.run", side_effect=FileNotFoundError
+        ):
+            assert (
+                vm_net.ssh_client_config_error("192.168.100.2")
+                == "ssh is not installed"
+            )
+
+
+class TestDoctorSshClientConfig:
+    BAD = "Bad owner or permissions on /etc/ssh/ssh_config.d/pw-run.conf"
+
+    def test_reported_as_an_issue(
+        self,
+        tmp_vmdir: Path,
+        doctor_env: dict,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        with patch(
+            "ltvm_pkg.vm_commands.ssh_client_config_error",
+            return_value=self.BAD,
+        ):
+            rc = vm_commands.cmd_doctor(_make_args(fix=False))
+        out = capsys.readouterr().out
+        assert f"ssh client config broken: {self.BAD}" in out
+        assert "1 issue(s) found" in out
+        assert rc != 0
+
+    def test_fix_does_not_claim_to_fix_it(
+        self,
+        tmp_vmdir: Path,
+        doctor_env: dict,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        with patch(
+            "ltvm_pkg.vm_commands.ssh_client_config_error",
+            return_value=self.BAD,
+        ):
+            rc = vm_commands.cmd_doctor(_make_args(fix=True))
+        out = capsys.readouterr().out
+        assert "NOT fixed" in out
+        assert "1 could not be fixed" in out
+        assert rc != 0
+
+    def test_probes_a_vm_address(
+        self, tmp_vmdir: Path, doctor_env: dict
+    ) -> None:
+        from ltvm_pkg.vm_state import SUBNET
+
+        with patch(
+            "ltvm_pkg.vm_commands.ssh_client_config_error", return_value=None
+        ) as probe:
+            assert vm_commands.cmd_doctor(_make_args(fix=False)) == 0
+        probe.assert_called_once_with(f"{SUBNET}.2")

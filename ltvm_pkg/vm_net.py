@@ -826,6 +826,62 @@ def provision_vm_ssh(
     deploy_ssh_key(vm.ip)
 
 
+# ssh stops before connecting with these, so waiting cannot help.
+# "Load key" and "no such identity" are not here: ssh carries on to
+# password auth after printing them.
+_SSH_PERMANENT_ERRORS = (
+    "Bad owner or permissions on",
+    "Bad configuration option",
+    "bad configuration options",
+    "Can't open user config file",
+    "Too many authentication failures",
+)
+
+# sshpass exits 3 when it cannot set up the pty it drives ssh through.
+_SSHPASS_PERMANENT_ERRORS = ("pseudo terminal",)
+
+
+def ssh_permanent_failure(returncode: int, stderr: str) -> bool:
+    """True when an ssh probe failed for a reason retrying cannot fix.
+
+    Boot-time failures (connection refused or timed out, no route,
+    kex_exchange_identification, connection closed or reset, permission
+    denied) all return False.
+    """
+    if returncode == 255:
+        return any(e in stderr for e in _SSH_PERMANENT_ERRORS)
+    if returncode == 3:
+        return any(e in stderr for e in _SSHPASS_PERMANENT_ERRORS)
+    return False
+
+
+def _one_line(text: str) -> str:
+    return "; ".join(ln.strip() for ln in text.splitlines() if ln.strip())
+
+
+def ssh_client_config_error(host: str) -> str | None:
+    """Why ssh cannot parse its client config for *host*, or None.
+
+    `ssh -G` reads the config the way a connection would and stops
+    before connecting, so a broken config shows up without a VM.
+    """
+    try:
+        r = subprocess.run(
+            ["ssh", "-G", *SSH_OPTS, f"root@{host}"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except FileNotFoundError:
+        return "ssh is not installed"
+    except subprocess.TimeoutExpired:
+        return "`ssh -G` did not finish in 10s"
+    if r.returncode == 0:
+        return None
+    return _one_line(r.stderr or "") or f"`ssh -G` exited {r.returncode}"
+
+
 def wait_for_ssh(ip: str, max_wait: int = 30) -> None:
     """Wait for SSH to become available on a VM.
 
@@ -837,7 +893,9 @@ def wait_for_ssh(ip: str, max_wait: int = 30) -> None:
 
     A FileNotFoundError here means sshpass/ssh aren't on PATH, which is
     a host-setup bug we want to surface immediately rather than masquerade
-    as "SSH not ready".
+    as "SSH not ready".  So is an ssh that fails on this host before it
+    connects (ssh_permanent_failure).  Otherwise the timeout error
+    carries the last probe's stderr.
     """
     # Announce the wait: this is the one step in create/start that can
     # take tens of seconds, and it is silent otherwise.  stderr, so
@@ -849,20 +907,32 @@ def wait_for_ssh(ip: str, max_wait: int = 30) -> None:
     )
     start = time.monotonic()
     deadline = start + max_wait
+    last = ""
     while time.monotonic() < deadline:
         try:
             r = run_ssh(ip, "true", timeout=5)
             if r.returncode == 0:
                 return
+            err = _one_line(r.stderr or "")
+            if ssh_permanent_failure(r.returncode, err):
+                die(
+                    f"ssh to {ip} fails on this host, not in the guest "
+                    f"(rc={r.returncode}): {err}\n"
+                    f"  fix the host's ssh setup; `ltvm doctor` checks "
+                    f"the client config"
+                )
+            last = f"rc={r.returncode}: {err}" if err else f"rc={r.returncode}"
         except subprocess.TimeoutExpired:
-            pass
+            last = "ssh probe timed out after 5s"
         except FileNotFoundError as e:
             die(
                 f"required command missing on host ({e}); is sshpass installed?"
             )
         time.sleep(1)
     elapsed = int(time.monotonic() - start)
+    detail = f"; last ssh error: {last}" if last else ""
     die(
-        f"SSH not ready after {elapsed}s on {ip}; if the guest is still "
-        f"booting, set LTVM_SSH_TIMEOUT to wait longer"
+        f"SSH not ready after {elapsed}s on {ip}{detail}\n"
+        f"  if the guest is still booting, set LTVM_SSH_TIMEOUT to wait "
+        f"longer"
     )

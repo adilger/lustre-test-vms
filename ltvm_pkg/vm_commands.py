@@ -31,6 +31,7 @@ from .vm_net import (
     provision_vm_ssh,
     register_ssh_name,
     run_ssh,
+    ssh_client_config_error,
     sshpass_scp_argv,
     tap_for_name,
     unregister_ssh_name,
@@ -51,6 +52,7 @@ from .vm_state import (
     ROOT_SIZE_BYTES,
     SOCKETS,
     SSH_TIMEOUT,
+    SUBNET,
     VM_DIR,
     ClusterInfo,
     ClusterNotFound,
@@ -2952,6 +2954,21 @@ def _check_claims(fix: bool) -> tuple[int, int]:
     return issues, failures
 
 
+def _check_ssh_client_config(fix: bool) -> tuple[int, int]:
+    """ssh must parse its client config, or no VM is reachable.
+
+    Returns (issues, failures).
+    """
+    err = ssh_client_config_error(f"{SUBNET}.2")
+    if err is None:
+        return 0, 0
+    print(f"ssh client config broken: {err}")
+    if fix:
+        print("  NOT fixed: doctor leaves ssh's own setup alone")
+        return 1, 1
+    return 1, 0
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     issues = 0
     # Counts repairs that were attempted and did not work, so --fix
@@ -3213,6 +3230,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         issues += 1
 
     found, failed = _check_claims(args.fix)
+    issues += found
+    fix_failures += failed
+
+    found, failed = _check_ssh_client_config(args.fix)
     issues += found
     fix_failures += failed
 

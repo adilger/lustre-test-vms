@@ -188,6 +188,18 @@ def _neutralize_container_preflight() -> object:
 
 
 @pytest.fixture(autouse=True)
+def _neutralize_ssh_config_check() -> object:
+    """Keep `ltvm doctor` off the host's real ssh and its config.
+
+    tests/test_vm_doctor.py::TestDoctorSshClientConfig opts back in.
+    """
+    with patch(
+        "ltvm_pkg.vm_commands.ssh_client_config_error", return_value=None
+    ):
+        yield
+
+
+@pytest.fixture(autouse=True)
 def _classic_privileges() -> object:
     """Pin the sudo path, whatever the test host's own setup.
 
