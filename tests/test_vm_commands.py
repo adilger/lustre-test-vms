@@ -1230,6 +1230,24 @@ class TestCmdLlmount:
         _, call_kwargs = mock_ssh.call_args
         assert call_kwargs.get("timeout") == 99
 
+    @pytest.mark.parametrize("cleanup", [False, True])
+    def test_output_is_streamed(self, tmp_vmdir: Path, cleanup: bool) -> None:
+        """llmount.sh's output flows as it runs, not in one block at the end."""
+        import sys
+
+        _seed_vm_files(tmp_vmdir, "live")
+        args = argparse.Namespace(name="live", timeout=300, cleanup=cleanup)
+        r = MagicMock()
+        r.returncode = 0
+        with (
+            patch("ltvm_pkg.vm_commands.is_running", return_value=True),
+            patch("ltvm_pkg.vm_commands.configure_test_disks"),
+            patch("ltvm_pkg.vm_commands.run_ssh", return_value=r) as mock_ssh,
+            pytest.raises(SystemExit),
+        ):
+            vm_commands.cmd_llmount(args)
+        assert mock_ssh.call_args.kwargs["stream"] is sys.stdout
+
 
 # ── _seed_kdump_boot ─────────────────────────────────────
 

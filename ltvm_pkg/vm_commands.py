@@ -1598,17 +1598,10 @@ def cmd_llmount(args: argparse.Namespace) -> None:
         )
 
     try:
-        r = run_ssh(vm.ip, command, timeout=timeout)
+        r = run_ssh(vm.ip, command, timeout=timeout, stream=sys.stdout)
     except subprocess.TimeoutExpired:
         print(f"error: timeout after {timeout}s", file=sys.stderr)
         sys.exit(EXIT_TIMEOUT)
-
-    stdout = r.stdout or ""
-    stderr = r.stderr or ""
-    if stdout:
-        print(stdout, end="")
-    if stderr:
-        print(stderr, end="", file=sys.stderr)
     sys.exit(r.returncode)
 
 

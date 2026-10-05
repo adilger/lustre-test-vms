@@ -788,8 +788,17 @@ def run_ssh(
     ip: str,
     command: str,
     timeout: int = 120,
+    *,
+    stream: IO[str] | None = None,
 ) -> subprocess.CompletedProcess:
-    """Run a command on a VM via SSH with timeout."""
+    """Run a command on a VM via SSH with timeout.
+
+    Output is captured unless *stream* is given: the remote stdout then
+    goes to *stream* and its stderr to ours as it is written, and the
+    result's ``stdout``/``stderr`` are None.  That is for a long remote
+    command whose progress is the point, such as llmount.sh -- captured,
+    its output would arrive all at once when it finished.
+    """
     ssh_cmd = sshpass_ssh_argv(
         ip,
         command,
@@ -802,7 +811,12 @@ def run_ssh(
             "ServerAliveCountMax=3",
         ],
     )
-    return run(ssh_cmd, timeout=timeout)
+    if stream is None:
+        return run(ssh_cmd, timeout=timeout)
+    # Our own buffered output has to land before the child's.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    return run(ssh_cmd, timeout=timeout, capture_output=False, stdout=stream)
 
 
 def provision_vm_ssh(

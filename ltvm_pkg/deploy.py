@@ -591,7 +591,9 @@ def lustre_mount_vm(name: str, os_family: str, *, quiet: bool = False) -> int:
         "for p in $(zpool list -H -o name 2>/dev/null); do "
         'zpool export -f "$p" 2>/dev/null; done; fi; '
     )
+    out = sys.stderr if quiet else sys.stdout
     try:
+        print(f"  Cleaning up previous Lustre state on {name}...", file=out)
         # Clean up any existing Lustre state before formatting.  llmount.sh
         # runs its own stopall internally, but does not call dmsetup remove_all
         # afterward, so mke2fs refuses to reformat backing devices that are
@@ -608,15 +610,15 @@ def lustre_mount_vm(name: str, os_family: str, *, quiet: bool = False) -> int:
             "dmsetup remove_all 2>/dev/null; true",
             timeout=60,
         )
+        print(f"  Running llmount.sh on {name}...", file=out)
+        # Streamed: llmount.sh takes minutes, and captured its progress
+        # would only appear once it was over.
         r = run_ssh(
             vm.ip,
             f"cd {libdir}/tests && LUSTRE={libdir} bash llmount.sh",
             timeout=180,
+            stream=out,
         )
-        if r.stdout:
-            print(r.stdout, end="", file=sys.stderr if quiet else sys.stdout)
-        if r.stderr:
-            print(r.stderr, end="", file=sys.stderr)
         return r.returncode
     except Exception as e:
         print(f"error: Lustre mount failed: {e}", file=sys.stderr)
