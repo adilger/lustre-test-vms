@@ -483,7 +483,7 @@ class TestLustreMountVm:
         vm.save()
         calls = []
 
-        def fake_ssh(ip, cmd, timeout=0):
+        def fake_ssh(ip, cmd, timeout=0, stream=None):
             calls.append(cmd)
             return _ok()
 
@@ -495,13 +495,33 @@ class TestLustreMountVm:
         assert "llmount.sh" in calls[1]
         assert "llmountcleanup.sh" not in calls[1]
 
+    @pytest.mark.parametrize("quiet", [False, True])
+    def test_llmount_output_is_streamed(
+        self, tmp_sockets: Path, quiet: bool
+    ) -> None:
+        """llmount.sh's output flows as it runs rather than all at once
+        at the end -- to stderr under quiet, where stdout is --json's."""
+        import sys
+
+        vm = _make_vm(name="mount-stream", ip="10.0.0.10")
+        vm.save()
+        with patch("ltvm_pkg.deploy.run_ssh", return_value=_ok()) as ssh:
+            rc = deploy.lustre_mount_vm(
+                "mount-stream", os_family="rhel", quiet=quiet
+            )
+        assert rc == 0
+        cleanup, mount = ssh.call_args_list
+        # The cleanup's output is noise; only llmount.sh streams.
+        assert "stream" not in cleanup.kwargs
+        assert mount.kwargs["stream"] is (sys.stderr if quiet else sys.stdout)
+
     def test_mount_uses_debian_libdir(self, tmp_sockets: Path) -> None:
         """debian os_family passes /usr/lib/lustre into the mount commands."""
         vm = _make_vm(name="mount-deb", ip="10.0.0.7")
         vm.save()
         calls = []
 
-        def fake_ssh(ip, cmd, timeout=0):
+        def fake_ssh(ip, cmd, timeout=0, stream=None):
             calls.append(cmd)
             return _ok()
 

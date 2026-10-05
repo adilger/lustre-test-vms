@@ -496,3 +496,49 @@ class TestRunSsh:
         with patch("ltvm_pkg.vm_net.run", side_effect=fake_run):
             vm_net.run_ssh("10.0.0.5", "whoami", timeout=42)
         assert seen["timeout"] == 42
+
+    def test_stream_writes_output_as_the_command_runs(
+        self, tmp_path: Path
+    ) -> None:
+        """With stream=, stdout goes to that file and stderr to ours,
+        neither captured: llmount.sh's progress used to arrive in one
+        block when it finished."""
+        out = tmp_path / "out"
+        with (
+            patch.object(
+                vm_net,
+                "sshpass_ssh_argv",
+                return_value=["sh", "-c", "echo progress"],
+            ),
+            out.open("w") as f,
+        ):
+            r = vm_net.run_ssh("10.0.0.5", "llmount", stream=f)
+        assert r.returncode == 0
+        assert r.stdout is None
+        assert r.stderr is None
+        assert out.read_text() == "progress\n"
+
+    def test_stream_flushes_our_own_output_first(self) -> None:
+        """Python's buffered prints must precede the child's output."""
+        flushed: list[str] = []
+        stream = MagicMock()
+        with (
+            patch("ltvm_pkg.vm_net.run") as run,
+            patch.object(vm_net.sys, "stdout") as out,
+            patch.object(vm_net.sys, "stderr") as err,
+        ):
+            out.flush.side_effect = lambda: flushed.append("stdout")
+            err.flush.side_effect = lambda: flushed.append("stderr")
+            run.side_effect = lambda *a, **k: flushed.append("run")
+            vm_net.run_ssh("10.0.0.5", "llmount", stream=stream)
+        assert flushed == ["stdout", "stderr", "run"]
+        kwargs = run.call_args.kwargs
+        assert kwargs["capture_output"] is False
+        assert kwargs["stdout"] is stream
+
+    def test_no_stream_captures(self) -> None:
+        with patch.object(
+            vm_net, "sshpass_ssh_argv", return_value=["sh", "-c", "echo hi"]
+        ):
+            r = vm_net.run_ssh("10.0.0.5", "whoami")
+        assert r.stdout == "hi\n"
