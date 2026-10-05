@@ -945,6 +945,21 @@ class TestInstall:
             c.args[0] for c in run.mock_calls
         ]
 
+    def test_socket_vmnet_found_without_running_brew(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """brew refuses to run with differing real and effective uids,
+        which is how `sudo ltvm` checks whether the user is ready."""
+        prefix = tmp_path / "opt" / "socket_vmnet"
+        (prefix / "bin").mkdir(parents=True)
+        (prefix / "bin" / "socket_vmnet").touch()
+        monkeypatch.setenv("HOMEBREW_PREFIX", str(tmp_path))
+        monkeypatch.delenv("LTVM_VMNET_SOCKET", raising=False)
+        with patch.object(host_setup, "_run_quiet") as run:
+            sock = host_setup.socket_vmnet_socket_path()
+        run.assert_not_called()
+        assert sock == prefix / "var" / "run" / "socket_vmnet"
+
     def test_macos_dnsmasq_reads_hosts_d(self) -> None:
         text = (
             host_setup.HOST_CONFIG_DIR / "ltvm-dnsmasq-macos.conf"
@@ -1119,6 +1134,63 @@ class TestOtherUsersVm:
             patch.object(vm_commands, "sudo_prime") as sp,
         ):
             vm_commands._require_manageable(vm, "stop")
+        sp.assert_not_called()
+
+
+class TestRootQemu:
+    """Our own VM whose QEMU was started as root, before the host was set up
+    for unprivileged VMs."""
+
+    def _vm(self, tmp_vmdir: Path) -> Any:
+        vm = _make_vm(tmp_vmdir)
+        vm.pid = 51721
+        return vm
+
+    def _root_qemu(self) -> Any:
+        return patch.object(vm_commands.os, "kill", side_effect=PermissionError)
+
+    def test_refused_up_front_without_sudo(
+        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        vm = self._vm(tmp_vmdir)
+        with (
+            patch.object(vm_commands, "is_running", return_value=True),
+            self._root_qemu(),
+            patch.object(
+                vm_commands, "sudo_prime", side_effect=priv.SudoUnavailable("x")
+            ),
+            pytest.raises(SystemExit),
+        ):
+            vm_commands._require_signalable(vm, "stop")
+        assert "sudo ltvm stop co1-single" in capsys.readouterr().err
+
+    def test_sudoer_is_asked_once(self, tmp_vmdir: Path) -> None:
+        vm = self._vm(tmp_vmdir)
+        with (
+            patch.object(vm_commands, "is_running", return_value=True),
+            self._root_qemu(),
+            patch.object(vm_commands, "sudo_prime") as sp,
+        ):
+            vm_commands._require_signalable(vm, "destroy")
+        sp.assert_called_once()
+
+    def test_own_qemu_needs_nothing(self, tmp_vmdir: Path) -> None:
+        vm = self._vm(tmp_vmdir)
+        with (
+            patch.object(vm_commands, "is_running", return_value=True),
+            patch.object(vm_commands.os, "kill"),
+            patch.object(vm_commands, "sudo_prime") as sp,
+        ):
+            vm_commands._require_signalable(vm, "stop")
+        sp.assert_not_called()
+
+    def test_stopped_vm_needs_nothing(self, tmp_vmdir: Path) -> None:
+        vm = self._vm(tmp_vmdir)
+        with (
+            patch.object(vm_commands, "is_running", return_value=False),
+            patch.object(vm_commands, "sudo_prime") as sp,
+        ):
+            vm_commands._require_signalable(vm, "stop")
         sp.assert_not_called()
 
 

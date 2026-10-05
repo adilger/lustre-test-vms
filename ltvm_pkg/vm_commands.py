@@ -1244,7 +1244,8 @@ def _rollback_launch_failure(vm: VMInfo) -> None:
     # steps regardless.
     try:
         kill_qemu(vm)
-    except Exception as e:
+    except (Exception, SystemExit) as e:
+        # SystemExit: kill_qemu dies when QEMU will not go.
         print(f"  rollback: kill_qemu failed: {e}", file=sys.stderr)
     try:
         _destroy_vm_artifacts(vm.name)
@@ -1417,6 +1418,33 @@ def _require_manageable(vm: VMInfo, verb: str) -> None:
         die(f"{vm.name} belongs to {who}; only {who} or root can {verb} it")
 
 
+def _require_signalable(vm: VMInfo, verb: str) -> None:
+    """Get root up front for a QEMU this user cannot signal.
+
+    A VM started under sudo before the host was set up for unprivileged
+    VMs keeps a root QEMU, and on such a host nothing else asks for sudo
+    before kill_qemu needs it.  Asking here prompts once, from a
+    terminal, and refuses cleanly where there is none.
+    """
+    if os.geteuid() == 0 or not is_running(vm):
+        return
+    try:
+        os.kill(vm.pid, 0)
+        return
+    except PermissionError:
+        pass
+    except OSError:
+        return
+    try:
+        sudo_prime(f"{vm.name}'s QEMU (pid {vm.pid}) runs as root")
+    except SudoUnavailable:
+        die(
+            f"{vm.name}'s QEMU (pid {vm.pid}) runs as root and sudo is "
+            f"unavailable here; run `sudo ltvm {verb} {vm.name}` in a "
+            f"terminal"
+        )
+
+
 def cmd_start(args: argparse.Namespace) -> None:
     for name in args.names:
         _validate_vm_name_for_lookup(name)
@@ -1452,6 +1480,7 @@ def cmd_stop(args: argparse.Namespace) -> None:
             print(f"stop: {name} not found")
             continue
         _require_manageable(vm, "stop")
+        _require_signalable(vm, "stop")
         kill_qemu(vm)
         print(f"stopped {name}")
 
@@ -1500,6 +1529,7 @@ def cmd_destroy(args: argparse.Namespace) -> None:
         try:
             vm = VMInfo.load(name)
             _require_manageable(vm, "destroy")
+            _require_signalable(vm, "destroy")
             # Capture before kill so we still know what to rebind even
             # if the QMP socket is gone or kill_qemu raises partway.
             passthrough_rebinds = dict(vm.passthrough_drivers)

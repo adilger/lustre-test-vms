@@ -315,9 +315,31 @@ def is_running(vm: VMInfo) -> bool:
     check it.  If the command line can't be read we fall back to the
     comm check rather than regress `ltvm list` for an unprivileged
     caller.
+
+    A VM whose .info says PID=0 is checked against its pidfile too: QEMU
+    holds that file while it runs, so a live QEMU named there was
+    recorded as stopped by mistake (a stop whose signal never landed).
+    Its pid is adopted into *vm*, in memory only, so that list shows it,
+    stop kills it and start refuses rather than tripping on the lock.
     """
-    if vm.pid <= 0:
-        return False
+    if vm.pid > 0:
+        return _qemu_pid_is(vm.pid, vm.name)
+    pid = _pidfile_pid(vm)
+    if pid > 0 and _qemu_pid_is(pid, vm.name):
+        vm.pid = pid
+        return True
+    return False
+
+
+def _pidfile_pid(vm: VMInfo) -> int:
+    try:
+        return int(vm.pid_path.read_text().strip())
+    except (OSError, ValueError):
+        return 0
+
+
+def _qemu_pid_is(pid: int, name: str) -> bool:
+    """Is *pid* a live QEMU launched for the VM called *name*?"""
     if is_macos():
         # Only args=, not comm=: macOS truncates comm to 16 characters
         # *including the directory*, so /opt/qemu/bin/qemu-system-aarch64
@@ -326,7 +348,7 @@ def is_running(vm: VMInfo) -> bool:
         # was listed as stopped.  argv[0] carries the whole path.
         try:
             r = subprocess.run(
-                ["ps", "-p", str(vm.pid), "-o", "args="],
+                ["ps", "-p", str(pid), "-o", "args="],
                 capture_output=True,
                 text=True,
                 check=False,
@@ -340,15 +362,15 @@ def is_running(vm: VMInfo) -> bool:
             return False
         if not Path(ps_args[0]).name.startswith("qemu-system"):
             return False
-        return _cmdline_names_vm(ps_args, vm.name, strict=False)
+        return _cmdline_names_vm(ps_args, name, strict=False)
     try:
-        comm = Path(f"/proc/{vm.pid}/comm").read_text().strip()
+        comm = Path(f"/proc/{pid}/comm").read_text().strip()
     except OSError:
         return False
     if not comm.startswith("qemu-system"):
         return False
     try:
-        argv = Path(f"/proc/{vm.pid}/cmdline").read_bytes()
+        argv = Path(f"/proc/{pid}/cmdline").read_bytes()
     except OSError:
         # Unreadable: keep the pre-identity behavior rather than
         # reporting a live VM as stopped.
@@ -358,7 +380,7 @@ def is_running(vm: VMInfo) -> bool:
         # Zombie or otherwise empty cmdline: no identity information,
         # so don't call a live VM stopped.
         return True
-    return _cmdline_names_vm(parts, vm.name, strict=True)
+    return _cmdline_names_vm(parts, name, strict=True)
 
 
 def _cmdline_names_vm(argv: list[str], name: str, *, strict: bool) -> bool:
@@ -1020,28 +1042,30 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-def _signal_qemu(vm: VMInfo, sig: int) -> None:
+def _signal_qemu(vm: VMInfo, sig: int) -> bool:
     """Signal a VM's QEMU, escalating to sudo when it isn't ours.
 
     A VM created with `sudo ltvm create` runs QEMU as root, but stop
     and destroy are documented as unprivileged commands, so the direct
     os.kill() gets EPERM.  Fall back to `sudo kill` rather than
-    silently doing nothing.
+    silently doing nothing.  Returns False when the signal could not
+    be sent: sudo refused, or had no terminal to ask for a password.
     """
     try:
         os.kill(vm.pid, sig)
-        return
+        return True
     except ProcessLookupError:
-        return
+        return True
     except PermissionError:
         pass
     except OSError:
-        return
-    sudo_run(
+        return False
+    r = sudo_run(
         ["kill", f"-{int(sig)}", str(vm.pid)],
         check=False,
         quiet=True,
     )
+    return r.returncode == 0
 
 
 def kill_qemu(vm: VMInfo) -> None:
@@ -1052,11 +1076,16 @@ def kill_qemu(vm: VMInfo) -> None:
     PID wraparound vm.pid can refer to an unrelated process (a shell,
     editor, another VM's qemu) and a SIGTERM/SIGKILL would happily
     take it down.  is_running() does the /proc/<pid>/comm check.
+
+    Dies, leaving PID in .info, when QEMU outlives both signals -- most
+    often a root QEMU whose `sudo kill` had no password.  Recording it
+    as stopped hid a live guest from list, stop and destroy, and the
+    next start failed on QEMU's locked pidfile.
     """
-    if vm.pid > 0 and is_running(vm):
-        _signal_qemu(vm, signal.SIGTERM)
+    if is_running(vm):
+        sent = _signal_qemu(vm, signal.SIGTERM)
         # Wait up to 5s for clean shutdown (qcow2 flush)
-        for _ in range(50):
+        for _ in range(50 if sent else 0):
             if not _pid_alive(vm.pid):
                 break
             time.sleep(0.1)
@@ -1064,8 +1093,18 @@ def kill_qemu(vm: VMInfo) -> None:
             # Still alive after 5s, force kill.  Re-check is_running
             # so we don't SIGKILL a PID that QEMU released to another
             # process during the 5-second wait.
-            if is_running(vm):
-                _signal_qemu(vm, signal.SIGKILL)
+            if is_running(vm) and _signal_qemu(vm, signal.SIGKILL):
+                for _ in range(20):
+                    if not _pid_alive(vm.pid):
+                        break
+                    time.sleep(0.1)
+            if _pid_alive(vm.pid) and is_running(vm):
+                die(
+                    f"{vm.name}: QEMU pid {vm.pid} is still running and "
+                    f"could not be signalled; it belongs to another "
+                    f"user. Stop it from a terminal: sudo ltvm stop "
+                    f"{vm.name}"
+                )
     try:
         vm.update_pid(0)
     except VMNotFound:

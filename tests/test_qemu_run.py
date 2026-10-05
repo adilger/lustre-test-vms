@@ -1334,20 +1334,81 @@ class TestKillQemu:
 
         def fake_kill(pid, sig):
             sent.append(sig)
-            # kill(0) always succeeds -> process stays alive through the loop
-            return None
+            # Alive through the SIGTERM grace period, gone after SIGKILL.
+            if sig == 0 and _signal.SIGKILL in sent:
+                raise ProcessLookupError
 
         with (
             patch("ltvm_pkg.qemu_run.run"),
             patch("ltvm_pkg.qemu_run.os.kill", side_effect=fake_kill),
             patch("ltvm_pkg.qemu_run.time.sleep"),
             patch("ltvm_pkg.qemu_run.Path") as mock_path,
-            patch.object(VMInfo, "update_pid"),
+            patch.object(VMInfo, "update_pid") as mock_update,
         ):
             mock_path.return_value.read_text.return_value = "qemu-system-x86\n"
             qemu_run.kill_qemu(vm)
         assert _signal.SIGTERM in sent
         assert _signal.SIGKILL in sent
+        mock_update.assert_called_once_with(0)
+
+    def test_unsignalable_qemu_is_not_marked_stopped(
+        self, tmp_vmdir: Path
+    ) -> None:
+        """A root QEMU whose `sudo kill` fails keeps its PID.
+
+        Recording PID=0 for it hid a live guest from list, stop and
+        destroy, and the next start failed on its locked pidfile.
+        """
+        vm = _make_vm(tmp_vmdir)
+        vm.pid = 555
+        refused = MagicMock(returncode=1)
+
+        def fake_kill(pid, sig):
+            if sig != 0:
+                raise PermissionError
+
+        with (
+            patch("ltvm_pkg.qemu_run.run"),
+            patch("ltvm_pkg.qemu_run.os.kill", side_effect=fake_kill),
+            patch("ltvm_pkg.qemu_run.sudo_run", return_value=refused) as sudo,
+            patch("ltvm_pkg.qemu_run.time.sleep"),
+            patch("ltvm_pkg.qemu_run.is_running", return_value=True),
+            patch.object(VMInfo, "update_pid") as mock_update,
+            pytest.raises(SystemExit),
+        ):
+            qemu_run.kill_qemu(vm)
+        mock_update.assert_not_called()
+        assert [c.args[0][1] for c in sudo.mock_calls] == ["-15", "-9"]
+
+
+class TestPidfileFallback:
+    """A live QEMU recorded as PID=0 is found through its pidfile."""
+
+    def test_live_qemu_in_pidfile_is_adopted(self, tmp_vmdir: Path) -> None:
+        vm = _make_vm(tmp_vmdir)
+        vm.pid = 0
+        vm.pid_path.write_text("51721\n")
+        with patch(
+            "ltvm_pkg.qemu_run._qemu_pid_is", return_value=True
+        ) as check:
+            assert qemu_run.is_running(vm)
+        check.assert_called_once_with(51721, vm.name)
+        assert vm.pid == 51721
+
+    def test_stale_pidfile_is_ignored(self, tmp_vmdir: Path) -> None:
+        vm = _make_vm(tmp_vmdir)
+        vm.pid = 0
+        vm.pid_path.write_text("51721\n")
+        with patch("ltvm_pkg.qemu_run._qemu_pid_is", return_value=False):
+            assert not qemu_run.is_running(vm)
+        assert vm.pid == 0
+
+    def test_no_pidfile(self, tmp_vmdir: Path) -> None:
+        vm = _make_vm(tmp_vmdir)
+        vm.pid = 0
+        with patch("ltvm_pkg.qemu_run._qemu_pid_is") as check:
+            assert not qemu_run.is_running(vm)
+        check.assert_not_called()
 
     def test_kill_qemu_tears_down_extra_taps(self, tmp_vmdir: Path) -> None:
         """kill_qemu must delete every TAP the VM owns, including extras.
