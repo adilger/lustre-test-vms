@@ -270,6 +270,10 @@ log = logging.getLogger("ltvm")
 # detected) after argparse completes.  See _reconcile_target_args().
 _TARGET_FLAG_DEST = "_target_flag"
 
+# Set by a subcommand whose trailing positionals may have options among
+# them: the dest that parse_cli() appends leftover words to.
+_EXTRA_POSITIONALS_DEST = "_extra_positionals"
+
 
 def _add_target_arg(
     subparser: argparse.ArgumentParser,
@@ -1959,12 +1963,11 @@ def build_parser() -> argparse.ArgumentParser:
     # them -- the same rule the old parser used, applied after argparse
     # rather than instead of it.
     #
-    # The cost: argparse matches positionals in contiguous runs, so an
-    # option *between* two specs ends the run and the rest come back as
-    # "unrecognized arguments".  Before or after the whole run both work,
-    # which is where the help puts them and where people type them.  The
-    # hand-rolled parser this replaced did not care, so that one form
-    # regressed; see tests/test_cli_target_forms.py for the pin.
+    # argparse matches positionals in contiguous runs, so an option
+    # *between* two specs ends the run and the rest come back as
+    # unrecognized; parse_cli() appends those to the specs
+    # (_EXTRA_POSITIONALS_DEST names where they go).
+    ccp.set_defaults(**{_EXTRA_POSITIONALS_DEST: "specs"})
     _ccp_specs = ccp.add_argument(
         "specs",
         nargs="+",
@@ -2412,6 +2415,35 @@ def _join_dash_valued_options(
     return out
 
 
+def parse_cli(
+    parser: argparse.ArgumentParser, argv: list[str]
+) -> argparse.Namespace:
+    """Parse *argv*, letting options sit between a command's positionals.
+
+    A subcommand that sets ``_EXTRA_POSITIONALS_DEST`` to the dest of
+    its trailing ``nargs="+"`` positional gets every leftover word that
+    is not an option appended to it, in order -- so `cluster create co2
+    rocky9 --mem 2048 mgs+mds:co2-mds:1` parses as it reads.  Done here
+    rather than with parse_intermixed_args, which refuses subparsers.
+    """
+    args, extras = parser.parse_known_args(
+        _join_dash_valued_options(argv, _known_option_strings(parser))
+    )
+    dest = getattr(args, _EXTRA_POSITIONALS_DEST, None)
+    if dest is not None:
+        delattr(args, _EXTRA_POSITIONALS_DEST)
+        if extras and not any(e.startswith("-") for e in extras):
+            getattr(args, dest).extend(extras)
+            extras = []
+    if extras:
+        # Reported by the subcommand that got them: its usage line names the
+        # flags it does take, where the top-level one names only subcommands.
+        _invoked_parser(parser, args).error(
+            "unrecognized arguments: " + " ".join(extras)
+        )
+    return args
+
+
 def main() -> int:
     parser = build_parser()
     # argcomplete hooks here when invoked via the bash completion shim
@@ -2424,15 +2456,7 @@ def main() -> int:
         argcomplete.autocomplete(parser)
     except ImportError:
         pass
-    args, extras = parser.parse_known_args(
-        _join_dash_valued_options(sys.argv[1:], _known_option_strings(parser))
-    )
-    if extras:
-        # Reported by the subcommand that got them: its usage line names the
-        # flags it does take, where the top-level one names only subcommands.
-        _invoked_parser(parser, args).error(
-            "unrecognized arguments: " + " ".join(extras)
-        )
+    args = parse_cli(parser, sys.argv[1:])
 
     level = logging.DEBUG if getattr(args, "verbose", False) else logging.INFO
     logging.basicConfig(level=level, format="%(name)s: %(message)s")

@@ -341,8 +341,6 @@ class TestClusterCreateTargetForms:
     def test_cluster_create_both_conflict(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # Options after the specs, not between them -- see
-        # test_option_between_specs_is_rejected below.
         rc, ns = self._run(
             [
                 "cluster",
@@ -368,32 +366,63 @@ class TestClusterCreateTargetForms:
             ["co9", "mgs+mds:co9-mds:1", "--vcpus", "4", "oss:co9-oss:3"],
         ],
     )
-    def test_option_between_specs_is_rejected(self, argv: list[str]) -> None:
-        """An option *between* node specs does not parse, by design.
+    def test_option_between_specs_works(self, argv: list[str]) -> None:
+        """argparse ends a positional run at an option; parse_cli()
+        appends the specs after it, in order."""
+        args = ltvm.parse_cli(ltvm.build_parser(), ["cluster", "create", *argv])
+        assert args.vcpus == 4
+        assert args.specs == [a for a in argv[1:] if a not in ("--vcpus", "4")]
+        assert not hasattr(args, ltvm._EXTRA_POSITIONALS_DEST)
 
-        The specs are one ``nargs="+"`` positional (they have to be --
-        see the class docstring), and argparse matches positionals in
-        contiguous runs: an option in the middle ends the run, so the
-        specs after it have nothing left to match and come back as
-        "unrecognized arguments".
+    def test_feedback_form_parses(self) -> None:
+        """Every flag between the target and the specs."""
+        args = ltvm.parse_cli(
+            ltvm.build_parser(),
+            "cluster create co1-dne rocky9 --kernel 5.14-rhel9.7 --mem 2048 "
+            "--vcpus 2 mgs+mds:co1-mds1:2 mds:co1-mds2:2 oss:co1-oss:2 "
+            "client:co1-client".split(),
+        )
+        assert args.specs == [
+            "rocky9",
+            "mgs+mds:co1-mds1:2",
+            "mds:co1-mds2:2",
+            "oss:co1-oss:2",
+            "client:co1-client",
+        ]
+        assert (args.kernel, args.mem, args.vcpus) == ("5.14-rhel9.7", 2048, 2)
 
-        Before the subparser conversion, cluster flags were matched by
-        hand in a loop that did not care where they appeared, so this one
-        form worked and no longer does.  Options before or after the
-        whole run of specs both work, which is where people put them --
-        and what the help output shows.  Pinned here so the limitation is
-        a known one rather than a surprise.
-        """
+    def test_unknown_option_among_specs_is_still_an_error(self) -> None:
         import contextlib
         import io
 
-        p = ltvm.build_parser()
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             with pytest.raises(SystemExit) as exc:
-                p.parse_args(["cluster", "create", *argv])
+                ltvm.parse_cli(
+                    ltvm.build_parser(),
+                    [
+                        "cluster",
+                        "create",
+                        "co9",
+                        "mgs+mds:co9-mds:1",
+                        "--bogus",
+                        "oss:co9-oss:3",
+                    ],
+                )
         assert exc.value.code == 2
-        assert "unrecognized arguments" in err.getvalue()
+        assert "unrecognized arguments: --bogus" in err.getvalue()
+
+    def test_other_commands_do_not_take_extra_positionals(self) -> None:
+        import contextlib
+        import io
+
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            with pytest.raises(SystemExit):
+                ltvm.parse_cli(
+                    ltvm.build_parser(), ["cluster", "status", "co9", "extra"]
+                )
+        assert "unrecognized arguments: extra" in err.getvalue()
 
     @pytest.mark.parametrize(
         "argv",

@@ -703,13 +703,13 @@ consequences worth knowing:
   after the role is passed through untouched (`lctl dl -t` keeps its
   `-t`).  The price is that ltvm's own flags must come *before* the
   role: `cluster exec co2 --timeout 30 oss uptime`, not after it.
-- **An option between two node specs does not parse.**  `create`'s specs
-  are one `nargs="+"` positional -- they have to be, or argparse would
-  assign a bare positional TARGET the first spec -- and argparse matches
-  positionals in contiguous runs, so an option in the middle ends the
-  run and the rest come back as "unrecognized arguments".  Before or
-  after the whole run both work.  The hand-rolled parser this replaced
-  did not care, so that one form regressed.
+- **`create`'s specs are one `nargs="+"` positional** -- they have to
+  be, or argparse would assign a bare positional TARGET the first spec.
+  argparse matches positionals in contiguous runs, so an option between
+  two specs ends the run and leaves the rest unrecognized; `parse_cli()`
+  in `ltvm` appends those leftovers to `specs` for any subcommand that
+  sets `_EXTRA_POSITIONALS_DEST`, so options go anywhere.  An unknown
+  option among them is still an error.
 
 A malformed cluster command line now exits 2 with a usage message rather
 than ltvm's own error (a JSON envelope under `--json`), which is what
