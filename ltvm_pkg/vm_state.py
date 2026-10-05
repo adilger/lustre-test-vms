@@ -494,9 +494,11 @@ def subnet_for_nic(idx: int) -> str:
 
 MARKER = "# qemu-vm"
 ROOT_PASSWORD = "initial0"
-# Cross-arch (TCG) boots are 5-20x slower than native; let operators bump
-# the wait-for-SSH timeout without patching the source.
-SSH_TIMEOUT = int(os.environ.get("LTVM_SSH_TIMEOUT", "30"))
+# How long create and start wait for a guest to answer ssh.  First boot
+# has taken over 30s beside a Lustre build, and the wait ends as soon as
+# ssh answers or QEMU exits, so the default is generous.  Cross-arch
+# (TCG) boots are 5-20x slower again: LTVM_SSH_TIMEOUT.
+SSH_TIMEOUT = int(os.environ.get("LTVM_SSH_TIMEOUT", "120"))
 DEFAULT_TARGET = "rocky9"
 
 

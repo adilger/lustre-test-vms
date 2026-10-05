@@ -20,7 +20,7 @@ from .priv import atomic_write as _priv_atomic_write
 from .priv import ensure_dir as _ensure_dir
 from .priv import ensure_lock_file as _ensure_lock_file
 from .priv import sudo_ready, sudo_run
-from .qemu_run import die, run
+from .qemu_run import die, is_running, run
 from .vm_state import (
     MARKER,
     ROOT_PASSWORD,
@@ -819,9 +819,9 @@ def provision_vm_ssh(
     """
     if register_before_wait:
         register_ssh_name(vm.name, vm.ip)
-        wait_for_ssh(vm.ip, timeout)
+        wait_for_ssh(vm.ip, timeout, vm=vm)
     else:
-        wait_for_ssh(vm.ip, timeout)
+        wait_for_ssh(vm.ip, timeout, vm=vm)
         register_ssh_name(vm.name, vm.ip)
     deploy_ssh_key(vm.ip)
 
@@ -882,7 +882,9 @@ def ssh_client_config_error(host: str) -> str | None:
     return _one_line(r.stderr or "") or f"`ssh -G` exited {r.returncode}"
 
 
-def wait_for_ssh(ip: str, max_wait: int = 30) -> None:
+def wait_for_ssh(
+    ip: str, max_wait: int = 30, *, vm: VMInfo | None = None
+) -> None:
     """Wait for SSH to become available on a VM.
 
     `max_wait` is wall-clock seconds.  Each probe can take up to its
@@ -894,8 +896,8 @@ def wait_for_ssh(ip: str, max_wait: int = 30) -> None:
     A FileNotFoundError here means sshpass/ssh aren't on PATH, which is
     a host-setup bug we want to surface immediately rather than masquerade
     as "SSH not ready".  So is an ssh that fails on this host before it
-    connects (ssh_permanent_failure).  Otherwise the timeout error
-    carries the last probe's stderr.
+    connects (ssh_permanent_failure), and, given *vm*, a QEMU that has
+    exited.  Otherwise the timeout error carries the last probe's stderr.
     """
     # Announce the wait: this is the one step in create/start that can
     # take tens of seconds, and it is silent otherwise.  stderr, so
@@ -927,6 +929,11 @@ def wait_for_ssh(ip: str, max_wait: int = 30) -> None:
         except FileNotFoundError as e:
             die(
                 f"required command missing on host ({e}); is sshpass installed?"
+            )
+        if vm is not None and vm.pid > 0 and not is_running(vm):
+            die(
+                f"QEMU for {vm.name} exited while waiting for ssh on {ip}; "
+                f"`ltvm vm console-log {vm.name}` shows why"
             )
         time.sleep(1)
     elapsed = int(time.monotonic() - start)

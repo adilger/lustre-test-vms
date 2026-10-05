@@ -479,7 +479,6 @@ def _create_one_node(
 
 # Headroom over the inner `ltvm create`'s own wait-for-SSH budget:
 # cold boot, disk creation and first-boot work all happen outside it.
-# 270 keeps the historical 300s total at the default SSH_TIMEOUT of 30.
 _NODE_CREATE_HEADROOM = 270
 
 

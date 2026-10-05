@@ -269,14 +269,14 @@ ltvm cluster create co2 --kernel 5.14-rhel9.3 mgs+mds:co2-mds:1 oss:co2-oss:2
 `--wait`, and `cluster destroy` accepts `--force`/`--yes` though it
 never prompts.
 
-Create and start wait 30 seconds for a guest to answer ssh. On a loaded
-host, with several guests booting at once, that can run out while they
-are still booting ("SSH not ready after 30s"); export
-`LTVM_SSH_TIMEOUT=<seconds>` to wait longer rather than retrying. That
-error ends with the last thing ssh said: read it before blaming a slow
-boot. An ssh that fails on the host itself, such as a config file with
-bad owner or permissions, stops the wait at once with "fails on this
-host, not in the guest"; `ltvm doctor` checks the ssh client config.
+Create and start wait up to 120 seconds for a guest to answer ssh, and
+stop sooner if its QEMU exits. A host busy enough to run out of that
+("SSH not ready after 120s") wants `LTVM_SSH_TIMEOUT=<seconds>` exported,
+not a retry. That error ends with the last thing ssh said: read it
+before blaming a slow boot. An ssh that fails on the host itself, such
+as a config file with bad owner or permissions, stops the wait at once
+with "fails on this host, not in the guest"; `ltvm doctor` checks the
+ssh client config.
 
 Options can go anywhere after `cluster create <name>`, between the
 target and the node specs included.

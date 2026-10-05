@@ -630,6 +630,48 @@ class TestWaitForSsh:
             wait_for_ssh("192.168.100.50", max_wait=5)  # should not raise
 
 
+class TestWaitForSshQemuExit:
+    """Given the VM, the wait ends once its QEMU is gone."""
+
+    def _run(self, running: bool, pid: int = 4242) -> tuple[int, str]:
+        from ltvm_pkg.vm_net import wait_for_ssh
+        from ltvm_pkg.vm_state import VMInfo
+
+        vm = VMInfo(name="co9-x", ip="192.168.100.9", pid=pid)
+        clock = _FakeClock()
+        with (
+            patch(
+                "ltvm_pkg.vm_net.run_ssh",
+                return_value=_ssh_result(255, "Connection refused"),
+            ) as probe,
+            patch("ltvm_pkg.vm_net.is_running", return_value=running),
+            patch(
+                "ltvm_pkg.vm_net.time.monotonic", side_effect=clock.monotonic
+            ),
+            patch("ltvm_pkg.vm_net.time.sleep", side_effect=clock.sleep),
+            patch("ltvm_pkg.vm_net.die", side_effect=SystemExit) as die,
+        ):
+            with pytest.raises(SystemExit):
+                wait_for_ssh(vm.ip, max_wait=120, vm=vm)
+        return probe.call_count, die.call_args.args[0]
+
+    def test_exited_qemu_stops_the_wait(self) -> None:
+        calls, msg = self._run(running=False)
+        assert calls == 1
+        assert "QEMU for co9-x exited" in msg
+        assert "console-log co9-x" in msg
+
+    def test_live_qemu_waits_out_the_timeout(self) -> None:
+        calls, msg = self._run(running=True)
+        assert calls > 1
+        assert "SSH not ready after" in msg
+
+    def test_unknown_pid_is_not_taken_as_exited(self) -> None:
+        calls, msg = self._run(running=False, pid=0)
+        assert calls > 1
+        assert "SSH not ready after" in msg
+
+
 class _FakeClock:
     """time.monotonic that only moves when wait_for_ssh sleeps."""
 
