@@ -518,6 +518,23 @@ def configure_fstype(ip: str, fstype: str, os_family: str = "rhel") -> None:
         )
 
 
+def targets_unformatted(vm: VMInfo) -> bool:
+    """True when the VM's first target disk holds no filesystem.
+
+    Only llmount.sh, or a suite run with REFORMAT=yes, formats the
+    targets; a plain sanity.sh on such a VM fails setup with "has not
+    been formatted with mkfs.lustre".  False whenever it cannot tell.
+    """
+    if not (vm.mdt_disks or vm.ost_disks):
+        return False
+    try:
+        r = run_ssh(vm.ip, "blkid -p -s TYPE -o value /dev/vdb", timeout=15)
+    except subprocess.TimeoutExpired:
+        return False
+    # blkid exits 2 when the device carries nothing it can identify.
+    return r.returncode == 2
+
+
 def lustre_mount_vm(name: str, os_family: str, *, quiet: bool = False) -> int:
     """Run llmount.sh inside a VM. Returns exit code.
 

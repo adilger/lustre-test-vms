@@ -300,6 +300,13 @@ ssh co1-single 'sudo -E ONLY=42a bash /usr/lib64/lustre/tests/sanity.sh'
 ssh co1-single 'sudo -E auster -s sanity --only 42a'
 ```
 
+Mount first. Only llmount.sh formats the targets, so on a VM that has
+never been mounted a bare `sanity.sh` fails setup with "has not been
+formatted with mkfs.lustre". `deploy-lustre --mount` or `ltvm llmount
+<vm>` does it (`ltvm cluster llmount <cluster>` for a cluster), and
+`deploy-lustre` without `--mount` says so when the targets are blank.
+`REFORMAT=yes` on the suite, or `auster -r`, formats as well.
+
 Auster logs land in `/tmp/test_logs/YYYY-MM-DD/HHMMSS/` inside the VM.
 Redirect long runs to a file and grep the file afterwards rather than
 piping a slow command through `grep`.

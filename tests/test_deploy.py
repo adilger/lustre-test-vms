@@ -1956,3 +1956,37 @@ class TestDeployRamOstWiring:
         ):
             deploy.deploy_to_vm(vm, staging, ram_osts=4)
         assert calls == ["virtio", "ram"], calls
+
+
+class TestTargetsUnformatted:
+    """deploy-lustre's hint that a suite needs llmount.sh first."""
+
+    def _check(self, rc: int, **disks: int) -> tuple[bool, MagicMock]:
+        vm = VMInfo(name="co9-x", ip="192.168.100.9", **disks)
+        with patch.object(
+            deploy, "run_ssh", return_value=MagicMock(returncode=rc)
+        ) as ssh:
+            return deploy.targets_unformatted(vm), ssh
+
+    def test_blank_disk_is_unformatted(self) -> None:
+        unformatted, ssh = self._check(2, mdt_disks=1, ost_disks=2)
+        assert unformatted
+        assert "/dev/vdb" in ssh.call_args.args[1]
+
+    def test_formatted_disk_is_not(self) -> None:
+        assert not self._check(0, mdt_disks=1)[0]
+
+    def test_blkid_error_is_not_taken_as_blank(self) -> None:
+        assert not self._check(4, ost_disks=1)[0]
+
+    def test_no_disks_asks_nothing(self) -> None:
+        unformatted, ssh = self._check(2)
+        assert not unformatted
+        assert not ssh.called
+
+    def test_hung_ssh_is_not_taken_as_blank(self) -> None:
+        vm = VMInfo(name="co9-x", ip="192.168.100.9", mdt_disks=1)
+        with patch.object(
+            deploy, "run_ssh", side_effect=subprocess.TimeoutExpired("ssh", 15)
+        ):
+            assert not deploy.targets_unformatted(vm)

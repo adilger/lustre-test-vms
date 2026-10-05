@@ -686,6 +686,14 @@ def cmd_deploy(args: argparse.Namespace) -> int:
 
     if not use_json:
         print(f"  Deployed Lustre to {args.vm}")
+        if not args.mount and _cli_attr("targets_unformatted")(vm):
+            print(
+                f"  Its targets are not formatted yet: `ltvm llmount "
+                f"{args.vm}` (or llmount.sh in the VM) formats and mounts "
+                f"them.  A suite run before that needs REFORMAT=yes "
+                f'(auster -r), or fails with "has not been formatted '
+                f'with mkfs.lustre".'
+            )
 
     # Optionally mount Lustre
     mounted = False

@@ -60,6 +60,7 @@ from ltvm_pkg.deploy import (
     deploy_to_vm,
     lustre_mount_vm,
     retire_stale_zfs,
+    targets_unformatted,
 )
 from ltvm_pkg.image_build import build_image, image_status
 from ltvm_pkg.kernel_build import (
@@ -280,6 +281,7 @@ __all__ = [
     "logging",
     "lustre_mount_vm",
     "retire_stale_zfs",
+    "targets_unformatted",
     "os",
     "package_target",
     "_hash_file",
