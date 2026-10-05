@@ -30,6 +30,7 @@ import pytest
 
 import ltvm_pkg
 from ltvm_pkg import cli as ltvm_cli
+from ltvm_pkg import version_info
 from ltvm_pkg.cli import EXIT_ERROR, EXIT_OK, cmd_update
 
 # ---------------------------------------------------------------------------
@@ -75,46 +76,114 @@ class TestVersion:
     def test_version_starts_with_base_version(self) -> None:
         base = ltvm_pkg.BASE_VERSION
         v = ltvm_pkg.__version__
-        assert v == base or v.startswith(base + "."), (
-            f"__version__ ({v!r}) should be {base!r} or {base!r}.<hash>"
+        assert re.fullmatch(re.escape(base) + r"(\.\d+)?(\+[0-9a-f]+)?", v), (
+            f"__version__ ({v!r}) should be {base!r}[.<count>][+<hash>]"
         )
 
-    def test_compute_version_uses_baked_hash(self) -> None:
-        """When _build_info.BUILD_HASH exists, _compute_version uses it."""
+    def test_compute_version_uses_baked_version(self) -> None:
+        """When _build_info.VERSION exists, _compute_version uses it."""
+        fake = type(sys)("ltvm_pkg._build_info")
+        fake.BUILD_HASH = "deadbee"  # type: ignore[attr-defined]
+        fake.VERSION = "0.5.680+deadbee"  # type: ignore[attr-defined]
+        with patch.dict(sys.modules, {"ltvm_pkg._build_info": fake}):
+            assert ltvm_pkg._compute_version() == "0.5.680+deadbee"
+
+    def test_compute_version_reads_an_old_build_info(self) -> None:
+        """One baked before VERSION existed has only BUILD_HASH."""
         fake = type(sys)("ltvm_pkg._build_info")
         fake.BUILD_HASH = "deadbee"  # type: ignore[attr-defined]
         with patch.dict(sys.modules, {"ltvm_pkg._build_info": fake}):
             assert (
                 ltvm_pkg._compute_version()
-                == f"{ltvm_pkg.BASE_VERSION}.deadbee"
+                == f"{ltvm_pkg.BASE_VERSION}+deadbee"
             )
 
     def test_compute_version_falls_back_to_git(self) -> None:
-        """No _build_info → fall back to _git_short_hash."""
+        """No _build_info → ask git."""
         with (
             patch.dict(sys.modules, {"ltvm_pkg._build_info": None}),
-            patch.object(ltvm_pkg, "_git_short_hash", return_value="cafef00"),
+            patch.object(
+                ltvm_pkg, "git_version", return_value=("0.5.7+cafef00", "x")
+            ),
         ):
-            assert (
-                ltvm_pkg._compute_version()
-                == f"{ltvm_pkg.BASE_VERSION}.cafef00"
-            )
+            assert ltvm_pkg._compute_version() == "0.5.7+cafef00"
 
     def test_compute_version_bare_when_no_git(self) -> None:
         """No _build_info and git unavailable → just BASE_VERSION."""
         with (
             patch.dict(sys.modules, {"ltvm_pkg._build_info": None}),
-            patch.object(ltvm_pkg, "_git_short_hash", return_value=None),
+            patch.object(ltvm_pkg, "git_version", return_value=None),
         ):
             assert ltvm_pkg._compute_version() == ltvm_pkg.BASE_VERSION
 
-    def test_git_short_hash_handles_missing_git(self, tmp_path: Path) -> None:
-        """If the parent dir isn't a git checkout, return None."""
-        fake_init = tmp_path / "ltvm_pkg" / "__init__.py"
-        fake_init.parent.mkdir()
-        fake_init.write_text("")
-        with patch.object(ltvm_pkg, "__file__", str(fake_init)):
-            assert ltvm_pkg._git_short_hash() is None
+    def test_git_version_handles_missing_git(self, tmp_path: Path) -> None:
+        """If the directory isn't a git checkout, return None."""
+        assert version_info.git_version(tmp_path) is None
+
+
+class TestVersionFromTag:
+    """git describe against the vMAJOR.MINOR tag names the version."""
+
+    def test_commits_since_the_tag(self) -> None:
+        assert (
+            version_info.version_from("71992dd8", "v0.5-680-g71992dd8\n")
+            == "0.5.680+71992dd8"
+        )
+
+    def test_on_the_tag(self) -> None:
+        assert version_info.version_from("ec6ff88b", "v0.5-0-gec6ff88b") == (
+            "0.5.0+ec6ff88b"
+        )
+
+    def test_no_tag(self) -> None:
+        assert version_info.version_from("71992dd8", "") == (
+            f"{version_info.BASE_VERSION}+71992dd8"
+        )
+
+    def test_only_version_tags(self) -> None:
+        """Artifact tags share the repo; describe is limited to v*."""
+        assert "--match" in version_info.describe_args()
+        assert version_info.TAG_GLOB == "v[0-9]*"
+
+    def test_real_repo(self, tmp_path: Path) -> None:
+        def git(*args: str) -> None:
+            subprocess.run(
+                ["git", "-C", str(tmp_path), *args],
+                check=True,
+                capture_output=True,
+            )
+
+        git("init", "-q")
+        git(
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "base",
+        )
+        git("tag", "-a", "v0.5", "-m", "0.5")
+        git("tag", "rocky9-x86_64-artifacts")
+        for i in range(3):
+            git(
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                str(i),
+            )
+        git("tag", "qemu-9.2.2")
+        got = version_info.git_version(tmp_path)
+        assert got is not None
+        version, short = got
+        assert version == f"0.5.3+{short}"
 
 
 # ---------------------------------------------------------------------------
@@ -285,6 +354,10 @@ class TestCmdUpdate:
                     stdout="Updating aaaa..bbbb\nFast-forward\n",
                     stderr="",
                 )
+            if args[:1] == ("describe",):
+                return subprocess.CompletedProcess(
+                    args=list(args), returncode=128, stdout="", stderr=""
+                )
             if args[:1] == ("rev-parse",):
                 return subprocess.CompletedProcess(
                     args=list(args), returncode=0, stdout="bbbbbbb\n", stderr=""
@@ -333,6 +406,10 @@ class TestCmdUpdate:
                     stdout="Updating aaaa..bbbb\nFast-forward\n",
                     stderr="",
                 )
+            if args[:1] == ("describe",):
+                return subprocess.CompletedProcess(
+                    args=list(args), returncode=128, stdout="", stderr=""
+                )
             if args[:1] == ("rev-parse",):
                 return subprocess.CompletedProcess(
                     args=list(args), returncode=0, stdout="bbbbbbb\n", stderr=""
@@ -375,6 +452,10 @@ class TestCmdUpdate:
                     returncode=0,
                     stdout="Already up to date.\n",
                     stderr="",
+                )
+            if args[:1] == ("describe",):
+                return subprocess.CompletedProcess(
+                    args=list(args), returncode=128, stdout="", stderr=""
                 )
             if args[:1] == ("rev-parse",):
                 return subprocess.CompletedProcess(
@@ -541,23 +622,23 @@ class TestVersionRefreshAfterUpdate:
         original = build_info.read_text() if build_info.exists() else None
 
         try:
-            build_info.write_text('BUILD_HASH = "aaaaaaa"\n')
+            build_info.write_text('VERSION = "0.5.1+aaaaaaa"\n')
             # Prime both caches the way package import does.
             _sys.modules.pop("ltvm_pkg._build_info", None)
             importlib.import_module("ltvm_pkg._build_info")
-            assert ltvm_pkg._compute_version(refresh=True).endswith(".aaaaaaa")
+            assert ltvm_pkg._compute_version(refresh=True).endswith("+aaaaaaa")
 
             # cmd_update rewrites the file with the post-pull hash.
             # Same length as the previous content, written within the
             # same second -- so a .pyc revalidated on (mtime, size) is
             # still considered current, which is why re-importing is
             # not enough and the refresh path reads the file.
-            build_info.write_text('BUILD_HASH = "bbbbbbb"\n')
+            build_info.write_text('VERSION = "0.5.2+bbbbbbb"\n')
 
             # The already-imported module still holds the old hash...
-            assert ltvm_pkg._compute_version().endswith(".aaaaaaa")
+            assert ltvm_pkg._compute_version().endswith("+aaaaaaa")
             # ...and refresh reports what is actually on disk.
-            assert ltvm_pkg._compute_version(refresh=True).endswith(".bbbbbbb")
+            assert ltvm_pkg._compute_version(refresh=True).endswith("+bbbbbbb")
         finally:
             if original is not None:
                 build_info.write_text(original)

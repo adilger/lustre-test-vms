@@ -29,24 +29,31 @@ nothing to copy into a workspace CLAUDE.md.
 
 ## Versioning and git hooks
 
-`pyproject.toml` carries the full version; `BASE_VERSION` in
-`ltvm_pkg/__init__.py` carries its major.minor, and `ltvm --version`
-reports that plus the short commit hash.
+The version comes from git, not from a file that every commit edits:
+`git describe` against the newest annotated `vMAJOR.MINOR` tag, so
+`v0.5-114-g71992dd888ab` is reported as `0.5.114+71992dd888ab` -- commits
+since the tag, plus the hash ([ltvm_pkg/version_info.py](ltvm_pkg/version_info.py)).
+Only `v*` tags count; the artifact and QEMU release tags share the repo.
+Without the tag (a shallow clone) it is `BASE_VERSION+<hash>`, and
+without git just `BASE_VERSION`.
 
-The tracked hooks in `.githooks/` keep both honest, and are enabled per
-clone:
+A new minor or major version is a new tag on master, with `BASE_VERSION`
+in `ltvm_pkg/version_info.py` and `version` in `pyproject.toml` moved to
+match:
+
+```bash
+git tag -a v0.6 -m "ltvm 0.6" && git push origin v0.6
+```
+
+The tracked hooks in `.githooks/` are enabled per clone:
 
 ```bash
 make hooks        # git config core.hooksPath .githooks
 ```
 
-`pre-commit` runs ruff and mypy, then `.githooks/bump-version` bumps the
-patch version when the staged commit touches `ltvm`, `ltvm_pkg/` or
-`targets/` -- docs-, test- and hook-only commits do not move it, and a
-version edited by hand in the same commit is left alone. It refuses the
-commit when `BASE_VERSION` and `pyproject.toml` disagree, and carries
-the new version into `uv.lock` so the commit does not end dirty. `post-commit`
-bakes the new hash into `ltvm_pkg/_build_info.py`.
+`pre-commit` runs ruff and mypy.  `post-commit` bakes the version into
+`ltvm_pkg/_build_info.py` (gitignored), as `ltvm update` does after a
+pull, so `ltvm --version` does not run git on every invocation.
 
 ## Agent Skills
 
