@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import platform
+from collections import namedtuple
 from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -54,6 +55,11 @@ def doctor_env(tmp_vmdir: Path, tmp_path: Path) -> Iterator[dict]:
 
     # `ip link` returns nothing (no tap devices)
     ip_out = MagicMock(returncode=0, stdout="", stderr="")
+    # A healthy artifacts volume, whatever the host's; the disk tests
+    # patch disk_usage again inside.
+    plenty = namedtuple("Usage", "total used free")(
+        500 * 1024**3, 100 * 1024**3, 400 * 1024**3
+    )
 
     with (
         patch("ltvm_pkg.vm_commands.Path", side_effect=lambda p: Path(p)),
@@ -75,6 +81,7 @@ def doctor_env(tmp_vmdir: Path, tmp_path: Path) -> Iterator[dict]:
             return_value=([], [], 0),
         ),
         patch("ltvm_pkg.vm_commands.is_running", return_value=False),
+        patch("shutil.disk_usage", return_value=plenty),
     ):
         # cmd_doctor reads vm_commands.HOSTS_FILE (re-exported from
         # vm_net), so redirect that module attribute to the fake.
