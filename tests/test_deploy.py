@@ -98,18 +98,18 @@ class TestConfigureTestDisks:
     def test_mdt_only_starts_at_vdb(self) -> None:
         """Single MDT disk maps to /dev/vdb (vda is rootfs)."""
         script = self._capture_script(mdt=1, ost=0)
-        assert "MDSCOUNT=1" in script
+        assert "MDSCOUNT=${_ltvm_env_MDSCOUNT:-1}" in script
         assert "MDSDEV1=/dev/vdb" in script
-        assert "OSTCOUNT" not in script
+        assert "OSTCOUNT=${_ltvm_env_OSTCOUNT" not in script
 
     def test_mdt_and_ost_ordering(self) -> None:
         """MDT disks come first, then OST disks in allocation order."""
         # mdt=2, ost=3: MDSDEV1=vdb, MDSDEV2=vdc, OSTDEV1=vdd, vde, vdf
         script = self._capture_script(mdt=2, ost=3)
-        assert "MDSCOUNT=2" in script
+        assert "MDSCOUNT=${_ltvm_env_MDSCOUNT:-2}" in script
         assert "MDSDEV1=/dev/vdb" in script
         assert "MDSDEV2=/dev/vdc" in script
-        assert "OSTCOUNT=3" in script
+        assert "OSTCOUNT=${_ltvm_env_OSTCOUNT:-3}" in script
         assert "OSTDEV1=/dev/vdd" in script
         assert "OSTDEV2=/dev/vde" in script
         assert "OSTDEV3=/dev/vdf" in script
@@ -117,10 +117,10 @@ class TestConfigureTestDisks:
     def test_ost_only(self) -> None:
         """OST-only VMs get OSTDEV1=vdb (skipping the MDT range)."""
         script = self._capture_script(mdt=0, ost=2)
-        assert "OSTCOUNT=2" in script
+        assert "OSTCOUNT=${_ltvm_env_OSTCOUNT:-2}" in script
         assert "OSTDEV1=/dev/vdb" in script
         assert "OSTDEV2=/dev/vdc" in script
-        assert "MDSCOUNT" not in script
+        assert "MDSCOUNT=${_ltvm_env_MDSCOUNT" not in script
 
     def test_disk_size_in_kb(self) -> None:
         """disk_size_bytes emits MDSSIZE/OSTSIZE in kilobytes."""
@@ -1851,14 +1851,14 @@ class TestConfigureRamOsts:
         script = self._capture_script(count=4)
         for n, dev in enumerate(("ram0", "ram1", "ram2", "ram3"), start=1):
             assert f"OSTDEV{n}=/dev/{dev}" in script
-        assert "OSTCOUNT=4" in script
+        assert "OSTCOUNT=${_ltvm_env_OSTCOUNT:-4}" in script
 
     def test_mdt_untouched_by_default(self) -> None:
         """Without --ram-mdt the MDT keeps whatever it had; emitting an
         MDSDEV here would silently override the virtio mapping."""
         script = self._capture_script(count=4)
         assert "MDSDEV" not in script
-        assert "MDSCOUNT" not in script
+        assert "MDSCOUNT=${_ltvm_env_MDSCOUNT" not in script
 
     def test_ram_mdt_takes_the_device_after_the_osts(self) -> None:
         script = self._capture_script(count=4, ram_mdt=True)

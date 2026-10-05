@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from ltvm_pkg import vm_cluster
+from ltvm_pkg.deploy import ENV_SAVE_BEGIN
 from ltvm_pkg.vm_state import ClusterInfo
 
 # ── parse_node_spec ──────────────────────────────────────
@@ -155,10 +156,10 @@ class TestGenerateLocalSh:
         # combined=True -> no separate MGSDEV
         assert "MGSDEV" not in text
         assert "mds_HOST=co2-mds" in text
-        assert "MDSCOUNT=1" in text
+        assert "MDSCOUNT=${_ltvm_env_MDSCOUNT:-1}" in text
         assert "MDSDEV1=/dev/vdb" in text
         assert "ost_HOST=co2-oss" in text
-        assert "OSTCOUNT=3" in text
+        assert "OSTCOUNT=${_ltvm_env_OSTCOUNT:-3}" in text
         # OSS is not MDS/MGS, so ost disks start at vdb
         assert "OSTDEV1=/dev/vdb" in text
         assert "OSTDEV2=/dev/vdc" in text
@@ -190,7 +191,7 @@ class TestGenerateLocalSh:
             ("co-oss", ["oss"], 0, 1, "10.0.0.4"),
         )
         text = vm_cluster.generate_local_sh(c)
-        assert "MDSCOUNT=2" in text
+        assert "MDSCOUNT=${_ltvm_env_MDSCOUNT:-2}" in text
         assert "MDSDEV1=/dev/vdb" in text
         assert "MDSDEV2=/dev/vdb" in text  # each on its own node
         assert "mds1_HOST=co-mds1" in text
@@ -204,7 +205,7 @@ class TestGenerateLocalSh:
             ("co-oss2", ["oss"], 0, 1, "10.0.0.3"),
         )
         text = vm_cluster.generate_local_sh(c)
-        assert "OSTCOUNT=3" in text
+        assert "OSTCOUNT=${_ltvm_env_OSTCOUNT:-3}" in text
         # oss1: OST 1+2, vdb+vdc on co-oss1; oss2: OST 3, vdb on co-oss2
         assert "OSTDEV1=/dev/vdb" in text
         assert "OSTDEV2=/dev/vdc" in text
@@ -510,13 +511,16 @@ class TestClusterBlockKeepsTheStockLocalSh:
             ["bash", "-c", script], input=local_sh, text=True, check=True
         )
 
-    def _source(self, cfg: Path, *names: str) -> list[str]:
+    def _source(
+        self, cfg: Path, *names: str, env: dict[str, str] | None = None
+    ) -> list[str]:
         echo = "; ".join(f'echo "${name}"' for name in names)
         out = subprocess.run(
             ["bash", "-c", f". {cfg}; {echo}"],
             capture_output=True,
             text=True,
             check=True,
+            env={"PATH": "/usr/bin:/bin", **(env or {})},
         )
         return out.stdout.splitlines()
 
@@ -556,7 +560,9 @@ class TestClusterBlockKeepsTheStockLocalSh:
         body = cfg.read_text()
         assert body.count("# --- Cluster configuration") == 1
         assert body.count("# --- END cluster configuration") == 1
-        assert body.startswith(self.STOCK)
+        assert body.count(ENV_SAVE_BEGIN) == 1
+        assert body.startswith(ENV_SAVE_BEGIN)
+        assert self.STOCK in body
 
     def test_the_block_is_valid_shell(self) -> None:
         r = subprocess.run(
@@ -574,6 +580,26 @@ class TestClusterBlockKeepsTheStockLocalSh:
         cfg.parent.mkdir()
         self._write(cfg, vm_cluster.generate_local_sh(self._cluster()))
         assert "mds_HOST=co2-mds" in cfg.read_text()
+
+    def test_the_environment_sets_the_counts(self, tmp_path: Path) -> None:
+        """MDSCOUNT=1 sanity.sh runs one MDT, as on a stock local.sh,
+        though the cluster's block comes after the stock defaults."""
+        cfg = tmp_path / "cfg" / "local.sh"
+        cfg.parent.mkdir()
+        cfg.write_text(self.STOCK + self.DISK_BLOCK)
+        self._write(cfg, vm_cluster.generate_local_sh(self._cluster()))
+
+        assert self._source(cfg, "OSTCOUNT") == ["3"]
+        assert self._source(cfg, "OSTCOUNT", env={"OSTCOUNT": "1"}) == ["1"]
+        # The framework sources the file again; the count stays put.
+        out = subprocess.run(
+            ["bash", "-c", f'. {cfg}; . {cfg}; echo "$OSTCOUNT"'],
+            capture_output=True,
+            text=True,
+            check=True,
+            env={"PATH": "/usr/bin:/bin", "OSTCOUNT": "1"},
+        )
+        assert out.stdout.split() == ["1"]
 
 
 class TestGuestHostsBlock:

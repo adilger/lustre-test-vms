@@ -314,19 +314,29 @@ piping a slow command through `grep`.
 The VM's shape is in `cfg/local.sh`: deploy appends blocks setting
 `MDSCOUNT`, `OSTCOUNT`, `MDSDEV*`/`OSTDEV*`, the sizes and `FSTYPE` (and
 on a cluster which node holds what) after the stock `${VAR:-default}`
-lines. They are plain assignments, so the environment does not override
-them -- `MDSCOUNT=1 sanity.sh` on a VM with two MDT disks still runs two
-MDTs. To run fewer targets than the VM has, point `CONFIG` at a file
-that sources local.sh and then sets them, and reformat with it:
+lines. The two counts still take the environment's value, as on a stock
+tree, so `MDSCOUNT=1` or `OSTCOUNT=1` runs fewer targets than the VM has
+(never more: there are no devices past its disks). Reformat with the
+same count:
 
 ```bash
-ssh co1-single 'printf ". /usr/lib64/lustre/tests/cfg/local.sh\nMDSCOUNT=1\n" > /root/one-mdt.sh'
-ssh co1-single 'cd /usr/lib64/lustre/tests && CONFIG=/root/one-mdt.sh bash llmount.sh'
-ssh co1-single 'CONFIG=/root/one-mdt.sh ONLY=42a bash /usr/lib64/lustre/tests/sanity.sh'
+ssh co1-single 'cd /usr/lib64/lustre/tests && MDSCOUNT=1 bash llmount.sh'
+ssh co1-single 'MDSCOUNT=1 ONLY=42a bash /usr/lib64/lustre/tests/sanity.sh'
 ```
 
-On a cluster the file has to exist on every node (`cluster exec`), since
-the servers source it too. Or create the VM with the disks you want.
+The rest -- devices, sizes, `FSTYPE` -- are plain assignments and win
+over the environment. A VM deployed by an older ltvm takes the counts
+from the environment only after its next deploy.
+
+On a cluster the servers run parts of a suite (`rpc.sh`) from their own
+`local.sh`, without the client's environment. There, point `CONFIG` at a
+file that sources local.sh and then sets the count, on every node
+(`cluster exec`):
+
+```bash
+printf '. /usr/lib64/lustre/tests/cfg/local.sh\nMDSCOUNT=1\n' > /root/one-mdt.sh
+CONFIG=/root/one-mdt.sh ONLY=42a bash /usr/lib64/lustre/tests/sanity.sh
+```
 
 ## Crashes and hangs
 

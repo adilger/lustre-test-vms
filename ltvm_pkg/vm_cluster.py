@@ -228,6 +228,8 @@ def generate_local_sh(
     and llmount formats every target from the first client: without
     them it falls back to the framework's few-hundred-MB defaults.
     """
+    from ltvm_pkg.deploy import env_count
+
     if fstype not in ("ldiskfs", "zfs"):
         raise ValueError(f"unsupported fstype: {fstype!r}")
     mgs = cluster.mgs_node()
@@ -265,7 +267,7 @@ def generate_local_sh(
     if mds_list:
         lines.append(f"mds_HOST={mds_list[0].name}")
         total_mdts = sum(n.mdt_disks for n in mds_list)
-        lines.append(f"MDSCOUNT={total_mdts}")
+        lines.append(env_count("MDSCOUNT", total_mdts))
         mds_kb = _min_disk_kb(mds_list, disk_sizes)
         if mds_kb:
             lines.append(f"MDSSIZE={mds_kb}")
@@ -292,7 +294,7 @@ def generate_local_sh(
     if oss_list:
         lines.append(f"ost_HOST={oss_list[0].name}")
         total_osts = sum(n.ost_disks for n in oss_list)
-        lines.append(f"OSTCOUNT={total_osts}")
+        lines.append(env_count("OSTCOUNT", total_osts))
         ost_kb = _min_disk_kb(oss_list, disk_sizes)
         if ost_kb:
             lines.append(f"OSTSIZE={ost_kb}")
