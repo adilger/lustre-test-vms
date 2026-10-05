@@ -528,7 +528,9 @@ class TestSharedRegistration:
     def paths(
         self, tmp_path: Path, hosts_dir: Path
     ) -> Iterator[dict[str, Path]]:
-        etc_hosts = tmp_path / "etc-hosts"
+        # Its own directory: a write needs that directory, not the file.
+        (tmp_path / "etc").mkdir()
+        etc_hosts = tmp_path / "etc" / "hosts"
         etc_hosts.write_text("127.0.0.1 localhost\n")
         ssh = tmp_path / ".ssh"
         ssh.mkdir()
@@ -548,11 +550,13 @@ class TestSharedRegistration:
     def test_register_without_root_uses_hosts_d(
         self, paths: dict, hosts_dir: Path
     ) -> None:
-        paths["etc"].chmod(0o444)
+        # The user owns the file but not its directory, as on a Mac
+        # where /etc/hosts was handed over: a write would still prompt.
+        paths["etc"].parent.chmod(0o555)
         try:
             vm_net.register_ssh_name("co1-a", "192.168.100.7")
         finally:
-            paths["etc"].chmod(0o644)
+            paths["etc"].parent.chmod(0o755)
         assert (hosts_dir / "co1-a").exists()
         assert "co1-a" not in paths["etc"].read_text()
         paths["reload"].assert_not_called()
@@ -569,11 +573,11 @@ class TestSharedRegistration:
         self, paths: dict, hosts_dir: Path
     ) -> None:
         vm_net.register_ssh_name("co1-a", "192.168.100.7")
-        paths["etc"].chmod(0o444)
+        paths["etc"].parent.chmod(0o555)
         try:
             vm_net.unregister_ssh_name("co1-a")
         finally:
-            paths["etc"].chmod(0o644)
+            paths["etc"].parent.chmod(0o755)
         assert not (hosts_dir / "co1-a").exists()
         # /etc/hosts could not be edited without a prompt, so it stays.
         assert f"{MARKER}:co1-a" in paths["etc"].read_text()
