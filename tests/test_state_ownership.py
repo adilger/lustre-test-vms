@@ -550,6 +550,9 @@ class TestClusterDeployNeverPrompts:
                 side_effect=lambda name, *a, **k: (name, 0, ""),
             ),
             patch.object(
+                vm_cluster, "_distribute_cluster_hosts", return_value=[]
+            ),
+            patch.object(
                 VMInfo, "update_deploy", side_effect=PermissionError("nope")
             ),
         ):

@@ -1205,6 +1205,9 @@ class TestCmdClusterDeployBuildsForTheNodes:
                 "_write_cluster_local_sh",
                 side_effect=lambda name, *a, **k: (name, 0, ""),
             ),
+            patch.object(
+                vm_cluster, "_distribute_cluster_hosts", return_value=[]
+            ),
         ):
             run.return_value = MagicMock(returncode=0)
             vm_cluster.cmd_cluster_deploy(
@@ -1254,6 +1257,9 @@ class TestCmdClusterDeployIpFamily:
                 vm_cluster,
                 "_write_cluster_local_sh",
                 side_effect=lambda name, *a, **k: (name, 0, ""),
+            ),
+            patch.object(
+                vm_cluster, "_distribute_cluster_hosts", return_value=[]
             ),
         ):
             vm_cluster.cmd_cluster_deploy(

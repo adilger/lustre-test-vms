@@ -715,6 +715,18 @@ A malformed cluster command line now exits 2 with a usage message rather
 than ltvm's own error (a JSON envelope under `--json`), which is what
 every other subcommand already did.
 
+**Names inside a cluster.**  `cluster create`, and every `cluster
+deploy`, write a `# --- ltvm cluster <name>` block naming every member
+into each member's `/etc/hosts`.  pdsh, ssh and the `*_HOST` lines of
+the cluster's local.sh all use names, and the guests' first nameserver
+is the host's bridge address, which only ltvm's own dnsmasq is sure to
+answer at once: a dnsmasq that forwards a bare name upstream (Patch
+Watcher's run containers did, without `domain-needed`) makes each lookup
+wait out the resolver's 5 s timeout, and its AAAA query for a name it
+holds only an A record for does the same.  With the block, A lookups
+and `getaddrinfo` never reach DNS; a lookup for IPv6 only (`getent
+hosts`) still does.
+
 ## Target Configuration
 
 Targets live in [targets/targets.yaml](targets/targets.yaml).

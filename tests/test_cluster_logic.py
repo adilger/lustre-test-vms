@@ -576,6 +576,58 @@ class TestClusterBlockKeepsTheStockLocalSh:
         assert "mds_HOST=co2-mds" in cfg.read_text()
 
 
+class TestGuestHostsBlock:
+    """Every member's name goes into each member's /etc/hosts."""
+
+    MEMBERS = [("co2-mds", "10.0.0.10"), ("co2-client", "10.0.0.12")]
+
+    def _write(self, hosts: Path, block: str) -> None:
+        """Run the script _write_cluster_hosts sends, against ``hosts``."""
+        sent: dict[str, str] = {}
+
+        def argv(ip: str, script: str) -> list[str]:
+            sent["script"] = script
+            return ["true"]
+
+        with (
+            patch.object(vm_cluster, "sshpass_ssh_argv", side_effect=argv),
+            patch.object(vm_cluster.subprocess, "run") as run,
+        ):
+            run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            vm_cluster._write_cluster_hosts("co2-mds", "10.0.0.10", block)
+        script = sent["script"].replace("/etc/hosts", str(hosts))
+        subprocess.run(
+            ["bash", "-c", script], input=block, text=True, check=True
+        )
+
+    def test_block_names_every_member(self) -> None:
+        block = vm_cluster.cluster_hosts_block("co2", self.MEMBERS)
+        assert "10.0.0.10\tco2-mds\n" in block
+        assert "10.0.0.12\tco2-client\n" in block
+
+    def test_written_once_and_rewritten_in_place(self, tmp_path: Path) -> None:
+        hosts = tmp_path / "hosts"
+        stock = "127.0.0.1   localhost\n"
+        hosts.write_text(stock + "10.9.9.9 other\n")
+        self._write(hosts, vm_cluster.cluster_hosts_block("co2", self.MEMBERS))
+        moved = [("co2-mds", "10.0.0.20"), ("co2-client", "10.0.0.12")]
+        self._write(hosts, vm_cluster.cluster_hosts_block("co2", moved))
+        body = hosts.read_text()
+        assert body.startswith(stock + "10.9.9.9 other\n")
+        assert body.count(vm_cluster.GUEST_HOSTS_BEGIN) == 1
+        assert body.count(vm_cluster.GUEST_HOSTS_END) == 1
+        assert "10.0.0.20\tco2-mds" in body
+        assert "10.0.0.10" not in body
+
+    def test_no_trailing_newline_is_not_joined(self, tmp_path: Path) -> None:
+        hosts = tmp_path / "hosts"
+        hosts.write_text("127.0.0.1 localhost")
+        self._write(hosts, vm_cluster.cluster_hosts_block("co2", self.MEMBERS))
+        lines = hosts.read_text().splitlines()
+        assert lines[0] == "127.0.0.1 localhost"
+        assert lines[1].startswith(vm_cluster.GUEST_HOSTS_BEGIN)
+
+
 class TestClusterJsonOutput:
     """`--json` was accepted on every `cluster` subcommand and read by
     none of them, so a machine consumer got a human table and exit 0.

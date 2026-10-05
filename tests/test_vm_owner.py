@@ -281,6 +281,10 @@ class TestClusterOwnerPropagation:
             patch(
                 "ltvm_pkg.vm_cluster._create_one_node", side_effect=fake_create
             ),
+            patch(
+                "ltvm_pkg.vm_cluster._distribute_cluster_hosts",
+                return_value=[],
+            ),
         ):
             vm_cluster.cmd_cluster_create(args)
 

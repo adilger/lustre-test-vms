@@ -278,6 +278,11 @@ boot. An ssh that fails on the host itself, such as a config file with
 bad owner or permissions, stops the wait at once with "fails on this
 host, not in the guest"; `ltvm doctor` checks the ssh client config.
 
+Every node's `/etc/hosts` names every member of its cluster, written by
+`cluster create` and again by each `cluster deploy`, so the nodes find
+each other without the host's DNS. A cluster created by an older ltvm
+gets it at its next `cluster deploy`.
+
 A cluster record whose VMs are all gone, because they were destroyed one
 by one, is removed with the last of them, and `cluster create` replaces
 one it finds.
