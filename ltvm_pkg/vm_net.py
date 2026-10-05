@@ -504,8 +504,12 @@ def _real_user_ssh_dir() -> tuple[str, Path]:
 
 
 def _may_edit_etc_hosts() -> bool:
-    """Can /etc/hosts be rewritten without asking for a password?"""
-    return os.access(HOSTS_FILE, os.W_OK) or sudo_ready()
+    """Can /etc/hosts be rewritten without asking for a password?
+
+    _atomic_write renames a tempfile into the file's directory, so a
+    user who owns /etc/hosts but not /etc still needs sudo.
+    """
+    return os.access(HOSTS_FILE.parent, os.W_OK) or sudo_ready()
 
 
 def register_ssh_name(name: str, ip: str) -> None:
