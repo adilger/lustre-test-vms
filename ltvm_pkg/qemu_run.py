@@ -930,7 +930,8 @@ def _start_qemu(vm: VMInfo) -> None:
             "-device",
             f"{blk_driver},drive=disk{n}",
             "-drive",
-            f"id=disk{n},file={disk},format=raw,if=none",
+            f"id=disk{n},file={disk},format=raw,if=none,"
+            "discard=unmap,detect-zeroes=unmap",
         ]
 
     try:
