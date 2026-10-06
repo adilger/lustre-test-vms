@@ -561,6 +561,7 @@ def cmd_deploy(args: argparse.Namespace) -> int:
             # the stream a consumer is parsing.  (--json is not
             # forwarded: the child's own envelope is not this
             # command's.)
+            sys.stdout.flush()
             build_proc = subprocess.run(
                 build_cmd,
                 capture_output=False,

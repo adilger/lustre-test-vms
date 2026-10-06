@@ -1105,7 +1105,9 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
     sudo_user = os.environ.get("SUDO_USER")
     if sudo_user:
         build_cmd = ["sudo", "-u", sudo_user] + build_cmd
-    print(f"--- Building Lustre against {target} kernel tree...")
+    # Flush first: with stdout not a terminal, this and the deploy
+    # header above would otherwise land after the build's own output.
+    print(f"--- Building Lustre against {target} kernel tree...", flush=True)
     rb = subprocess.run(build_cmd)
     if rb.returncode != 0:
         die(f"Lustre build failed (rc={rb.returncode})")
