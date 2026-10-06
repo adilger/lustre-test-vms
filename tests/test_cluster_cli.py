@@ -574,6 +574,14 @@ class TestClusterDeployArgs:
         assert ns.lustre_source == "/x"
         assert ns.mount and ns.server_only and ns.force_compat
 
+    def test_configure_reaches_the_handler(self) -> None:
+        cmd_cluster(_ns("deploy", "co1", "--configure=--enable-crypto"))
+        assert self._ns_call().configure == "--enable-crypto"
+
+    def test_configure_defaults_to_none(self) -> None:
+        cmd_cluster(_ns("deploy", "co1"))
+        assert self._ns_call().configure is None
+
     def test_ip_family_flag(self) -> None:
         cmd_cluster(_ns("deploy", "co1", "--ip-family", "ipv6"))
         assert self._ns_call().ip_family == "ipv6"

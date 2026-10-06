@@ -207,6 +207,7 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> int:
             mount=args.mount,
             server_only=args.server_only,
             force_compat=args.force_compat,
+            configure=args.configure,
             zfs=args.zfs,
             zfs_version=args.zfs_version,
             fstype=args.fstype,
