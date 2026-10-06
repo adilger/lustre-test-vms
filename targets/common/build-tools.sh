@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build and install source-built tools used in VM images:
-#   IOR + mdtest, iozone, pjdfstest, FlameGraph, drgn
+#   IOR + mdtest, simul, iozone, pjdfstest, dbench loadfile, FlameGraph,
+#   drgn
 #
 # Expects gcc, make, autoconf, automake, libtool, curl, pip3
 # to already be installed (via the package list install step).
@@ -19,6 +20,8 @@ set -euo pipefail
 # Pinned versions of source-built tools.  Bump in one place.
 IOR_VERSION="${IOR_VERSION:-4.0.0}"
 IOZONE_VERSION="${IOZONE_VERSION:-3_506}"
+SIMUL_VERSION="${SIMUL_VERSION:-1.16}"
+DBENCH_LOADFILE_REF="${DBENCH_LOADFILE_REF:-a8e1c0fbb8bdb23ee22c0cc2e3f9b1049e537fff}"
 
 TARGET_ARCH="${TARGET_ARCH:-$(uname -m)}"
 HOST_ARCH="$(uname -m)"
@@ -103,6 +106,15 @@ if [[ -z "$CROSS_TRIPLE" ]]; then
 	make -j"$(nproc)"
 	cp src/ior src/mdtest "$PREFIX/bin/"
 	cd /tmp && rm -rf "ior-${IOR_VERSION}"
+
+	# simul, for parallel-scale
+	curl -fsSL "https://github.com/LLNL/simul/archive/refs/tags/${SIMUL_VERSION}.tar.gz" | tar xz
+	cd "simul-${SIMUL_VERSION}"
+	# simul.c's inline begin() has no external definition, so it links
+	# only under gnu89 inline semantics.
+	mpicc -Wall -O2 -fgnu89-inline -o simul simul.c
+	cp simul "$PREFIX/bin/"
+	cd /tmp && rm -rf "simul-${SIMUL_VERSION}"
 else
 	echo "--- Skipping IOR/mdtest (cross-compile; no cross-arch MPI toolchain)"
 fi
@@ -140,7 +152,17 @@ autoreconf -ifs
 ./configure ${CONFIGURE_HOST:+"$CONFIGURE_HOST"}
 make -j"$(nproc)"
 cp pjdfstest "$PREFIX/bin/"
+# pjdfstest.sh runs $PJDFSTEST_DIR/**/*.t, default /usr/share/pjdfstest,
+# and the .t files find the binary beside their tests/ directory.
+mkdir -p "${DESTDIR}/usr/share/pjdfstest"
+cp -a tests pjdfstest "${DESTDIR}/usr/share/pjdfstest/"
 cd /tmp && rm -rf pjdfstest
+
+# dbench's loadfile: the distro package ships only the binary, and
+# rundbench skips without client.txt.
+mkdir -p "${DESTDIR}/usr/share/dbench"
+curl -fsSL "https://raw.githubusercontent.com/sahlberg/dbench/${DBENCH_LOADFILE_REF}/loadfiles/client.load" \
+    -o "${DESTDIR}/usr/share/dbench/client.txt"
 
 # FlameGraph (pure perl scripts -- no compilation needed)
 git clone --depth 1 https://github.com/brendangregg/FlameGraph.git \

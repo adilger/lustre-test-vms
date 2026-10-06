@@ -77,6 +77,8 @@ groupadd -g 500 sanityusr  2>/dev/null || true
 useradd -u 500 -g 500 -m -s /bin/bash sanityusr  2>/dev/null || true
 groupadd -g 501 sanityusr1 2>/dev/null || true
 useradd -u 501 -g 501 -m -s /bin/bash sanityusr1 2>/dev/null || true
-useradd -m -s /bin/bash quota_usr  2>/dev/null || true
-useradd -m -s /bin/bash quota_2usr 2>/dev/null || true
+groupadd -g 60000 quota_usr  2>/dev/null || true
+useradd -u 60000 -g 60000 -m -s /bin/bash quota_usr  2>/dev/null || true
+groupadd -g 60001 quota_2usr 2>/dev/null || true
+useradd -u 60001 -g 60001 -m -s /bin/bash quota_2usr 2>/dev/null || true
 useradd -m -s /bin/bash mpiuser    2>/dev/null || true
