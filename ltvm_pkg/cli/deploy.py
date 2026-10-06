@@ -485,7 +485,11 @@ def cmd_deploy(args: argparse.Namespace) -> int:
         if not use_json:
             print("  Using bundled staging, skipping source build")
     else:
-        staging_fresh = _staging_is_fresh(staging, build_path)
+        # The freshness check compares the staging with the tree's last
+        # configure, not with the flags asked for now; only the build
+        # can tell whether --configure changes anything.
+        configure = getattr(args, "configure", None)
+        staging_fresh = not configure and _staging_is_fresh(staging, build_path)
 
         if staging_fresh:
             if not use_json:
@@ -542,6 +546,8 @@ def cmd_deploy(args: argparse.Namespace) -> int:
             # refusal.  cmd_cluster_deploy already forwards it.
             if args.force_compat:
                 build_cmd += ["--force-compat"]
+            if configure:
+                build_cmd += [f"--configure={configure}"]
             if want_zfs:
                 build_cmd += ["--zfs"]
                 if zfs_version_arg:

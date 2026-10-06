@@ -1745,6 +1745,12 @@ def build_parser() -> argparse.ArgumentParser:
         "in targets.yaml).  Implies --zfs.",
     )
     sp.add_argument(
+        "--configure",
+        help="Extra configure arguments for the build, as for `build "
+        "lustre` (e.g. --configure=--enable-crypto).  The build always "
+        "runs when this is given; it is incremental.",
+    )
+    sp.add_argument(
         "--fstype",
         choices=["ldiskfs", "zfs"],
         default=None,

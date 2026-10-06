@@ -1307,6 +1307,55 @@ class TestCmdDeployKernelMismatch:
         assert "--arch" in cmd
         assert cmd[cmd.index("--arch") + 1] == "x86_64"
 
+    def test_configure_forwarded_even_when_staging_is_fresh(
+        self, tmp_sockets: Path, tmp_path: Path
+    ) -> None:
+        """--configure reaches build lustre, and skips the fresh fast path.
+
+        The fast path compares the staging with the tree's last configure,
+        not with the flags asked for, so it would ship the old build.
+        """
+        from ltvm_pkg import cli as cli_mod
+        from ltvm_pkg.lustre_build import staging_path
+
+        build_path = tmp_path / "lustre-release"
+        _setup_lustre_tree(build_path)
+        staging = staging_path(
+            build_path, "rocky9", arch="x86_64", kernel="5.14-rhel9.7"
+        )
+        staging.mkdir(parents=True)
+        (staging / "lustre.ko").write_text("")
+        (staging / ".ltvm-staging-stamp").write_text("5.14.0-foo\n")
+        _mark_staging_fresh(staging, build_path, _stub_tc())
+
+        vm = _make_vm(name="co1-cfg", ip="10.0.0.23")
+        vm.os_id = "rocky9"
+        vm.save()
+
+        run_calls: list = []
+
+        def fake_run(cmd, *args, **kwargs):
+            run_calls.append(cmd)
+            return MagicMock(returncode=1, stdout="", stderr="")
+
+        args = _deploy_args(vm="co1-cfg", lustre_tree=str(build_path))
+        args.configure = "--enable-crypto"
+        with (
+            patch.object(cli_mod, "TargetConfig", return_value=_stub_tc()),
+            patch.object(cli_mod, "_gate_lustre_validation"),
+            patch("subprocess.run", side_effect=fake_run),
+        ):
+            rc = cli_mod.cmd_deploy(args)
+
+        assert rc == 1
+        build_calls = [
+            c
+            for c in run_calls
+            if isinstance(c, list) and "build" in c and "lustre" in c
+        ]
+        assert build_calls, f"build subprocess not found in {run_calls}"
+        assert "--configure=--enable-crypto" in build_calls[0]
+
 
 class TestCmdDeployForceCompat:
     """--force-compat silences refuse but not hard error in the deploy path."""

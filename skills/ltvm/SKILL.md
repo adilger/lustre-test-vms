@@ -131,6 +131,11 @@ host kernel is not the VM kernel; `ltvm build lustre <target>
 --lustre-tree <tree>` builds inside the target's build container, which is
 what `deploy-lustre` invokes.
 
+Configure flags belong to the command that builds. A deploy that rebuilds
+uses the target's defaults, so a tree built with `build lustre
+--configure=...` loses those flags at its next deploy: pass the same
+`--configure` to `deploy-lustre` or `cluster deploy`.
+
 ltvm's build path detects two staleness traps that a host build still
 walks into, and both look like something else:
 
