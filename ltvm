@@ -2132,6 +2132,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override a Lustre-tree compatibility refusal (not errors)",
     )
     cdpl.add_argument(
+        "--configure",
+        help="Extra configure arguments for the build, as for `build "
+        "lustre` (e.g. --configure=--enable-crypto)",
+    )
+    cdpl.add_argument(
         "--zfs",
         action="store_true",
         help="Ship ZFS and run the cluster on it (implies --fstype zfs)",

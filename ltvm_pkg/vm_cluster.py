@@ -1093,6 +1093,11 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
         build_cmd += ["--variant", first_vm.variant]
     if getattr(args, "force_compat", False):
         build_cmd += ["--force-compat"]
+    # Without this a tree last built with `build lustre --configure`
+    # is reconfigured with the defaults by every deploy.
+    configure = getattr(args, "configure", None)
+    if configure:
+        build_cmd += [f"--configure={configure}"]
     if want_zfs:
         build_cmd += ["--zfs"]
         if zfs_version_arg:
