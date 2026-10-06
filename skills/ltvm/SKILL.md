@@ -380,8 +380,9 @@ The gate reads `lustre/kernel_patches/which_patch` for `server_ldiskfs`
 and `lustre/ChangeLog` for `server_zfs`, and refuses combinations Lustre
 upstream does not declare supported. `--force-compat` silences refusals,
 not hard errors, and is for known work-in-progress branches only. It is
-accepted by `build all`, `build kernel`, `build lustre`, `target publish`
-and `deploy-lustre`.
+accepted by the `build` commands, `target build`, `target validate`,
+`deploy-lustre`, `cluster deploy` and `make-install`/`make-reinstall`;
+`target publish` runs no gate and does not take it.
 
 ## Sharing what was built
 
@@ -444,8 +445,8 @@ released, and a hand deploy never claims.
 
 `--json` for machine-readable output, `--verbose`, `--arch <arch>` to
 override the target's configured architecture, `--kernel <name>` on the
-commands that act on one kernel, and `--force-compat` on build, publish
-and deploy.
+commands that act on one kernel, and `--force-compat` on the build,
+validate and deploy commands.
 
 `--json` is accepted everywhere but only some commands have anything
 structured to say.  The ones worth parsing: `list`, `build status`,
