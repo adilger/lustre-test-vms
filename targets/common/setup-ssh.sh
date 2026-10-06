@@ -69,11 +69,14 @@ Host *
 SSHCFG
 chmod 600 /root/.ssh/config
 
-# Users required by the Lustre test framework
-groupadd -g 500 runas 2>/dev/null || true
-useradd -u 500 -g 500 -m -s /bin/bash runas 2>/dev/null || true
-useradd -m -s /bin/bash sanityusr  2>/dev/null || true
-useradd -m -s /bin/bash sanityusr1 2>/dev/null || true
+# Users required by the Lustre test framework.  sanityusr is uid 500,
+# the default RUNAS_ID, and sanityusr1 is 501, as in Lustre's own test
+# systems: sanity-sec sets files up as $USER0 and then uses them as
+# $RUNAS, so the two must be one user.
+groupadd -g 500 sanityusr  2>/dev/null || true
+useradd -u 500 -g 500 -m -s /bin/bash sanityusr  2>/dev/null || true
+groupadd -g 501 sanityusr1 2>/dev/null || true
+useradd -u 501 -g 501 -m -s /bin/bash sanityusr1 2>/dev/null || true
 useradd -m -s /bin/bash quota_usr  2>/dev/null || true
 useradd -m -s /bin/bash quota_2usr 2>/dev/null || true
 useradd -m -s /bin/bash mpiuser    2>/dev/null || true
