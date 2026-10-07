@@ -82,3 +82,8 @@ useradd -u 60000 -g 60000 -m -s /bin/bash quota_usr  2>/dev/null || true
 groupadd -g 60001 quota_2usr 2>/dev/null || true
 useradd -u 60001 -g 60001 -m -s /bin/bash quota_2usr 2>/dev/null || true
 useradd -m -s /bin/bash mpiuser    2>/dev/null || true
+
+# mpirun runs as mpiuser and reaches the other clients over ssh
+install -d -m 700 -o mpiuser -g mpiuser /home/mpiuser/.ssh
+install -m 600 -o mpiuser -g mpiuser /root/.ssh/id_ed25519 \
+	/root/.ssh/authorized_keys /root/.ssh/config /home/mpiuser/.ssh/
