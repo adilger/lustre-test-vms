@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -1112,62 +1113,86 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
     if rb.returncode != 0:
         die(f"Lustre build failed (rc={rb.returncode})")
 
-    # Which ZFS to ship is the staged build's decision (osd_zfs.ko is
-    # linked against one specific build), and every node in a cluster
-    # shares one target+kernel+arch -- so resolve it once here rather
-    # than per node.
-    zfs_staging: Path | None = None
-    if want_zfs:
-        from .lustre_build import read_staging_meta
-        from .lustre_build import staging_path as _staging_path
-        from .target_config import TargetConfig
-        from .zfs_build import find_zfs_staging
+    from .lustre_build import staging_lock
+    from .lustre_build import staging_path as _staging_path
 
-        tc = TargetConfig(target, arch=arch, variant=first_vm.variant)
-        meta = read_staging_meta(
+    # Shared from here to the end of the streams: they may run beside
+    # another deploy's, but no other build or refresh may rewrite this
+    # staging under them.  No kernel means every node fails anyway.
+    stream_lock: contextlib.AbstractContextManager[None] = (
+        staging_lock(
             _staging_path(
                 build,
                 target,
                 arch=arch,
-                kernel=kernel_name or tc.default_kernel,
+                kernel=kernel_name,
                 variant=first_vm.variant,
-            )
+            ),
+            exclusive=False,
         )
-        staged_zfs = meta.get("zfs_version") if isinstance(meta, dict) else None
-        if not staged_zfs:
-            die(
-                "ZFS was requested but the Lustre build produced no ZFS "
-                "record -- rerun with --force to reconfigure"
-            )
-        from .zfs_build import ZfsBuildError
-
-        try:
-            zfs_staging = find_zfs_staging(
-                tc,
-                kernel_name,
-                staged_zfs,
-                recorded=meta.get("zfs_dir")
-                if isinstance(meta, dict)
-                else None,
-            )
-        except ZfsBuildError as e:
-            die(
-                f"{e}\n  Rebuild Lustre with it: ltvm build lustre {target} "
-                f"--lustre-tree {build} --kernel {kernel_name} "
-                f"--zfs-version {staged_zfs} --force"
-            )
-        print(f"    ZFS: {staged_zfs}")
-
-    print(f"    Deploying to {len(nodes)} nodes in parallel...")
-
-    # Deploy to all nodes in parallel -- same as single-node deploy,
-    # just run concurrently.
-    failed = _parallel_cluster_op(
-        nodes,
-        lambda node: _deploy_one_node(node.name, build, os_family, zfs_staging),
-        success_verb="deployed",
-        failure_verb="FAILED",
+        if kernel_name
+        else contextlib.nullcontext()
     )
+    with stream_lock:
+        # Which ZFS to ship is the staged build's decision (osd_zfs.ko is
+        # linked against one specific build), and every node in a cluster
+        # shares one target+kernel+arch -- so resolve it once here rather
+        # than per node.
+        zfs_staging: Path | None = None
+        if want_zfs:
+            from .lustre_build import read_staging_meta
+            from .target_config import TargetConfig
+            from .zfs_build import find_zfs_staging
+
+            tc = TargetConfig(target, arch=arch, variant=first_vm.variant)
+            meta = read_staging_meta(
+                _staging_path(
+                    build,
+                    target,
+                    arch=arch,
+                    kernel=kernel_name or tc.default_kernel,
+                    variant=first_vm.variant,
+                )
+            )
+            staged_zfs = (
+                meta.get("zfs_version") if isinstance(meta, dict) else None
+            )
+            if not staged_zfs:
+                die(
+                    "ZFS was requested but the Lustre build produced no ZFS "
+                    "record -- rerun with --force to reconfigure"
+                )
+            from .zfs_build import ZfsBuildError
+
+            try:
+                zfs_staging = find_zfs_staging(
+                    tc,
+                    kernel_name,
+                    staged_zfs,
+                    recorded=meta.get("zfs_dir")
+                    if isinstance(meta, dict)
+                    else None,
+                )
+            except ZfsBuildError as e:
+                die(
+                    f"{e}\n  Rebuild Lustre with it: ltvm build lustre "
+                    f"{target} --lustre-tree {build} --kernel {kernel_name} "
+                    f"--zfs-version {staged_zfs} --force"
+                )
+            print(f"    ZFS: {staged_zfs}")
+
+        print(f"    Deploying to {len(nodes)} nodes in parallel...")
+
+        # Deploy to all nodes in parallel -- same as single-node deploy,
+        # just run concurrently.
+        failed = _parallel_cluster_op(
+            nodes,
+            lambda node: _deploy_one_node(
+                node.name, build, os_family, zfs_staging
+            ),
+            success_verb="deployed",
+            failure_verb="FAILED",
+        )
 
     if failed:
         die(f"deploy failed for: {', '.join(failed)}")

@@ -869,6 +869,14 @@ mtime-preserving copy slips past the `find -newer` fast path.
 `--userspace-only`'s warning about sources it cannot ship
 counts only files git tracks.
 
+Each staging dir has a flock beside it (`.<kernel>[__<variant>].lock`,
+`lustre_build.staging_lock`): `build lustre`, the refresh and the
+bundled-snapshot mirror take it exclusive, and streaming into VMs
+(`deploy-lustre`, `cluster deploy`) takes it shared, so deploys of one
+tree stream side by side but never while another rewrites the staging.
+A deploy holds no lock while its child `build lustre` runs -- that
+child's exclusive request would wait on it forever.
+
 Incremental by default: repeating the command rebuilds
 only what changed.  `make distclean` runs for `--force`,
 or when `.ltvm-last-build` -- a claim stamp naming the

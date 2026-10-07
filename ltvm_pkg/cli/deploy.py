@@ -319,6 +319,7 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     # actual kernel (falling back to the target's default) so a VM
     # created with a non-default kernel deploys the Lustre that was
     # built against that kernel.
+    from ltvm_pkg.lustre_build import staging_lock
     from ltvm_pkg.lustre_build import staging_path as _staging_path
 
     deploy_kernel = resolved_kernel
@@ -352,17 +353,18 @@ def cmd_deploy(args: argparse.Namespace) -> int:
         if not use_json:
             print(f"  Mirroring bundled snapshot into staging: {staging}")
         staging.mkdir(parents=True, exist_ok=True)
-        r = subprocess.run(
-            [
-                "rsync",
-                "-a",
-                "--delete",
-                str(bundled_snapshot) + "/",
-                str(staging) + "/",
-            ],
-            capture_output=True,
-            text=True,
-        )
+        with staging_lock(staging, exclusive=True):
+            r = subprocess.run(
+                [
+                    "rsync",
+                    "-a",
+                    "--delete",
+                    str(bundled_snapshot) + "/",
+                    str(staging) + "/",
+                ],
+                capture_output=True,
+                text=True,
+            )
         if r.returncode != 0:
             return _error(
                 f"Failed to mirror bundled snapshot: {r.stderr.strip()}",
@@ -579,72 +581,80 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                     use_json,
                 )
 
-    # Which ZFS to ship is the staged build's decision, not the
-    # command line's: osd_zfs.ko is linked against one specific ZFS
-    # build, so shipping any other would produce a module that won't
-    # load.  build_lustre records the version it used.
-    zfs_staging: Path | None = None
-    staged_meta = read_staging_meta(staging)
-    staged_zfs_version = (
-        staged_meta.get("zfs_version")
-        if isinstance(staged_meta, dict)
-        else None
-    )
-    if staged_zfs_version and not userspace_only:
-        from ltvm_pkg.zfs_build import ZfsBuildError, find_zfs_staging
-
-        try:
-            zfs_staging = find_zfs_staging(
-                tc,
-                deploy_kernel,
-                staged_zfs_version,
-                recorded=(
-                    staged_meta.get("zfs_dir")
-                    if isinstance(staged_meta, dict)
-                    else None
-                ),
-            )
-        except ZfsBuildError as e:
-            return _error(
-                str(e),
-                use_json,
-                hint=f"Rebuild Lustre with it: ltvm build lustre {target} "
-                f"--lustre-tree {build_path} --kernel {deploy_kernel} "
-                f"--zfs-version {staged_zfs_version} --force",
-            )
-        if not use_json:
-            print(f"  Shipping ZFS {staged_zfs_version}")
-    elif want_zfs and not userspace_only:
-        return _error(
-            "ZFS was requested but the Lustre staging being deployed "
-            "was not built with it",
-            use_json,
-            hint="This happens with a bundled snapshot from `ltvm "
-            "fetch`, which is published without ZFS.  Pass "
-            "--lustre-tree <source tree> to build one with it.",
-        )
-
     if bundled_snapshot is None:
-        err = _refresh_staged_sources(
-            staging, build_path, userspace_only=userspace_only, quiet=use_json
-        )
+        with staging_lock(staging, exclusive=True):
+            err = _refresh_staged_sources(
+                staging,
+                build_path,
+                userspace_only=userspace_only,
+                quiet=use_json,
+            )
         if err is not None:
             return _error(err, use_json)
 
-    try:
-        _cli_attr("deploy_to_vm")(
-            vm,
-            staging,
-            os_family=os_family,
-            userspace_only=userspace_only,
-            ram_osts=getattr(args, "ram_osts", 0) or 0,
-            ram_ost_size_gb=getattr(args, "ram_ost_size", 32),
-            ram_mdt=getattr(args, "ram_mdt", False),
-            zfs_staging=zfs_staging,
-            fstype=fstype,
+    # Shared from here to the end of the stream: other deploys of this
+    # staging may stream alongside, but none may rebuild or refresh it.
+    with staging_lock(staging, exclusive=False):
+        # Which ZFS to ship is the staged build's decision, not the
+        # command line's: osd_zfs.ko is linked against one specific ZFS
+        # build, so shipping any other would produce a module that won't
+        # load.  build_lustre records the version it used.
+        zfs_staging: Path | None = None
+        staged_meta = read_staging_meta(staging)
+        staged_zfs_version = (
+            staged_meta.get("zfs_version")
+            if isinstance(staged_meta, dict)
+            else None
         )
-    except RuntimeError as e:
-        return _error(str(e), use_json)
+        if staged_zfs_version and not userspace_only:
+            from ltvm_pkg.zfs_build import ZfsBuildError, find_zfs_staging
+
+            try:
+                zfs_staging = find_zfs_staging(
+                    tc,
+                    deploy_kernel,
+                    staged_zfs_version,
+                    recorded=(
+                        staged_meta.get("zfs_dir")
+                        if isinstance(staged_meta, dict)
+                        else None
+                    ),
+                )
+            except ZfsBuildError as e:
+                return _error(
+                    str(e),
+                    use_json,
+                    hint=f"Rebuild Lustre with it: ltvm build lustre "
+                    f"{target} --lustre-tree {build_path} --kernel "
+                    f"{deploy_kernel} --zfs-version {staged_zfs_version} "
+                    f"--force",
+                )
+            if not use_json:
+                print(f"  Shipping ZFS {staged_zfs_version}")
+        elif want_zfs and not userspace_only:
+            return _error(
+                "ZFS was requested but the Lustre staging being deployed "
+                "was not built with it",
+                use_json,
+                hint="This happens with a bundled snapshot from `ltvm "
+                "fetch`, which is published without ZFS.  Pass "
+                "--lustre-tree <source tree> to build one with it.",
+            )
+
+        try:
+            _cli_attr("deploy_to_vm")(
+                vm,
+                staging,
+                os_family=os_family,
+                userspace_only=userspace_only,
+                ram_osts=getattr(args, "ram_osts", 0) or 0,
+                ram_ost_size_gb=getattr(args, "ram_ost_size", 32),
+                ram_mdt=getattr(args, "ram_mdt", False),
+                zfs_staging=zfs_staging,
+                fstype=fstype,
+            )
+        except RuntimeError as e:
+            return _error(str(e), use_json)
 
     # Record successful deploy.  Swallow VMNotFound: the deploy itself
     # already succeeded, so a concurrent `ltvm destroy` racing with the
@@ -662,10 +672,9 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     # recorded kver should reflect what's installed, not what's
     # currently running.  Source of truth: .ltvm-staging-meta.json under
     # the staging dir we just deployed from.
-    staging_meta = read_staging_meta(staging)
     kver = (
-        staging_meta.get("kernel_version")
-        if isinstance(staging_meta, dict)
+        staged_meta.get("kernel_version")
+        if isinstance(staged_meta, dict)
         else None
     ) or vm.kver
     try:

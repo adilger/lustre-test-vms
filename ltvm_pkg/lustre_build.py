@@ -167,6 +167,68 @@ def _tree_build_lock(lustre_tree: Path) -> Iterator[None]:
             fcntl.flock(fp, fcntl.LOCK_UN)
 
 
+def staging_lock_path(staging: Path) -> Path:
+    """The lock file for one staging dir.
+
+    Beside it, not in it: the build's ``rm -rf /staging/*`` would
+    delete it while held.
+    """
+    return staging.parent / f".{staging.name}.lock"
+
+
+def _open_staging_lock(lock_path: Path) -> int | None:
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        return os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o666)
+    except PermissionError:
+        pass
+    except OSError:
+        return None
+    # flock needs an open fd, not write access: a lock file left by root
+    # (deploy under sudo) still works read-only.
+    try:
+        return os.open(lock_path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return None
+
+
+@contextlib.contextmanager
+def staging_lock(staging: Path, *, exclusive: bool) -> Iterator[None]:
+    """Hold the advisory lock on one staging dir.
+
+    Exclusive to build or refresh it, shared to stream it into VMs, so
+    a deploy never tars a staging dir that another deploy of the same
+    tree is rewriting.  Never take it exclusive while this process
+    holds it shared: flock counts each open as a separate owner, so
+    that waits forever.
+    """
+    lock_path = staging_lock_path(staging)
+    fd = _open_staging_lock(lock_path)
+    if fd is None:
+        # A tree this user cannot write, whose owner never made the lock:
+        # this process can only read the staging, never rewrite it.
+        yield
+        return
+    op = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+    try:
+        try:
+            fcntl.flock(fd, op | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print(
+                f"  waiting for another ltvm deploy or build of this "
+                f"Lustre tree to finish with {staging}...",
+                file=sys.stderr,
+                flush=True,
+            )
+            fcntl.flock(fd, op)
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
 def _hash_file(path: Path) -> str | None:
     """Return hex sha256 of a file, or None if it doesn't exist."""
     if not path.is_file():
@@ -494,7 +556,13 @@ def build_lustre(
             f"Run: ltvm build container <target>"
         )
 
-    with _tree_build_lock(lustre_tree):
+    _, host_staging = _resolve_staging(
+        lustre_tree, target, arch, kernel, kver, variant
+    )
+    with (
+        _tree_build_lock(lustre_tree),
+        staging_lock(host_staging, exclusive=True),
+    ):
         return _build_in_container(
             lustre_tree,
             build_tree,
@@ -511,6 +579,30 @@ def build_lustre(
             zfs_src=zfs_src,
             zfs_version=zfs_version,
         )
+
+
+def _resolve_staging(
+    lustre_tree: Path,
+    target: str,
+    arch: str,
+    kernel: str | None,
+    kver: str,
+    variant: str,
+) -> tuple[str, Path]:
+    """The full kernel directory name and the staging dir a build writes."""
+    try:
+        from .target_config import TargetConfig
+
+        resolved_kernel = TargetConfig(target, arch=arch).resolve_kernel(kernel)
+    except Exception:
+        resolved_kernel = kernel or kver
+    return resolved_kernel, staging_path(
+        lustre_tree,
+        target,
+        arch=arch,
+        kernel=resolved_kernel,
+        variant=variant,
+    )
 
 
 def _kernel_changed(
@@ -993,18 +1085,8 @@ fi""")
     # "5.14-rhel9.5" -> "5.14-rhel9.5-5.14.0-503.40.1.el9_5") so the
     # staging path matches what other commands (build-image, deploy)
     # compute via TargetConfig.resolve_kernel(kernel).
-    try:
-        from .target_config import TargetConfig
-
-        resolved_kernel = TargetConfig(target, arch=arch).resolve_kernel(kernel)
-    except Exception:
-        resolved_kernel = kernel or kver
-    host_staging = staging_path(
-        lustre_tree,
-        target,
-        arch=arch,
-        kernel=resolved_kernel,
-        variant=variant,
+    resolved_kernel, host_staging = _resolve_staging(
+        lustre_tree, target, arch, kernel, kver, variant
     )
     host_staging.mkdir(parents=True, exist_ok=True)
     # When invoked via sudo, chown the staging dir to the real user so

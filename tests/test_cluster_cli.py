@@ -1185,6 +1185,9 @@ class TestCmdClusterDeployBuildsForTheNodes:
         class _TC:
             os_family = "rhel"
 
+            def container_variant(self) -> str:
+                return "mofed"
+
         cluster = ClusterInfo(
             name="co3", nodes=[{"name": "co3-mds", "roles": ["mgs", "mds"]}]
         )
@@ -1233,7 +1236,9 @@ class TestCmdClusterDeployBuildsForTheNodes:
 class TestCmdClusterDeployIpFamily:
     """--ip-family reaches the MGS probe and outlives the deploy."""
 
-    def _deploy(self, cluster: ClusterInfo, ip_family: str | None) -> MagicMock:
+    def _deploy(
+        self, cluster: ClusterInfo, ip_family: str | None, tree: Path
+    ) -> MagicMock:
         class _TC:
             os_family = "rhel"
 
@@ -1273,28 +1278,28 @@ class TestCmdClusterDeployIpFamily:
             vm_cluster.cmd_cluster_deploy(
                 argparse.Namespace(
                     name="co3",
-                    lustre_source="/tmp",
+                    lustre_source=str(tree),
                     mount=False,
                     ip_family=ip_family,
                 )
             )
         return probe
 
-    def test_flag_is_recorded(self) -> None:
+    def test_flag_is_recorded(self, tmp_path: Path) -> None:
         cluster = ClusterInfo(
             name="co3", nodes=[{"name": "co3-mds", "roles": ["mgs", "mds"]}]
         )
-        probe = self._deploy(cluster, "ipv6")
+        probe = self._deploy(cluster, "ipv6", tmp_path)
         assert probe.call_args.args[1] == "ipv6"
         assert cluster.ip_family == "ipv6"
 
-    def test_bare_redeploy_keeps_the_family(self) -> None:
+    def test_bare_redeploy_keeps_the_family(self, tmp_path: Path) -> None:
         cluster = ClusterInfo(
             name="co3",
             nodes=[{"name": "co3-mds", "roles": ["mgs", "mds"]}],
             ip_family="ipv6",
         )
-        probe = self._deploy(cluster, None)
+        probe = self._deploy(cluster, None, tmp_path)
         assert probe.call_args.args[1] == "ipv6"
 
 
