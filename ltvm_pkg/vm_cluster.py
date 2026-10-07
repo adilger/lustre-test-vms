@@ -346,6 +346,10 @@ def generate_local_sh(
         rclients = [n.name for n in client_list[1:]]
         if rclients:
             lines.append('RCLIENTS="{}"'.format(" ".join(rclients)))
+        # init_gss() reads CLIENTCOUNT during setup, before
+        # init_clients_lists() sets it; empty, its key loop is a bash
+        # syntax error and SHARED_KEY setup never copies the keys out.
+        lines.append(f"CLIENTCOUNT=${{CLIENTCOUNT:-{len(client_list)}}}")
     lines.append("")
 
     lines.append(f"FSTYPE={fstype}")

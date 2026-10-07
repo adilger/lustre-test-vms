@@ -151,6 +151,12 @@ class TestConfigureTestDisks:
         it, and the next start fails (sanity 160h, 278)."""
         assert "CLEANUP_DM_DEV" not in self._capture_script(mdt=1, ost=1)
 
+    def test_client_defaults_for_setup(self) -> None:
+        """init_gss() runs before init_clients_lists() and needs both."""
+        script = self._capture_script(mdt=1, ost=1)
+        assert "CLIENTS=${CLIENTS:-$HOSTNAME}" in script
+        assert "CLIENTCOUNT=${CLIENTCOUNT:-1}" in script
+
     def test_markers_wrap_generated_block(self) -> None:
         """The generated snippet is wrapped in VM-disk sentinel markers."""
         script = self._capture_script(mdt=1, ost=1)

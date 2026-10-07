@@ -538,9 +538,9 @@ class TestClusterBlockKeepsTheStockLocalSh:
         assert (tstusr, tstusr2) == ("quota_usr", "quota_2usr")
         assert mds_host == "co2-mds"
         assert ostcount == "3"
-        assert "CLEANUP_DM_DEV" not in vm_cluster.generate_local_sh(
-            self._cluster()
-        )
+        generated = vm_cluster.generate_local_sh(self._cluster())
+        assert "CLEANUP_DM_DEV" not in generated
+        assert "CLIENTCOUNT=${CLIENTCOUNT:-" in generated
         body = cfg.read_text()
         assert body.index("VM disk configuration") < body.index(
             "Cluster configuration"

@@ -357,6 +357,12 @@ def configure_test_disks(
             letter = chr(ord("a") + mdt_disks + n)
             lines.append(f"OSTDEV{n}=/dev/vd{letter}")
 
+    # The framework sets these in init_clients_lists(), but init_gss()
+    # (SHARED_KEY setup) runs first and uses both: an empty CLIENTS sends
+    # do_nodes to no_dsh, an empty CLIENTCOUNT is a bash syntax error.
+    lines.append("CLIENTS=${CLIENTS:-$HOSTNAME}")
+    lines.append("CLIENTCOUNT=${CLIENTCOUNT:-1}")
+
     snippet = "\\n".join(lines)
     cfg = f"{testdir}/cfg/local.sh"
     tmp = "/tmp/.ltvm-disk-block"
