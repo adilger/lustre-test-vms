@@ -302,8 +302,11 @@ one it finds.
 
 ```bash
 ssh co1-single 'sudo -E ONLY=42a bash /usr/lib64/lustre/tests/sanity.sh'
-ssh co1-single 'sudo -E auster -s sanity --only 42a'
+ssh co1-single 'sudo -E auster sanity --only 42a'
 ```
+
+auster's `-s` is `SLOW=yes`, not "suite": CI runs `SLOW=no`, so leave it off
+unless the slow tests are the point.
 
 Mount first. Only llmount.sh formats the targets, so on a VM that has
 never been mounted a bare `sanity.sh` fails setup with "has not been
@@ -311,6 +314,22 @@ formatted with mkfs.lustre". `deploy-lustre --mount` or `ltvm llmount
 <vm>` does it (`ltvm cluster llmount <cluster>` for a cluster), and
 `deploy-lustre` without `--mount` says so when the targets are blank.
 `REFORMAT=yes` on the suite, or `auster -r`, formats as well.
+
+For a whole suite, start unmounted, as CI does, and let auster format
+and mount:
+
+```bash
+ssh co1-single 'cd /usr/lib64/lustre/tests && bash llmountcleanup.sh &&
+    auster -k -r -H sanity'
+```
+
+A suite that finds Lustre already mounted -- by `deploy-lustre --mount`,
+`llmount`, or an earlier suite in another shell -- takes the raw disks
+(`/dev/vdb`...) as each target's device instead of the dm-flakey mapper
+it is mounted through, so tests that read the device behind Lustre's back
+see stale data: sanity 39r fails every time.  `-H` makes `--only` honour
+the suite's `ALWAYS_EXCEPT` list; without it, a test named in `--only`
+runs even when CI skips it as known-broken.
 
 Auster logs land in `/tmp/test_logs/YYYY-MM-DD/HHMMSS/` inside the VM.
 Redirect long runs to a file and grep the file afterwards rather than
