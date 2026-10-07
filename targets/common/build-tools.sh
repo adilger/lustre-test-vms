@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build and install source-built tools used in VM images:
-#   IOR + mdtest, simul, iozone, pjdfstest, dbench loadfile, FlameGraph,
-#   drgn
+#   IOR + mdtest, simul, metabench, iozone, pjdfstest, dbench loadfile,
+#   FlameGraph, drgn
 #
 # Expects gcc, make, autoconf, automake, libtool, curl, pip3
 # to already be installed (via the package list install step).
@@ -23,6 +23,7 @@ IOZONE_VERSION="${IOZONE_VERSION:-3_506}"
 SIMUL_VERSION="${SIMUL_VERSION:-1.16}"
 COMPILEBENCH_REF="${COMPILEBENCH_REF:-28ad3d580d84428beeda5c857f7c4b42bd90f9eb}"
 CTHON04_REF="${CTHON04_REF:-86a4501a6e1e415844dc632894a85a5253cc1505}"
+TOOLKIT_REF="${TOOLKIT_REF:-3a62943ca32ddc63cac90679f2f43a38b608ea68}"
 DBENCH_LOADFILE_REF="${DBENCH_LOADFILE_REF:-a8e1c0fbb8bdb23ee22c0cc2e3f9b1049e537fff}"
 
 TARGET_ARCH="${TARGET_ARCH:-$(uname -m)}"
@@ -57,10 +58,10 @@ fi
 
 # Ensure build deps are present (may have been skipped by --skip-broken)
 if command -v dnf &>/dev/null; then
-	dnf -y install gcc gcc-c++ make autoconf automake libtool git curl \
+	dnf -y install gcc gcc-c++ make autoconf automake libtool git curl patch \
 		python3-pip 2>/dev/null || true
 elif command -v apt-get &>/dev/null; then
-	apt-get update && apt-get install -y gcc g++ make autoconf automake \
+	apt-get update && apt-get install -y gcc g++ make autoconf automake patch \
 		libtool git curl python3-pip 2>/dev/null || true
 fi
 
@@ -117,6 +118,22 @@ if [[ -z "$CROSS_TRIPLE" ]]; then
 	mpicc -Wall -O2 -fgnu89-inline -o simul simul.c
 	cp simul "$PREFIX/bin/"
 	cd /tmp && rm -rf "simul-${SIMUL_VERSION}"
+
+	# metabench, for parallel-scale and parallel-scale-nfs*: the 2005
+	# NERSC release with Whamcloud's patches, as its toolkit RPM builds it
+	mkdir /tmp/metabench && cd /tmp/metabench
+	curl -fsSL "https://review.whamcloud.com/plugins/gitiles/build/toolkit/+archive/${TOOLKIT_REF}/benchmark/metabench.tar.gz" | tar xz
+	sha256sum -c - <<-EOF
+	e4e1efefe65912d295964844e41055dea1bde05cfe2614ad63ec2b809730e73c  metabench.tgz
+	b5f9f60ca8d4a025477eab16164c2e61f83875321aeb88d4dc202b15d2f2bedd  wc-custom.patch
+	bf535fc08918fae9ee1f2d46ef0191e7c9106bc6fc7334b6c3db44bdea44545c  fix-gather-rcv-datatype.patch
+	EOF
+	tar xzf metabench.tgz
+	patch -d metabench -p1 < wc-custom.patch
+	patch -d metabench -p1 < fix-gather-rcv-datatype.patch
+	make -C metabench CC=mpicc
+	cp metabench/metabench "$PREFIX/bin/"
+	cd /tmp && rm -rf /tmp/metabench
 else
 	echo "--- Skipping IOR/mdtest (cross-compile; no cross-arch MPI toolchain)"
 fi
