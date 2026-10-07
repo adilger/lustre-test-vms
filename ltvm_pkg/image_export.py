@@ -38,6 +38,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ltvm_pkg.image_store import current_image
 from ltvm_pkg.priv import sudo_run
 
 if TYPE_CHECKING:
@@ -742,7 +743,7 @@ def export_image(
     """Build a self-contained bootable disk for the given target.
 
     Args:
-        target_config: target whose base.ext4 + kernel to package.
+        target_config: target whose image + kernel to package.
         kernel: optional kernel selector (short or full); defaults
                 to the target's default kernel.
         output: destination file path (parent will be created).
@@ -777,11 +778,10 @@ def export_image(
     grub_mkimage = tools["grub_mkimage"]
 
     kernel_name = target_config.resolve_kernel(kernel)
-    image_dir = target_config.image_output_dir(kernel)
-    base_ext4 = image_dir / "base.ext4"
-    if not base_ext4.exists():
+    base_ext4 = current_image(target_config.image_output_dir(kernel))
+    if base_ext4 is None:
         raise FileNotFoundError(
-            f"No base.ext4 for {target_config.name} kernel={kernel_name}. "
+            f"No image for {target_config.name} kernel={kernel_name}. "
             f"Build first: ltvm build image {target_config.name}"
         )
 

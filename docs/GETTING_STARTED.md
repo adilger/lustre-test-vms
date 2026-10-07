@@ -68,7 +68,7 @@ ltvm target fetch rocky9
 ```
 
 This downloads a tarball containing the kernel (vmlinux,
-vmlinuz, build-tree, modules) and VM base image (base.ext4)
+vmlinuz, build-tree, modules) and VM base image
 into `artifacts/rocky9/x86_64/`.
 
 Check what you have:

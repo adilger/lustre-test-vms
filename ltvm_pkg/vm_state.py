@@ -311,13 +311,15 @@ def resolve_os_artifacts(
             )
 
     # ── Step 2: Locate the image paired with this kernel. ──
-    # Layout:
-    #   artifacts/<os>[/<arch>]/images/<kernel-dirname>/base.ext4         (base)
-    #   artifacts/<os>[/<arch>]/images/<kernel-dirname>/<variant>/base.ext4  (variant)
+    # Layout (the image file itself is named by image_store):
+    #   artifacts/<os>[/<arch>]/images/<kernel-dirname>/            (base)
+    #   artifacts/<os>[/<arch>]/images/<kernel-dirname>/<variant>/  (variant)
+    from .image_store import current_image
+
     base_img_dir = output_dir / "images" / kernel_dirname
     img_dir = base_img_dir if variant == "base" else base_img_dir / variant
-    img = img_dir / "base.ext4"
-    if not img.exists():
+    img = current_image(img_dir)
+    if img is None:
         variant_hint = f" --variant {variant}" if variant != "base" else ""
         raise FileNotFoundError(
             f"No image for '{os_name}' kernel={kernel_dirname} "
@@ -544,6 +546,9 @@ class VMInfo:
     build_path: str = ""  # Lustre build tree last deployed
     kver: str = ""  # kernel version running in the VM
     base_image: str = ""  # base image name (e.g. rocky9-base.ext4)
+    # Size and mtime of the image file at create time (image_store); a
+    # start refuses an overlay whose base image no longer matches.
+    image_id: str = ""
     os_id: str = ""  # OS identifier (e.g. rocky9, ubuntu24)
     arch: str = "x86_64"  # CPU architecture (x86_64, aarch64)
     creator: str = (
@@ -662,6 +667,7 @@ class VMInfo:
             f"BUILD_PATH={self.build_path}\n"
             f"KVER={self.kver}\n"
             f"BASE_IMAGE={self.base_image}\n"
+            f"IMAGE_ID={self.image_id}\n"
             f"OS_ID={self.os_id}\n"
             f"ARCH={self.arch}\n"
             f"CREATOR={self.creator}\n"
@@ -854,6 +860,7 @@ class VMInfo:
             build_path=vals.get("BUILD_PATH", ""),
             kver=vals.get("KVER", ""),
             base_image=vals.get("BASE_IMAGE", ""),
+            image_id=vals.get("IMAGE_ID", ""),
             os_id=vals.get("OS_ID", ""),
             arch=vals.get("ARCH", "x86_64"),
             creator=vals.get("CREATOR", ""),

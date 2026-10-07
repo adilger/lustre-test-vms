@@ -1346,9 +1346,10 @@ class TargetConfig:
                 return False
             return any(mods.rglob("*.ko")) or any(mods.rglob("*.ko.xz"))
         if artifact == "image":
-            return (
-                self.image_output_dir(kernel, variant=v) / "base.ext4"
-            ).exists()
+            from .image_store import current_image
+
+            image_dir = self.image_output_dir(kernel, variant=v)
+            return current_image(image_dir) is not None
         return True
 
     def write_meta(

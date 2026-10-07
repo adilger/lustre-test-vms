@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .image_store import current_image, install_image
 from .paths import load_meta_safe
 from .target_config import TARGETS_DIR
 
@@ -667,19 +668,20 @@ def build_image(
         lustre_hash_input = _lustre_staging_hash_input(lustre_staging)
 
     combined_extra_hash = lustre_hash_input + mofed_kmods_hash_input
+    out_dir = target_config.image_output_dir(kernel)
     if not force and not target_config.is_stale(
         "image", kernel=kernel, extra_hash=combined_extra_hash
     ):
-        log.info(
-            "Image for %s (kernel=%s) is up to date, skipping (use force=True to rebuild)",
-            target_config.name,
-            kernel_name,
-        )
-        return target_config.image_output_dir(kernel) / "base.ext4"
+        current = current_image(out_dir)
+        if current is not None:
+            log.info(
+                "Image for %s (kernel=%s) is up to date, skipping (use force=True to rebuild)",
+                target_config.name,
+                kernel_name,
+            )
+            return current
 
-    out_dir = target_config.image_output_dir(kernel)
     out_dir.mkdir(parents=True, exist_ok=True)
-    image_path = out_dir / "base.ext4"
 
     tag = _container_image_tag(target_config)
     dockerfile = target_config.target_dir / "image.Dockerfile"
@@ -1023,7 +1025,7 @@ def build_image(
     # the next build pass benefits from layer caching.
     log.info("Exporting container to ext4 ...")
     try:
-        image_path = _export_to_ext4(final_tag, image_path)
+        image_path = _export_to_ext4(final_tag, out_dir)
     except BaseException:
         if final_tag != tag:
             subprocess.run(
@@ -1113,9 +1115,12 @@ def _compute_image_size_mb_from_tar(tarball: Path) -> int:
 
 def _export_to_ext4(
     container_tag: str,
-    image_path: Path,
+    out_dir: Path,
 ) -> Path:
-    """Export a container image to a raw ext4 file, rootless.
+    """Export a container image to a new ext4 image in *out_dir*, rootless.
+
+    The image is installed under a versioned name and made current
+    (image_store); the path returned is the versioned one.
 
     1. podman create + podman export to a tarball
     2. fakeroot tar -x into a tmpdir (preserves uid=0 on-disk)
@@ -1141,11 +1146,11 @@ def _export_to_ext4(
         rootfs.mkdir()
         tarball = Path(tmpdir) / "rootfs.tar"
 
-        image_path.parent.mkdir(parents=True, exist_ok=True)
+        out_dir.mkdir(parents=True, exist_ok=True)
         tmp_f = tempfile.NamedTemporaryFile(
             suffix=".ext4",
             prefix="ltvm-image-",
-            dir=str(image_path.parent),
+            dir=str(out_dir),
             delete=False,
         )
         tmpfile = tmp_f.name
@@ -1291,7 +1296,7 @@ def _export_to_ext4(
         # A VM's QEMU, running as whoever created it, opens this as its
         # read-only backing file.
         os.chmod(tmpfile, 0o644)
-        os.rename(tmpfile, str(image_path))
+        image_path = install_image(Path(tmpfile), out_dir)
         tmpfile = None
 
         return image_path
@@ -1401,7 +1406,7 @@ def image_status(
         build_date: str or None -- ISO timestamp
         stale: bool -- whether inputs have changed
         size_mb: float or None -- image file size
-        path: str or None -- path to base.ext4
+        path: str or None -- path to the current image file
         kernel: str -- resolved kernel name this image is paired with
         variant: str -- variant name this image belongs to
     """
@@ -1409,10 +1414,10 @@ def image_status(
     variant_name = target_config.variant_name if variant is None else variant
     kernel_name = target_config.resolve_kernel(kernel)
     out_dir = target_config.image_output_dir(kernel, variant=variant_name)
-    image_path = out_dir / "base.ext4"
+    image_path = current_image(out_dir)
     meta_path = out_dir / "meta.json"
 
-    if not image_path.exists():
+    if image_path is None:
         return {
             "built": False,
             "build_date": None,

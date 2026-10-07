@@ -316,7 +316,7 @@ class TestImageAssetRequiresBaseExt4:
         # the build is killed (OOM during mke2fs -d, say).
         (idir / "ltvm-image-ab12cd.ext4").write_bytes(b"partial" * 1024)
 
-        with pytest.raises(ValueError, match="no usable base.ext4"):
+        with pytest.raises(ValueError, match="no usable image"):
             self._publish(out, tmp_path / "release")
 
     def test_the_error_names_the_stray(self, tmp_path: Path) -> None:
@@ -332,7 +332,7 @@ class TestImageAssetRequiresBaseExt4:
         out = _make_fake_output(tmp_path)
         (out / "images" / "5.14-rhel9.7" / "base.ext4").write_bytes(b"")
 
-        with pytest.raises(ValueError, match="no usable base.ext4"):
+        with pytest.raises(ValueError, match="no usable image"):
             self._publish(out, tmp_path / "release")
 
 

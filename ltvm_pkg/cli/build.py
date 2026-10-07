@@ -48,6 +48,7 @@ from ltvm_pkg.host_setup import (
     stop_podman_machine_macos,
 )
 from ltvm_pkg.image_build import image_status
+from ltvm_pkg.image_store import current_image
 from ltvm_pkg.kernel_build import kernel_status
 from ltvm_pkg.lustre_build import staging_path
 from ltvm_pkg.target_config import LustreMode, TargetConfig
@@ -1278,7 +1279,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             )
             for v in declared_variants:
                 v_dir = kernel_image_dir / v
-                if not (v_dir / "base.ext4").exists():
+                if current_image(v_dir) is None:
                     continue
                 images.append(image_status(tc, kernel=k, variant=v))
         if explain:

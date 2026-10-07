@@ -156,7 +156,15 @@ def _isolate_vm_state(tmp_path_factory: pytest.TempPathFactory) -> object:
     ClusterInfo.save() in cluster deploy rewrote co3.cluster.  A test
     that needs its own directory patches SOCKETS again inside this one.
     """
-    with patch("ltvm_pkg.vm_state.SOCKETS", tmp_path_factory.mktemp("sockets")):
+    with (
+        patch("ltvm_pkg.vm_state.SOCKETS", tmp_path_factory.mktemp("sockets")),
+        # `ltvm clean` reads every overlay's backing file
+        # (image_store.referenced_images); the host's VMs must not
+        # decide what a test may prune.
+        patch(
+            "ltvm_pkg.vm_state.OVERLAYS", tmp_path_factory.mktemp("overlays")
+        ),
+    ):
         yield
 
 

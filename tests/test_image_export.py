@@ -327,7 +327,7 @@ class TestExportImageGuards:
             "_check_host_tools",
             return_value=_TOOLS,
         ):
-            with pytest.raises(FileNotFoundError, match="base.ext4"):
+            with pytest.raises(FileNotFoundError, match="No image for"):
                 ie.export_image(tc, None, tmp_path / "o.qcow2")
 
     def test_missing_vmlinuz(self, tmp_path: Path) -> None:
@@ -1069,7 +1069,7 @@ class TestExportImageGceGuards:
             "_check_host_tools",
             return_value=_TOOLS,
         ):
-            with pytest.raises(FileNotFoundError, match="base.ext4"):
+            with pytest.raises(FileNotFoundError, match="No image for"):
                 ie.export_image(
                     tc, None, tmp_path / "o.tar.gz", image_format="gce"
                 )

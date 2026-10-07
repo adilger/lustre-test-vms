@@ -569,6 +569,12 @@ def launch_qemu(vm: VMInfo, *, wait_seconds: int = 0) -> None:
     if not vm.overlay_path.exists():
         die(f"overlay missing for '{vm.name}'")
 
+    from .image_store import check_backing
+
+    refusal = check_backing(vm)
+    if refusal:
+        die(refusal)
+
     if is_macos():
         from .host_setup import ensure_socket_vmnet_running
 

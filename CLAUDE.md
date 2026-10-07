@@ -261,9 +261,48 @@ autologin, kdump pre-configured (vmlinuz + initramfs
 baked in at build time).  No kernel inside the image --
 QEMU passes it via `-kernel`.
 
+### Image files are never replaced
+
+A VM's root disk is a qcow2 overlay backed by an image file
+*by path*, holding only the blocks the VM wrote.  Renaming a
+rebuilt image over that path left running VMs fine (QEMU
+holds the old inode) and every stopped one booting its blocks
+over a different filesystem: "No working init found".  So
+([ltvm_pkg/image_store.py](ltvm_pkg/image_store.py)):
+
+- Each build, and each fetch, lands as
+  `base-<UTC stamp>-<hex>.ext4`; `current.ext4`, a relative
+  symlink beside it, names the one new VMs get, and is
+  swapped atomically.  `current_image(dir)` is the only way
+  to find "the image" -- status, export, publish, doctor and
+  create all go through it.
+- `create` hands qemu-img the **resolved** versioned file
+  (and resolves a symlinked `--image`), so no later build can
+  move an overlay's base.
+- `base.ext4` is the legacy name, the plain file pre-scheme
+  overlays name.  Nothing writes it again: it is current only
+  in a directory with no `current.ext4`.  Do not turn it into
+  a symlink or a pointer -- old overlays would follow it.
+- Publish still ships the current image as `base.ext4`
+  (tar `-h` through a tree of symlinks), so the release
+  format is unchanged; fetch extracts the image asset into a
+  staging dir and installs it versioned.
+- `create` records the image's `size:mtime_ns` as `IMAGE_ID`
+  in the `.info`; `launch_qemu` reads the backing file from
+  the overlay's qcow2 header and refuses to boot when it is
+  gone or its identity moved.  A VM without `IMAGE_ID` is
+  warned about when the image's mtime/ctime is after its
+  `CREATED`, and otherwise adopts the record.
+- `ltvm clean` removes image files that are neither current
+  nor any overlay's backing file (qcow2 headers in
+  `overlays/`, plus every `.info`'s `IMAGE`), and keeps an
+  orphan image dir that one still uses -- `--force`
+  included.  One overlay whose backing file it cannot read
+  keeps every image.
+
 ## Exporting Images
 
-`ltvm target export` repackages a built `base.ext4` + its
+`ltvm target export` repackages a built image + its
 kernel + GRUB2 into one self-contained bootable disk -- for
 people (or clouds) that don't have the ltvm runtime.
 

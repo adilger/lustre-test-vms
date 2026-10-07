@@ -686,6 +686,15 @@ def _handle_existing_vm(name: str, args: argparse.Namespace) -> bool:
     return True
 
 
+def _image_id(image: str) -> str:
+    from .image_store import image_identity
+
+    try:
+        return image_identity(image)
+    except OSError:
+        return ""
+
+
 def _allocate_and_persist_vm(
     args: argparse.Namespace,
     info_path: Path,
@@ -740,6 +749,7 @@ def _allocate_and_persist_vm(
             kernel=kernel,
             created=int(time.time()),
             base_image=base_name,
+            image_id=_image_id(image),
             os_id=os_id,
             kver=kver,
             arch=os_arts.arch,
@@ -902,6 +912,9 @@ def _resolve_os_and_kernel(
     os_arts = resolve_os_artifacts(
         os_target, arch=arch, kernel=explicit_kernel or None, variant=variant
     )
+    if explicit_image and os.path.islink(explicit_image):
+        # The overlay must name the file, not a pointer a rebuild moves.
+        explicit_image = os.path.realpath(explicit_image)
     image = explicit_image or str(os_arts.image)
     kernel = str(os_arts.kernel)
     # If the user didn't pass --mem, fall back to the target's default

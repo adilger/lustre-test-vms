@@ -3,19 +3,23 @@
 Distinct from ``ltvm target clean`` (the per-target wipe-it-all hammer
 in build.py): this command walks artifacts/<target>/<arch>/{kernels,
 images}/, identifies superseded kernel builds, off-list (no longer in
-targets.yaml ``kernels.available``) kernel groups, and orphan images
-(no matching kernel), and previews them.  Default is dry-run; pass
-``--apply`` to actually delete.
+targets.yaml ``kernels.available``) kernel groups, orphan images
+(no matching kernel) and superseded image files (image_store), and
+previews them.  Default is dry-run; pass ``--apply`` to actually delete.
 
 Always preserved (unless --force):
   - The target's default kernel (latest within its short-prefix group).
   - Any variant-pinned kernel (latest within its short-prefix group).
+
+Always preserved, --force or not: any image file a VM overlay on this
+host is backed by, and the current image of every image directory.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
 from dataclasses import dataclass, field
@@ -127,6 +131,15 @@ def _short_prefix(full_dirname: str, declared_shorts: list[str]) -> str:
     return max(matches, key=len)
 
 
+def _file_age_days(path: Path) -> float | None:
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return None
+    dt = datetime.fromtimestamp(mtime, tz=timezone.utc)
+    return (datetime.now(tz=timezone.utc) - dt).total_seconds() / 86400.0
+
+
 def _scan_target(
     target: str,
     arch: str,
@@ -134,9 +147,20 @@ def _scan_target(
     keep: int,
     older_than_days: float | None,
     force: bool,
+    referenced: tuple[set[str], list[str]] | None = None,
 ) -> _TargetReport | None:
     """Walk artifacts/<target>/<arch>/{kernels,images} and produce a
-    report.  Returns None when the target/arch dir doesn't exist."""
+    report.  Returns None when the target/arch dir doesn't exist.
+
+    ``referenced`` is image_store.referenced_images(), computed here
+    when not given.  While any overlay's backing file is unknown, no
+    image is offered for removal.
+    """
+    from ltvm_pkg.image_store import (
+        current_image,
+        image_files,
+        referenced_images,
+    )
     from ltvm_pkg.target_config import ARTIFACTS_DIR, DEFAULT_VARIANT
 
     arch_dir = ARTIFACTS_DIR / target / arch
@@ -144,6 +168,14 @@ def _scan_target(
         return None
 
     report = _TargetReport(target=target, arch=arch)
+    refs, unknown_refs = (
+        referenced if referenced is not None else referenced_images()
+    )
+
+    def _in_use(files: list[Path]) -> bool:
+        return bool(unknown_refs) or any(
+            os.path.realpath(f) in refs for f in files
+        )
 
     # Resolve declared shorts + protected shorts (default + variant pins)
     # from a TargetConfig.  If the target was removed from yaml, fall
@@ -276,8 +308,7 @@ def _scan_target(
             # independently prunable units.
             image_dirs: list[tuple[str, Path]] = []
             base_meta = kdir / "meta.json"
-            base_ext4 = kdir / "base.ext4"
-            if base_meta.exists() or base_ext4.exists():
+            if base_meta.exists() or image_files(kdir):
                 image_dirs.append((DEFAULT_VARIANT, kdir))
             for sub in sorted(kdir.iterdir()):
                 if sub.is_dir():
@@ -289,9 +320,44 @@ def _scan_target(
                 elif kernel_pruned:
                     reason = f"image of pruned kernel {kdir.name!r}"
                 else:
-                    # Kernel survives; image is fine.  (Aging-only
-                    # cleanup of standalone images is a follow-up;
-                    # mixed signals there are easy to misread.)
+                    # Kernel survives: only the image files a rebuild
+                    # superseded, and only once no overlay uses them.
+                    current = current_image(idir)
+                    if current is None:
+                        continue
+                    for f in image_files(idir):
+                        if f == current:
+                            continue
+                        if _in_use([f]):
+                            report.skipped += 1
+                            continue
+                        age = _file_age_days(f)
+                        if older_than_days is not None and (
+                            age is None or age < older_than_days
+                        ):
+                            continue
+                        report.candidates.append(
+                            _Candidate(
+                                target=target,
+                                arch=arch,
+                                kind=f"image-file[{variant_name}]",
+                                path=f,
+                                bytes=f.stat().st_size,
+                                reason="superseded image; no VM overlay "
+                                "is backed by it",
+                                age_days=age,
+                            )
+                        )
+                    continue
+
+                # rmtree of the base dir takes its variant subdirs too.
+                tree_files = [
+                    f
+                    for d in [idir, *(p for p in idir.rglob("*") if p.is_dir())]
+                    for f in image_files(d)
+                ]
+                if _in_use(tree_files):
+                    report.skipped += 1
                     continue
 
                 # Age filter: only kick the image out if the image
@@ -408,6 +474,18 @@ def cmd_prune(args: argparse.Namespace) -> int:
         # business pruning the shared artifacts, and cannot anyway.
         targets = []
         reports.append(_scan_user_zfs(target_arg))
+
+    from ltvm_pkg.image_store import referenced_images
+
+    referenced: tuple[set[str], list[str]] = (
+        referenced_images() if targets else (set(), [])
+    )
+    if referenced[1]:
+        print(
+            f"  WARNING: cannot tell which base image the overlay of "
+            f"{', '.join(referenced[1])} is backed by; keeping every image",
+            file=sys.stderr,
+        )
     for t in targets:
         for a in _arches_for_target(t, arch_flag):
             r = _scan_target(
@@ -416,6 +494,7 @@ def cmd_prune(args: argparse.Namespace) -> int:
                 keep=keep,
                 older_than_days=older_than_days,
                 force=force,
+                referenced=referenced,
             )
             if r is not None:
                 reports.append(r)
@@ -441,7 +520,10 @@ def cmd_prune(args: argparse.Namespace) -> int:
                 removed.append(c)
                 continue
             try:
-                shutil.rmtree(c.path)
+                if c.path.is_dir() and not c.path.is_symlink():
+                    shutil.rmtree(c.path)
+                else:
+                    c.path.unlink()
                 removed.append(c)
             except OSError as e:
                 apply_errors.append((c.path, str(e)))

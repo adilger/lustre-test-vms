@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -220,17 +221,21 @@ def _tar_zstd(
     entries: list[str],
     out: Path,
     exclude: list[str] | None = None,
+    dereference: bool = False,
 ) -> None:
     """Create ``out``.tar.zst containing *entries* relative to
     ``base_dir``.  Uses ``tar --use-compress-program`` so we get a
     single-pass pipeline with no intermediate uncompressed tarball.
 
     ``exclude`` paths are also relative to ``base_dir`` (tar applies
-    --exclude after -C).
+    --exclude after -C).  ``dereference`` archives what symlinks point
+    at, under the link's name.
     """
     _check_zstd()
     compress_prog = f"zstd -{ZSTD_LEVEL} -T{ZSTD_THREADS} --long={ZSTD_LONG}"
     cmd = ["tar", f"--use-compress-program={compress_prog}"]
+    if dereference:
+        cmd.append("-h")
     for pat in exclude or []:
         cmd += ["--exclude", pat]
     cmd += [
@@ -302,16 +307,42 @@ def share_base_images(target_dir: Path) -> None:
 
     for img in _base_images(target_dir):
         try:
-            chmod_regular(img, img.lstat().st_mode & 0o7777 | 0o044)
+            mode = img.lstat().st_mode & 0o7777
+            # A chmod moves ctime, which image_store reads as a change.
+            if mode & 0o044 != 0o044:
+                chmod_regular(img, mode | 0o044)
         except OSError:
             pass
 
 
 def _base_images(target_dir: Path) -> list[Path]:
+    """Every image file under *target_dir*, current or not."""
+    from .image_store import image_files
+
     images = target_dir / "images"
-    return sorted(
-        list(images.glob("*/base.ext4")) + list(images.glob("*/*/base.ext4"))
-    )
+    dirs = [p for p in images.glob("*") if p.is_dir()]
+    dirs += [p for p in images.glob("*/*") if p.is_dir()]
+    return sorted(img for d in dirs for img in image_files(d))
+
+
+def _install_fetched_images(staging: Path, output_base: Path) -> None:
+    """Move an extracted image asset from *staging* into place.
+
+    Each image goes in under a versioned name (image_store), never over
+    a file an existing VM overlay may be backed by.
+    """
+    from .image_store import LEGACY, install_image
+
+    for src in sorted(staging.rglob("*")):
+        if not src.is_file() or src.is_symlink():
+            continue
+        rel = src.relative_to(staging)
+        dest_dir = output_base / rel.parent
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        if src.name == LEGACY:
+            install_image(src, dest_dir)
+        else:
+            os.replace(src, dest_dir / src.name)
 
 
 def _zstd_file(src: Path, dst: Path) -> None:
@@ -753,27 +784,28 @@ def package_target(
             + (f" --variant {variant}" if variant != DEFAULT_VARIANT else "")
         )
 
-    # Require the canonical base.ext4 -- mke2fs writes a temp
+    # Require the current image (image_store) -- mke2fs writes a temp
     # ltvm-image-XXXXXXXX.ext4 first and renames it once the build is
     # complete, but interrupted builds leave 0-byte (or stale, full-
-    # size but non-renamed) temp files alongside the real base.ext4.
+    # size but non-renamed) temp files alongside the real image.
     # A glob("*.ext4") then picks one of those, and the published
     # release ships a broken image asset.
     #
     # This used to fall back to the first non-empty *.ext4 whenever
     # base.ext4 was missing or zero-length -- doing exactly what the
-    # paragraph above warns about.  The tar member keeps its real
-    # name, and every consumer of a fetched image looks for
-    # "base.ext4" specifically (vm_state.resolve_os_artifacts,
-    # image_status, image_export), so such an asset extracted cleanly
+    # paragraph above warns about.  Such an asset extracted cleanly
     # and then read as "not built": `ltvm create` failed on a target
     # that had just been fetched successfully.
-    base_ext4 = paths["image_dir"] / "base.ext4"
-    if not base_ext4.exists() or base_ext4.stat().st_size == 0:
+    from .image_store import CURRENT, current_image, is_image_name
+
+    current = current_image(paths["image_dir"])
+    if current is None or current.stat().st_size == 0:
         strays = sorted(
             p.name
             for p in paths["image_dir"].glob("*.ext4")
-            if p.name != "base.ext4" and p.stat().st_size > 0
+            if not is_image_name(p.name)
+            and p.name != CURRENT
+            and p.stat().st_size > 0
         )
         hint = (
             f"\n  ({', '.join(strays)} is a leftover mke2fs temp file, "
@@ -782,10 +814,10 @@ def package_target(
             else ""
         )
         raise ValueError(
-            f"no usable base.ext4 in {paths['image_dir']} -- did "
+            f"no usable image in {paths['image_dir']} -- did "
             f"`ltvm build image` finish successfully?{hint}"
         )
-    image_ext4 = base_ext4
+    image_ext4 = current
 
     # Read version for naming.
     kmeta = load_meta_safe(kernel_dir / "meta.json")
@@ -883,15 +915,22 @@ def package_target(
     # variant -- without this filter the base asset would include the
     # MOFED image and the export qcow2 and blow past GitHub's 2 GiB
     # per-asset cap.
+    # The asset carries the current image as base.ext4, the name every
+    # fetcher expects, whatever it is called here: tar it through a
+    # tree of symlinks with -h.
     img_asset = dest_dir / _image_asset_name(target_name, arch, kver, variant)
     print(f"  [image]     {img_asset.name}")
-    image_members = [
-        str(image_ext4.relative_to(tar_base)),
-    ]
-    image_meta = paths["image_dir"] / "meta.json"
-    if image_meta.exists():
-        image_members.append(str(image_meta.relative_to(tar_base)))
-    _tar_zstd(tar_base, image_members, img_asset)
+    image_rel = paths["image_dir"].relative_to(tar_base)
+    with tempfile.TemporaryDirectory(prefix="ltvm-publish-") as td:
+        link_dir = Path(td) / image_rel
+        link_dir.mkdir(parents=True)
+        (link_dir / "base.ext4").symlink_to(image_ext4.resolve())
+        image_members = [str(image_rel / "base.ext4")]
+        image_meta = paths["image_dir"] / "meta.json"
+        if image_meta.exists():
+            (link_dir / "meta.json").symlink_to(image_meta.resolve())
+            image_members.append(str(image_rel / "meta.json"))
+        _tar_zstd(Path(td), image_members, img_asset, dereference=True)
     assets["image"] = img_asset
 
     # ---- lustre asset (optional) ----
@@ -1475,7 +1514,19 @@ def fetch_target(
                 progress.set_phase("verifying")
                 _expect_sha256(tarball, sha, expected_size=size)
                 progress.set_phase("extracting")
-                _untar_zstd(tarball, output_base)
+                if asset["kind"] == "image":
+                    staging = Path(
+                        tempfile.mkdtemp(
+                            prefix=".ltvm-fetch-image-", dir=output_base
+                        )
+                    )
+                    try:
+                        _untar_zstd(tarball, staging)
+                        _install_fetched_images(staging, output_base)
+                    finally:
+                        shutil.rmtree(staging, ignore_errors=True)
+                else:
+                    _untar_zstd(tarball, output_base)
                 tarball.unlink()  # free disk eagerly on a multi-GB fetch
                 progress.finish_item()
         finally:
