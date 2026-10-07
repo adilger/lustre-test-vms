@@ -4,3 +4,6 @@
 # /usr/local/bin instead.
 # EL installs openmpi off PATH; cfg/local.sh finds mpirun with which.
 [ -d /usr/lib64/openmpi/bin ] && export PATH="$PATH:/usr/lib64/openmpi/bin"
+# parallel-scale finds compilebench and connectathon only through these.
+[ -d /opt/compilebench ] && export cbench_DIR=${cbench_DIR:-/opt/compilebench}
+[ -d /opt/connectathon ] && export cnt_DIR=${cnt_DIR:-/opt/connectathon}

@@ -21,6 +21,8 @@ set -euo pipefail
 IOR_VERSION="${IOR_VERSION:-4.0.0}"
 IOZONE_VERSION="${IOZONE_VERSION:-3_506}"
 SIMUL_VERSION="${SIMUL_VERSION:-1.16}"
+COMPILEBENCH_REF="${COMPILEBENCH_REF:-28ad3d580d84428beeda5c857f7c4b42bd90f9eb}"
+CTHON04_REF="${CTHON04_REF:-86a4501a6e1e415844dc632894a85a5253cc1505}"
 DBENCH_LOADFILE_REF="${DBENCH_LOADFILE_REF:-a8e1c0fbb8bdb23ee22c0cc2e3f9b1049e537fff}"
 
 TARGET_ARCH="${TARGET_ARCH:-$(uname -m)}"
@@ -163,6 +165,33 @@ cd /tmp && rm -rf pjdfstest
 mkdir -p "${DESTDIR}/usr/share/dbench"
 curl -fsSL "https://raw.githubusercontent.com/sahlberg/dbench/${DBENCH_LOADFILE_REF}/loadfiles/client.load" \
     -o "${DESTDIR}/usr/share/dbench/client.txt"
+
+# compilebench (parallel-scale): Josef Bacik's python3 port.  It reads its
+# dataset files from the directory it is run in, which the suite cd's to
+# ($cbench_DIR, exported by lustre-tests-path.sh).
+mkdir -p "${DESTDIR}/opt/compilebench"
+for f in compilebench dataset-patched dataset-patched-compiled \
+	dataset-unpatched dataset-unpatched-compiled; do
+	curl -fsSL "https://raw.githubusercontent.com/josefbacik/compilebench/${COMPILEBENCH_REF}/$f" \
+	    -o "${DESTDIR}/opt/compilebench/$f"
+done
+sed -i '1s|.*|#!/usr/bin/python3|' "${DESTDIR}/opt/compilebench/compilebench"
+chmod 755 "${DESTDIR}/opt/compilebench/compilebench"
+
+# connectathon (parallel-scale, parallel-scale-nfs*): the suite runs
+# $cnt_DIR/runtests, from a built tree.
+if [[ -z "$CROSS_TRIPLE" ]]; then
+	git clone git://git.linux-nfs.org/projects/steved/cthon04.git /tmp/cthon04
+	git -C /tmp/cthon04 checkout -q "$CTHON04_REF"
+	# runtests needs these four; tools/ wants libtirpc, which the image lacks.
+	for d in basic general special lock; do
+		make -C /tmp/cthon04/$d
+	done
+	rm -rf /tmp/cthon04/.git
+	mkdir -p "${DESTDIR}/opt"
+	cp -a /tmp/cthon04 "${DESTDIR}/opt/connectathon"
+	rm -rf /tmp/cthon04
+fi
 
 # auster by name, without the tests directory on PATH (lustre-tests-path.sh).
 # exec by full path: auster finds the tree from its own $0.

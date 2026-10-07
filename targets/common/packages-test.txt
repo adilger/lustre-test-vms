@@ -70,6 +70,10 @@ lzop
 
 # Filesystem / block utilities
 nfs-utils
+# connectathon (parallel-scale): runtests times each pass with
+# /usr/bin/time, and its Makefiles ask pkg-config for libtirpc
+time
+libtirpc-devel
 sg3_utils
 quota
 

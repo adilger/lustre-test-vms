@@ -88,3 +88,4 @@ pkgconf-pkg-config    pkg-config
 kernel-rpm-macros     -
 rpm-build             debhelper dpkg-dev
 xz                    xz-utils
+libtirpc-devel        libtirpc-dev
