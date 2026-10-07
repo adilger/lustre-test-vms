@@ -357,11 +357,6 @@ def configure_test_disks(
             letter = chr(ord("a") + mdt_disks + n)
             lines.append(f"OSTDEV{n}=/dev/vd{letter}")
 
-    # llmount leaves a dm-flakey mapper over each target device, and
-    # stop() keeps it unless CLEANUP_DM_DEV is set, so a suite that
-    # reformats (conf-sanity) found /dev/vdb held and mkfs failed.
-    lines.append("CLEANUP_DM_DEV=true")
-
     snippet = "\\n".join(lines)
     cfg = f"{testdir}/cfg/local.sh"
     tmp = "/tmp/.ltvm-disk-block"

@@ -368,10 +368,6 @@ def generate_local_sh(
     lines.append("DIR3=${DIR3:-$MOUNT3}")
     lines.append("")
 
-    # Tests run from a client, which has no disk block of its own, and
-    # it is the client's stop() that must remove each target's dm-flakey
-    # mapper for a reformatting suite to reach the raw device.
-    lines.append("CLEANUP_DM_DEV=true")
     lines.append(f"{CLUSTER_BLOCK_END} ---")
 
     return "\n".join(lines) + "\n"

@@ -145,10 +145,11 @@ class TestConfigureTestDisks:
         assert "MDSSIZE=1024" in script
         assert "OSTSIZE" not in script
 
-    def test_reformatting_suites_reach_the_raw_devices(self) -> None:
-        """stop() must drop llmount's dm-flakey mappers, or conf-sanity's
-        own reformat finds /dev/vdb held and mkfs fails."""
-        assert "CLEANUP_DM_DEV=true" in self._capture_script(mdt=1, ost=1)
+    def test_stop_keeps_dm_flakey_mappers(self) -> None:
+        """CLEANUP_DM_DEV stays the framework's false, as in CI: with true,
+        every stop() drops the mapper while ${facet}_dev can still name
+        it, and the next start fails (sanity 160h, 278)."""
+        assert "CLEANUP_DM_DEV" not in self._capture_script(mdt=1, ost=1)
 
     def test_markers_wrap_generated_block(self) -> None:
         """The generated snippet is wrapped in VM-disk sentinel markers."""
