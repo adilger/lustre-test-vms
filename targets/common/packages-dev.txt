@@ -45,6 +45,9 @@ pkgconf-pkg-config
 kernel-rpm-macros
 krb5-devel
 
+# Lustre's MPI test programs (mdsrate, cascading_rw, write_disjoint...)
+openmpi-devel
+
 # --- Optional build tools (best-effort: nasm) ---
 nasm
 

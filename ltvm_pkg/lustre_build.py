@@ -831,6 +831,15 @@ def _build_in_container(
     # second OSD rather than replacing the first.
     if zfs_src is not None:
         cfg += " --with-zfs=/zfs"
+    if not cross_compiling:
+        # Lustre's MPI test programs (mdsrate, cascading_rw,
+        # write_disjoint...) build only when configure finds mpicc, and EL
+        # keeps it off PATH; parallel-scale and performance-sanity skip
+        # without them.  Expanded in the container.
+        cfg += (
+            ' "--enable-mpitests=$(command -v mpicc ||'
+            ' ls /usr/lib64/openmpi/bin/mpicc 2>/dev/null || echo no)"'
+        )
     if extra_configure:
         # shlex.quote each arg so paths with spaces (e.g.
         # --with-linux="/tmp/build dir/linux") and configure flags with
