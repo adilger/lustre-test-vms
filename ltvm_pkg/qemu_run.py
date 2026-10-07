@@ -83,21 +83,26 @@ _CGROUP_ROOT = Path("/sys/fs/cgroup")
 
 
 def _cgroup_memory_limit_mb(
-    proc_cgroup: Path = Path("/proc/self/cgroup"), root: Path = _CGROUP_ROOT
+    proc_cgroup: Path = Path("/proc/self/cgroup"),
+    root: Path = _CGROUP_ROOT,
+    relative: str | None = None,
 ) -> int:
-    """The tightest memory.max over this process's cgroup and its parents,
-    in MiB, or 0 for none.
+    """The tightest memory.max over a cgroup and its parents, in MiB, or 0
+    for none.  The cgroup is ``relative`` to ``root`` when given, else this
+    process's own.
 
     In a container MemTotal is the host's, not what the container's QEMU
     may use: past its limit the kernel kills a guest instead.
     """
-    try:
-        text = proc_cgroup.read_text()
-    except OSError:
-        return 0
-    relative = next(
-        (line[3:] for line in text.splitlines() if line.startswith("0::")), None
-    )
+    if relative is None:
+        try:
+            text = proc_cgroup.read_text()
+        except OSError:
+            return 0
+        relative = next(
+            (line[3:] for line in text.splitlines() if line.startswith("0::")),
+            None,
+        )
     if relative is None:
         return 0
     directory = root / relative.strip().lstrip("/")
@@ -183,7 +188,7 @@ def _memory_shortfall(vm: VMInfo) -> _Shortfall | None:
         # check rather than block legitimate launches.
         return None
     total_source = "MemTotal"
-    cgroup_mb = _cgroup_memory_limit_mb()
+    cgroup_mb = _cgroup_memory_limit_mb(relative=_guest_cgroup(vm))
     if 0 < cgroup_mb < host_total_mb:
         host_total_mb, total_source = cgroup_mb, "cgroup memory.max"
 
@@ -483,6 +488,24 @@ def _manager_outlives_login(uid: int) -> bool:
     except (OSError, subprocess.TimeoutExpired):
         return False
     return r.returncode == 0 and r.stdout.strip() == "yes"
+
+
+def _guest_cgroup(vm: VMInfo) -> str | None:
+    """The cgroup a launched guest's QEMU will live in, when not ltvm's own.
+
+    A guest that gets a user scope of its own (``_guest_scope``) leaves the
+    caller's cgroup, so a memory.max on that -- a tool's transient scope, a
+    service -- does not bound it, and the user manager's app.slice does.
+    ``None`` means the caller's cgroup, as for a root QEMU.
+    """
+    if os.geteuid() == 0 or any(
+        n.split(":", 1)[0] == "passthrough" for n in vm.nics
+    ):
+        return None
+    if not _guest_scope(vm) or not rootless.readiness().ok:
+        return None
+    uid = os.geteuid()
+    return f"/user.slice/user-{uid}.slice/user@{uid}.service/app.slice"
 
 
 def _guest_scope(vm: VMInfo) -> list[str]:

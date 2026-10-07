@@ -859,14 +859,54 @@ class TestCgroupMemoryLimit:
     def test_unreadable_is_none(self, tmp_path: Path) -> None:
         assert qemu_run._cgroup_memory_limit_mb(tmp_path / "no", tmp_path) == 0
 
+    def test_named_cgroup_instead_of_own(self, tmp_path: Path) -> None:
+        """relative= reads that cgroup and its parents, not /proc/self's."""
+        root = tmp_path / "cg"
+        own = root / "app.slice" / "run-x.scope"
+        own.mkdir(parents=True)
+        (own / "memory.max").write_text(str(10 * 1024**3))
+        other = root / "user.slice" / "app.slice"
+        other.mkdir(parents=True)
+        (other / "memory.max").write_text("max")
+        proc = tmp_path / "cgroup"
+        proc.write_text("0::/app.slice/run-x.scope\n")
+        assert qemu_run._cgroup_memory_limit_mb(proc, root) == 10240
+        assert (
+            qemu_run._cgroup_memory_limit_mb(
+                proc, root, relative="/user.slice/app.slice"
+            )
+            == 0
+        )
+
 
 class TestMemoryBudgetCheck:
     """_memory_shortfall says when a launch would exceed the host."""
 
     @pytest.fixture(autouse=True)
     def _no_cgroup_limit(self) -> Iterator[None]:
-        with patch("ltvm_pkg.qemu_run._cgroup_memory_limit_mb", return_value=0):
+        with (
+            patch("ltvm_pkg.qemu_run._cgroup_memory_limit_mb", return_value=0),
+            patch("ltvm_pkg.qemu_run._guest_cgroup", return_value=None),
+        ):
             yield
+
+    def test_a_guest_in_its_own_scope_is_bounded_by_that_slice(
+        self, tmp_vmdir: Path
+    ) -> None:
+        """A caller in a capped transient scope does not cap a guest that
+        systemd-run moves out of it: the limit read is the app.slice's."""
+        vm = _make_vm(tmp_vmdir, mem=2048)
+        slice_path = "/user.slice/user-1000.slice/user@1000.service/app.slice"
+        with (
+            patch("ltvm_pkg.qemu_run._read_meminfo_mb", return_value=16384),
+            patch("ltvm_pkg.qemu_run._guest_cgroup", return_value=slice_path),
+            patch(
+                "ltvm_pkg.qemu_run._cgroup_memory_limit_mb", return_value=0
+            ) as limit,
+            patch.object(VMInfo, "all_names", return_value=[]),
+        ):
+            assert qemu_run._memory_shortfall(vm) is None
+        limit.assert_called_once_with(relative=slice_path)
 
     def test_a_cgroup_limit_below_memtotal_is_the_budget(
         self, tmp_vmdir: Path
@@ -1787,3 +1827,34 @@ class TestGuestScope:
         )
         assert first[0] == "systemd-run"
         assert second[0] != "systemd-run"
+
+
+class TestGuestCgroup:
+    """_guest_cgroup names where a launched QEMU's memory is bounded."""
+
+    def test_own_scope_means_the_user_app_slice(self, tmp_vmdir: Path) -> None:
+        vm = _make_vm(tmp_vmdir)
+        ready = MagicMock(ok=True)
+        with (
+            patch("os.geteuid", return_value=1000),
+            patch(
+                "ltvm_pkg.qemu_run._guest_scope", return_value=["systemd-run"]
+            ),
+            patch("ltvm_pkg.rootless.readiness", return_value=ready),
+        ):
+            assert qemu_run._guest_cgroup(vm) == (
+                "/user.slice/user-1000.slice/user@1000.service/app.slice"
+            )
+
+    def test_no_scope_means_the_callers(self, tmp_vmdir: Path) -> None:
+        vm = _make_vm(tmp_vmdir)
+        with (
+            patch("os.geteuid", return_value=1000),
+            patch("ltvm_pkg.qemu_run._guest_scope", return_value=[]),
+        ):
+            assert qemu_run._guest_cgroup(vm) is None
+
+    def test_root_qemu_stays_in_the_callers(self, tmp_vmdir: Path) -> None:
+        vm = _make_vm(tmp_vmdir)
+        with patch("os.geteuid", return_value=0):
+            assert qemu_run._guest_cgroup(vm) is None
