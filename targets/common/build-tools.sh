@@ -164,6 +164,18 @@ mkdir -p "${DESTDIR}/usr/share/dbench"
 curl -fsSL "https://raw.githubusercontent.com/sahlberg/dbench/${DBENCH_LOADFILE_REF}/loadfiles/client.load" \
     -o "${DESTDIR}/usr/share/dbench/client.txt"
 
+# auster by name, without the tests directory on PATH (lustre-tests-path.sh).
+# exec by full path: auster finds the tree from its own $0.
+cat > "$PREFIX/bin/auster" <<'AUSTER'
+#!/bin/sh
+for d in /usr/lib64/lustre/tests /usr/lib/lustre/tests; do
+	[ -x "$d/auster" ] && exec "$d/auster" "$@"
+done
+echo "auster: Lustre tests are not installed" >&2
+exit 127
+AUSTER
+chmod 755 "$PREFIX/bin/auster"
+
 # FlameGraph (pure perl scripts -- no compilation needed)
 git clone --depth 1 https://github.com/brendangregg/FlameGraph.git \
     "$PREFIX/FlameGraph"
