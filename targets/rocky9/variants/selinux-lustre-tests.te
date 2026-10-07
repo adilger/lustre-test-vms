@@ -1,0 +1,10 @@
+module lustre-tests 1.0;
+
+require {
+	role unconfined_r;
+	role user_r;
+	role guest_r;
+}
+
+allow unconfined_r user_r;
+allow unconfined_r guest_r;

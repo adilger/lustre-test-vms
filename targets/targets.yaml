@@ -79,6 +79,10 @@ targets:
         params:
           mofed_version: 24.10-2.1.8.0
           mofed_distro: rhel9.5
+      # SELinux enforcing (targeted policy), for sanity-selinux.  Image
+      # only; the first boot relabels the root filesystem and reboots.
+      selinux:
+        image_overlay: rocky9/variants/selinux.image.Dockerfile
   # 64 KiB-page aarch64 client, to reproduce the customer ARM config
   rocky9-64k:
     # Explicit: CONFIG_ARM64_64K_PAGES is the whole point of this
