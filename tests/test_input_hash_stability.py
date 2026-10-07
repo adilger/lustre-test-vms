@@ -28,25 +28,25 @@ from ltvm_pkg.target_config import TargetConfig
 GOLDEN = [
     ("rocky8", "container", None, None, "c2fdbaa66888488a"),
     ("rocky8", "kernel", None, None, "538527744c6feba0"),
-    ("rocky8", "image", None, None, "593da62341abc67a"),
+    ("rocky8", "image", None, None, "06aa75d60d7384d8"),
     ("rocky9", "container", None, None, "4a58226592cb2cf5"),
     ("rocky9", "kernel", None, None, "77f9158647fe263a"),
-    ("rocky9", "image", None, None, "8cd05e6753ca57fc"),
+    ("rocky9", "image", None, None, "fbded2f368ac3bf5"),
     ("rocky9-64k", "container", None, None, "9ebe6bff482840f1"),
     ("rocky9-64k", "kernel", None, None, "e17374152a5f551f"),
     ("rocky9-64k", "image", None, None, "1043494b86c94b66"),
     ("rocky10", "container", None, None, "9f9eabcec78fc131"),
     ("rocky10", "kernel", None, None, "002508deb710c273"),
-    ("rocky10", "image", None, None, "c42c67c6effce457"),
+    ("rocky10", "image", None, None, "d9746536a8def37e"),
     ("mainline", "container", None, None, "c25d828a438d5e1b"),
     ("mainline", "kernel", None, None, "308f76a4721b789b"),
     ("mainline", "image", None, None, "a157de94f5ac4f1d"),
     ("ubuntu2404", "container", None, None, "26a4e30abaa1f452"),
     ("ubuntu2404", "kernel", None, None, "50a1d8e151ac94da"),
-    ("ubuntu2404", "image", None, None, "e108ef2259c0f273"),
+    ("ubuntu2404", "image", None, None, "008369c699bbc411"),
     ("ubuntu2604", "container", None, None, "4fa75398253edf73"),
     ("ubuntu2604", "kernel", None, None, "08406db2cab2835e"),
-    ("ubuntu2604", "image", None, None, "01a178e55c6cca9b"),
+    ("ubuntu2604", "image", None, None, "d0a798208ffffb59"),
     # A variant must not perturb the base hashes above, and must differ
     # from them.
     ("rocky9", "container", None, "mofed-24", "cc1a03c2d0fda310"),
@@ -55,6 +55,16 @@ GOLDEN = [
     ("rocky9", "kernel", "5.14-rhel9.5", None, "76614275449e5d48"),
     ("rocky9", "image", "5.14-rhel9.5", None, "3d56db7e0cbbc637"),
 ]
+
+
+@pytest.fixture(autouse=True)
+def _no_built_kernel(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """An image's hash folds in its built kernel's input_hash when one
+    exists; pin the goldens without it, or they hold only on the host
+    whose artifacts/ produced them."""
+    monkeypatch.setattr(
+        TargetConfig, "meta_path", lambda self, *a, **k: tmp_path / "none"
+    )
 
 
 @pytest.mark.parametrize(
