@@ -14,11 +14,15 @@ from ltvm_pkg.host_setup import (
     SSH_BLOCK_MARKER,
     HostInfo,
     _check_stale_ltvm_launcher,
+    _dnsmasq_config_files,
+    _dnsmasq_dir_files,
     _install_ltvm_launcher,
     _ltvm_launcher_needs_write,
+    _nat_masquerade_present,
     _network_already_configured,
     _qemu_installed_version,
     _render_ltvm_launcher,
+    _rewrite_bind_interfaces,
     _translate_pkgs,
     check_kvm,
     check_prerequisites,
@@ -480,6 +484,14 @@ class TestVerify:
             # podman --version
             if "podman" in cmd:
                 return _mock_completed(0, "podman version 4.9.0")
+            # iptables -t nat -S POSTROUTING
+            if "iptables" in cmd:
+                return _mock_completed(
+                    0,
+                    "-P POSTROUTING ACCEPT\n"
+                    "-A POSTROUTING -s 192.168.100.0/24 -o eth0 "
+                    "-j MASQUERADE\n",
+                )
             return _mock_completed(0)
 
         with (
@@ -656,6 +668,7 @@ def _all_ok_result() -> dict:
         "kvm": {"available": True},
         "bridge": {"up": True, "address": "192.168.100.1/24"},
         "dnsmasq": {"running": True},
+        "nat": {"masquerade": True, "subnet": "192.168.100"},
         "ltvm": {"installed": True, "path": "/usr/local/bin/ltvm"},
         "podman": {"installed": True, "version": "4.9.0"},
         "ssh": {"configured": True},
@@ -1451,3 +1464,340 @@ class TestChooseSubnet:
             choose_subnet(None)
 
         assert "--subnet" in str(e.value)
+
+
+# ------------------------------------------------------------------
+# TestDnsmasqConfigDiscovery
+# ------------------------------------------------------------------
+
+
+class TestDnsmasqDirFiles:
+    """`conf-dir` / `CONFIG_DIR` specs carry filters, and both forms
+    have to be honoured: dnsmasq reads `*suffix` as "only these" and
+    `.suffix` as "not these"."""
+
+    def test_extensionless_file_is_included(self, tmp_path: Path) -> None:
+        """The case that mattered: Debian's libvirt drop-in has no
+        extension, so a `*.conf` assumption would skip it."""
+        (tmp_path / "libvirt-daemon").write_text("bind-interfaces\n")
+        found = _dnsmasq_dir_files(str(tmp_path))
+        assert [f.name for f in found] == ["libvirt-daemon"]
+
+    def test_excluded_suffixes_are_skipped(self, tmp_path: Path) -> None:
+        (tmp_path / "live").write_text("x\n")
+        (tmp_path / "old.dpkg-old").write_text("x\n")
+        found = _dnsmasq_dir_files(f"{tmp_path},.dpkg-old")
+        assert [f.name for f in found] == ["live"]
+
+    def test_star_filter_is_include_only(self, tmp_path: Path) -> None:
+        (tmp_path / "a.conf").write_text("x\n")
+        (tmp_path / "b.bak").write_text("x\n")
+        found = _dnsmasq_dir_files(f"{tmp_path},*.conf")
+        assert [f.name for f in found] == ["a.conf"]
+
+    def test_missing_directory_is_not_an_error(self, tmp_path: Path) -> None:
+        assert _dnsmasq_dir_files(str(tmp_path / "nope")) == []
+
+    def test_empty_spec_is_not_an_error(self) -> None:
+        assert _dnsmasq_dir_files("") == []
+
+
+class TestDnsmasqConfigFiles:
+    def test_collects_main_conf_and_dropin_dir(self, tmp_path: Path) -> None:
+        main = tmp_path / "dnsmasq.conf"
+        main.write_text("# nothing\n")
+        dropins = tmp_path / "dnsmasq.d"
+        dropins.mkdir()
+        (dropins / "libvirt-daemon").write_text("bind-interfaces\n")
+
+        with (
+            patch("ltvm_pkg.host_setup.DNSMASQ_MAIN_CONF", main),
+            patch("ltvm_pkg.host_setup.DNSMASQ_DEFAULTS", tmp_path / "absent"),
+            patch("ltvm_pkg.host_setup.DNSMASQ_DROPIN_SPEC", str(dropins)),
+        ):
+            files = _dnsmasq_config_files()
+
+        assert main in files
+        assert dropins / "libvirt-daemon" in files
+
+    def test_config_dir_from_defaults_file_wins(self, tmp_path: Path) -> None:
+        """Debian's /etc/default/dnsmasq can move the drop-in dir."""
+        elsewhere = tmp_path / "custom.d"
+        elsewhere.mkdir()
+        (elsewhere / "a").write_text("bind-interfaces\n")
+        defaults = tmp_path / "default-dnsmasq"
+        defaults.write_text(f'CONFIG_DIR="{elsewhere},.dpkg-old"\n')
+
+        with (
+            patch("ltvm_pkg.host_setup.DNSMASQ_MAIN_CONF", tmp_path / "absent"),
+            patch("ltvm_pkg.host_setup.DNSMASQ_DEFAULTS", defaults),
+            patch(
+                "ltvm_pkg.host_setup.DNSMASQ_DROPIN_SPEC",
+                str(tmp_path / "unused.d"),
+            ),
+        ):
+            files = _dnsmasq_config_files()
+
+        assert elsewhere / "a" in files
+
+    def test_conf_dir_inside_main_conf_is_followed(
+        self, tmp_path: Path
+    ) -> None:
+        """RHEL spells the drop-in dir `conf-dir=` in the main file."""
+        extra = tmp_path / "extra.d"
+        extra.mkdir()
+        (extra / "z.conf").write_text("bind-interfaces\n")
+        main = tmp_path / "dnsmasq.conf"
+        main.write_text(f"conf-dir={extra},*.conf\n")
+
+        with (
+            patch("ltvm_pkg.host_setup.DNSMASQ_MAIN_CONF", main),
+            patch("ltvm_pkg.host_setup.DNSMASQ_DEFAULTS", tmp_path / "absent"),
+            patch(
+                "ltvm_pkg.host_setup.DNSMASQ_DROPIN_SPEC",
+                str(tmp_path / "unused.d"),
+            ),
+        ):
+            files = _dnsmasq_config_files()
+
+        assert extra / "z.conf" in files
+
+
+# ------------------------------------------------------------------
+# TestRewriteBindInterfaces
+# ------------------------------------------------------------------
+
+
+class TestRewriteBindInterfaces:
+    """dnsmasq refuses to start with both bind-interfaces and
+    bind-dynamic set, and ltvm's own drop-in ships bind-dynamic."""
+
+    def _patches(self, tmp_path: Path, dropins: Path) -> Any:
+        return (
+            patch(
+                "ltvm_pkg.host_setup.DNSMASQ_MAIN_CONF",
+                tmp_path / "dnsmasq.conf",
+            ),
+            patch("ltvm_pkg.host_setup.DNSMASQ_DEFAULTS", tmp_path / "absent"),
+            patch("ltvm_pkg.host_setup.DNSMASQ_DROPIN_SPEC", str(dropins)),
+        )
+
+    def test_rewrites_a_dropin_not_just_the_main_conf(
+        self, tmp_path: Path
+    ) -> None:
+        """The regression: on Debian/Ubuntu libvirt-daemon-system drops
+        bind-interfaces into /etc/dnsmasq.d, never /etc/dnsmasq.conf,
+        so scanning only the main file left `install` dying at
+        `systemctl restart dnsmasq`."""
+        (tmp_path / "dnsmasq.conf").write_text("# stock\n")
+        dropins = tmp_path / "dnsmasq.d"
+        dropins.mkdir()
+        dropin = dropins / "libvirt-daemon"
+        dropin.write_text("bind-interfaces\nexcept-interface=virbr0\n")
+
+        a, b, c = self._patches(tmp_path, dropins)
+        with a, b, c:
+            changed = _rewrite_bind_interfaces()
+
+        assert changed == [dropin]
+        assert dropin.read_text() == ("bind-dynamic\nexcept-interface=virbr0\n")
+
+    def test_rewrites_rather_than_removing(self, tmp_path: Path) -> None:
+        """Dropping the directive reverts dnsmasq to a wildcard bind,
+        widening what a multi-homed host answers on; bind-dynamic binds
+        the same per-interface addresses."""
+        (tmp_path / "dnsmasq.conf").write_text("bind-interfaces\n")
+        dropins = tmp_path / "dnsmasq.d"
+        dropins.mkdir()
+
+        a, b, c = self._patches(tmp_path, dropins)
+        with a, b, c:
+            _rewrite_bind_interfaces()
+
+        text = (tmp_path / "dnsmasq.conf").read_text()
+        assert "bind-dynamic" in text
+        assert "bind-interfaces" not in text
+
+    def test_replaces_a_symlink_leaving_its_target_alone(
+        self, tmp_path: Path
+    ) -> None:
+        """Debian points /etc/dnsmasq.d/libvirt-daemon at
+        /etc/dnsmasq.d-available/; writing through it would edit the
+        packaged copy every other consumer reads."""
+        (tmp_path / "dnsmasq.conf").write_text("# stock\n")
+        available = tmp_path / "available"
+        available.mkdir()
+        packaged = available / "libvirt-daemon"
+        packaged.write_text("bind-interfaces\nexcept-interface=virbr0\n")
+        dropins = tmp_path / "dnsmasq.d"
+        dropins.mkdir()
+        link = dropins / "libvirt-daemon"
+        link.symlink_to(packaged)
+
+        a, b, c = self._patches(tmp_path, dropins)
+        with a, b, c:
+            changed = _rewrite_bind_interfaces()
+
+        assert changed == [link]
+        assert not link.is_symlink()
+        assert "bind-dynamic" in link.read_text()
+        # The packaged copy is untouched.
+        assert packaged.read_text().startswith("bind-interfaces")
+
+    def test_leaves_a_commented_directive_alone(self, tmp_path: Path) -> None:
+        (tmp_path / "dnsmasq.conf").write_text("#bind-interfaces\n")
+        dropins = tmp_path / "dnsmasq.d"
+        dropins.mkdir()
+
+        a, b, c = self._patches(tmp_path, dropins)
+        with a, b, c:
+            assert _rewrite_bind_interfaces() == []
+
+        assert (tmp_path / "dnsmasq.conf").read_text() == "#bind-interfaces\n"
+
+    def test_is_idempotent(self, tmp_path: Path) -> None:
+        (tmp_path / "dnsmasq.conf").write_text("bind-dynamic\n")
+        dropins = tmp_path / "dnsmasq.d"
+        dropins.mkdir()
+
+        a, b, c = self._patches(tmp_path, dropins)
+        with a, b, c:
+            assert _rewrite_bind_interfaces() == []
+
+
+# ------------------------------------------------------------------
+# TestNatMasqueradePresent
+# ------------------------------------------------------------------
+
+
+class TestNatMasqueradePresent:
+    """`install --network` reported success with no NAT at all on a host
+    whose kernel could not load the MASQUERADE target, because
+    qemu-bridge.service tolerates a failing iptables call."""
+
+    def test_true_when_the_rule_is_there(self) -> None:
+        out = (
+            "-P POSTROUTING ACCEPT\n"
+            "-A POSTROUTING -s 192.168.100.0/24 -o eno1 -j MASQUERADE\n"
+        )
+        with (
+            patch("shutil.which", return_value="/usr/sbin/iptables"),
+            patch(
+                "ltvm_pkg.host_setup._run_quiet",
+                return_value=_mock_completed(0, out),
+            ),
+        ):
+            assert _nat_masquerade_present("192.168.100") is True
+
+    def test_false_when_the_table_has_no_rule(self) -> None:
+        with (
+            patch("shutil.which", return_value="/usr/sbin/iptables"),
+            patch(
+                "ltvm_pkg.host_setup._run_quiet",
+                return_value=_mock_completed(0, "-P POSTROUTING ACCEPT\n"),
+            ),
+        ):
+            assert _nat_masquerade_present("192.168.100") is False
+
+    def test_false_when_the_rule_is_for_another_subnet(self) -> None:
+        out = "-A POSTROUTING -s 10.0.0.0/24 -o eno1 -j MASQUERADE\n"
+        with (
+            patch("shutil.which", return_value="/usr/sbin/iptables"),
+            patch(
+                "ltvm_pkg.host_setup._run_quiet",
+                return_value=_mock_completed(0, out),
+            ),
+        ):
+            assert _nat_masquerade_present("192.168.100") is False
+
+    def test_none_when_the_table_cannot_be_read(self) -> None:
+        """Not root: "could not tell", which must not read as "broken"."""
+        with (
+            patch("shutil.which", return_value="/usr/sbin/iptables"),
+            patch(
+                "ltvm_pkg.host_setup._run_quiet",
+                return_value=_mock_completed(1, ""),
+            ),
+        ):
+            assert _nat_masquerade_present("192.168.100") is None
+
+    def test_none_when_iptables_is_absent(self) -> None:
+        with patch("shutil.which", return_value=None):
+            assert _nat_masquerade_present("192.168.100") is None
+
+
+class TestVerifyReportsNat:
+    @pytest.mark.skipif(
+        platform.system() == "Darwin", reason="NAT is Linux-only"
+    )
+    def test_missing_nat_fails_the_overall_check(self) -> None:
+        """A host with a bridge, dnsmasq and no NAT used to report
+        "All checks passed" while no VM could reach anything off-host."""
+        ssh_mock = MagicMock()
+        ssh_mock.exists.return_value = True
+        ssh_mock.read_text.return_value = f"{SSH_BLOCK_MARKER}\n"
+
+        def _run_quiet_side(cmd: list, **kw: object) -> MagicMock:
+            if "fcbr0" in cmd:
+                return _mock_completed(0, "inet 192.168.100.1/24")
+            if "podman" in cmd:
+                return _mock_completed(0, "podman version 4.9.0")
+            # The nat table is readable and holds no MASQUERADE.
+            if "iptables" in cmd:
+                return _mock_completed(0, "-P POSTROUTING ACCEPT\n")
+            return _mock_completed(0)
+
+        with (
+            patch(
+                "ltvm_pkg.host_setup._qemu_installed_version",
+                return_value="9.2.2",
+            ),
+            patch(
+                "ltvm_pkg.host_setup.Path",
+                side_effect=lambda p: (
+                    ssh_mock
+                    if p == "/root/.ssh/config"
+                    else MagicMock(exists=MagicMock(return_value=True))
+                ),
+            ),
+            patch(
+                "ltvm_pkg.host_setup._run_quiet", side_effect=_run_quiet_side
+            ),
+            patch("shutil.which", side_effect=lambda cmd: f"/usr/bin/{cmd}"),
+        ):
+            result = verify()
+
+        assert result["nat"]["masquerade"] is False
+        assert result["all_ok"] is False
+
+    def test_missing_nat_prints_a_warning(
+        self, capsys: pytest.CaptureFixture
+    ) -> None:
+        result = _all_ok_result()
+        result["nat"] = {"masquerade": False, "subnet": "192.168.100"}
+        print_verify(result)
+        out = capsys.readouterr().out
+        assert "WARNING" in out
+        assert "MASQUERADE" in out
+
+    def test_unreadable_nat_is_not_reported_as_broken(
+        self, capsys: pytest.CaptureFixture
+    ) -> None:
+        result = _all_ok_result()
+        result["nat"] = {"masquerade": None, "subnet": "192.168.100"}
+        print_verify(result)
+        nat_lines = [
+            ln for ln in capsys.readouterr().out.splitlines() if "NAT:" in ln
+        ]
+        assert len(nat_lines) == 1
+        assert "WARNING" not in nat_lines[0]
+        assert "cannot read" in nat_lines[0]
+
+    def test_absent_nat_key_does_not_raise(
+        self, capsys: pytest.CaptureFixture
+    ) -> None:
+        """print_verify also consumes older --json payloads."""
+        result = _all_ok_result()
+        del result["nat"]
+        print_verify(result)
+        assert "All checks passed." in capsys.readouterr().out

@@ -2009,6 +2009,144 @@ def choose_subnet(requested: str | None) -> str:
 
 
 DNSMASQ_VM_CONF = Path("/etc/dnsmasq.d/qemu-vms.conf")
+DNSMASQ_MAIN_CONF = Path("/etc/dnsmasq.conf")
+# Debian/Ubuntu keep the drop-in directory here, and start dnsmasq with
+# `-7 <that>`; RHEL spells the same thing `conf-dir=` in the main file.
+DNSMASQ_DEFAULTS = Path("/etc/default/dnsmasq")
+# What Debian's init passes when /etc/default/dnsmasq names no CONFIG_DIR.
+DNSMASQ_DROPIN_SPEC = "/etc/dnsmasq.d,.dpkg-dist,.dpkg-old,.dpkg-new"
+
+_BIND_INTERFACES_RE = re.compile(r"^[ \t]*bind-interfaces[ \t]*$", re.M)
+
+
+def _dnsmasq_dir_files(spec: str) -> list[Path]:
+    """The files dnsmasq reads for one ``conf-dir`` / ``CONFIG_DIR`` spec.
+
+    A spec is ``<dir>[,<filter>...]``.  dnsmasq reads a filter starting
+    with ``*`` as "only these suffixes" and one starting with ``.`` as
+    "not these", so both have to be honoured: guessing either way means
+    rewriting a file dnsmasq never reads, or missing the one it does.
+
+    In particular this is not ``*.conf``.  Debian's libvirt drop-in is
+    ``/etc/dnsmasq.d/libvirt-daemon`` -- extensionless, and read.
+    """
+    parts = [p.strip() for p in spec.split(",") if p.strip()]
+    if not parts:
+        return []
+    directory = Path(parts[0])
+    include = [p[1:] for p in parts[1:] if p.startswith("*")]
+    exclude = [p for p in parts[1:] if p.startswith(".")]
+    if not directory.is_dir():
+        return []
+    found: list[Path] = []
+    for entry in sorted(directory.iterdir()):
+        if not entry.is_file():
+            continue
+        if include and not any(entry.name.endswith(s) for s in include):
+            continue
+        if any(entry.name.endswith(s) for s in exclude):
+            continue
+        found.append(entry)
+    return found
+
+
+def _dnsmasq_config_files() -> list[Path]:
+    """Every config file dnsmasq will read: main file and drop-ins."""
+    files: list[Path] = []
+    if DNSMASQ_MAIN_CONF.is_file():
+        files.append(DNSMASQ_MAIN_CONF)
+        for line in DNSMASQ_MAIN_CONF.read_text(errors="replace").splitlines():
+            text = line.strip()
+            if text.startswith("conf-dir="):
+                files.extend(_dnsmasq_dir_files(text.split("=", 1)[1]))
+            elif text.startswith("conf-file="):
+                extra = Path(text.split("=", 1)[1].strip())
+                if extra.is_file():
+                    files.append(extra)
+
+    spec = DNSMASQ_DROPIN_SPEC
+    if DNSMASQ_DEFAULTS.is_file():
+        for line in DNSMASQ_DEFAULTS.read_text(errors="replace").splitlines():
+            text = line.strip()
+            if text.startswith("CONFIG_DIR="):
+                spec = text.split("=", 1)[1].strip().strip("\"'")
+    files.extend(_dnsmasq_dir_files(spec))
+
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for f in files:
+        key = str(f)
+        if key not in seen:
+            seen.add(key)
+            unique.append(f)
+    return unique
+
+
+def _rewrite_bind_interfaces() -> list[Path]:
+    """Turn ``bind-interfaces`` into ``bind-dynamic`` wherever dnsmasq
+    reads it.  Returns the files changed.
+
+    dnsmasq refuses to start with both set -- "cannot set
+    --bind-interfaces and --bind-dynamic" -- and ltvm's own drop-in
+    ships ``bind-dynamic``.  Debian and Ubuntu hit this through
+    libvirt-daemon-system, whose postinst drops an extensionless
+    ``/etc/dnsmasq.d/libvirt-daemon`` carrying ``bind-interfaces``:
+    scanning only ``/etc/dnsmasq.conf``, as this used to, misses it and
+    leaves `install` dying at `systemctl restart dnsmasq` with nothing
+    naming the cause.
+
+    Rewritten rather than commented out, because removing
+    ``bind-interfaces`` altogether reverts dnsmasq to its default
+    wildcard bind -- on a multi-homed host that widens what it answers
+    on from a list of interface addresses to ``0.0.0.0:53``.
+    ``bind-dynamic`` binds the same addresses, so the host keeps the
+    exposure it had.
+    """
+    changed: list[Path] = []
+    for conf in _dnsmasq_config_files():
+        try:
+            text = conf.read_text()
+        except OSError:
+            continue
+        rewritten = _BIND_INTERFACES_RE.sub("bind-dynamic", text)
+        if rewritten == text:
+            continue
+        # Debian points /etc/dnsmasq.d/libvirt-daemon at
+        # /etc/dnsmasq.d-available/, and writing through that symlink
+        # would edit the packaged copy for every other consumer.
+        # Replace the link with a regular file: libvirt-daemon-system's
+        # postinst re-links only when the path does not exist, so this
+        # survives its upgrades.
+        if conf.is_symlink():
+            conf.unlink()
+        conf.write_text(rewritten)
+        changed.append(conf)
+        log.info("Rewrote bind-interfaces to bind-dynamic in %s", conf)
+    return changed
+
+
+def _nat_masquerade_present(subnet: str) -> bool | None:
+    """Is the MASQUERADE rule for *subnet* in the nat table?
+
+    ``None`` when that cannot be read -- no iptables, or not root.
+
+    Worth checking separately from the bridge: qemu-bridge.service
+    tolerates a failing iptables call so that a host which cannot NAT
+    still gets a working bridge, which meant `install --network` and
+    `install --verify` both reported success on a host whose kernel
+    could not load the MASQUERADE target, while no VM could reach
+    anything off-host.
+    """
+    if not shutil.which("iptables"):
+        return None
+    r = _run_quiet(["iptables", "-t", "nat", "-S", "POSTROUTING"], check=False)
+    if r.returncode != 0:
+        return None
+    want = f"{subnet}.0/24"
+    return any(
+        want in line and "MASQUERADE" in line
+        for line in (r.stdout or "").splitlines()
+    )
 
 
 def _write_root_file(path: Path, text: str, mode: int = 0o644) -> None:
@@ -2170,33 +2308,42 @@ def setup_network(
     DNSMASQ_VM_CONF.write_text(dns_text)
     _ensure_dnsmasq_hostsdir()
 
-    # Some distros (e.g. Rocky 9) ship /etc/dnsmasq.conf with bind-interfaces
-    # set, which conflicts with bind-dynamic in our drop-in config.  Comment it
-    # out so dnsmasq can start.
-    system_dnsmasq = Path("/etc/dnsmasq.conf")
-    if system_dnsmasq.exists():
-        content = system_dnsmasq.read_text()
-        if "\nbind-interfaces\n" in content:
-            system_dnsmasq.write_text(
-                content.replace(
-                    "\nbind-interfaces\n",
-                    "\n# bind-interfaces  # disabled by ltvm\n",
-                )
-            )
-            log.info(
-                "Commented out bind-interfaces in /etc/dnsmasq.conf"
-                " (conflicts with bind-dynamic)"
-            )
+    # Some distros ship bind-interfaces, which conflicts with the
+    # bind-dynamic in our drop-in and stops dnsmasq starting at all.
+    _rewrite_bind_interfaces()
 
     _run(["systemctl", "daemon-reload"])
     _run(["systemctl", "enable", "--now", "qemu-bridge"])
     _run(["systemctl", "restart", "dnsmasq"])
+
+    # qemu-bridge is Type=oneshot with RemainAfterExit=yes, so a unit
+    # left `active` by an earlier run whose bridge is since gone -- an
+    # ExecStart that died past `ip link add`, or a bridge deleted by
+    # hand -- makes `enable --now` a no-op: systemd starts nothing and
+    # the check below fired with "check: systemctl status qemu-bridge",
+    # which then reports the unit as active and successful.  Restart it
+    # once before concluding the bridge cannot be made.
+    if _run_quiet(["ip", "link", "show", "fcbr0"], check=False).returncode:
+        log.info("fcbr0 absent after enable --now -- restarting qemu-bridge")
+        _run(["systemctl", "restart", "qemu-bridge"])
 
     # Verify
     r = _run_quiet(["ip", "link", "show", "fcbr0"], check=False)
     if r.returncode != 0:
         raise RuntimeError(
             "fcbr0 bridge not created -- check: systemctl status qemu-bridge"
+        )
+
+    # NAT is what qemu-bridge.service cannot fail loudly about (its
+    # iptables calls are tolerated so a host without NAT still gets a
+    # bridge), so say it here, where the user is watching.
+    if _nat_masquerade_present(subnet) is False:
+        log.warning(
+            "no MASQUERADE rule for %s.0/24 -- VMs will reach each other "
+            "and the host, but nothing off-host.  The MASQUERADE target "
+            "needs xt_MASQUERADE (iptables-nft also needs nft_compat); "
+            "see: journalctl -u qemu-bridge",
+            subnet,
         )
 
     log.info("Bridge fcbr0 active at %s.1/24", subnet)
@@ -2453,6 +2600,11 @@ def verify(subnet: str = DEFAULT_SUBNET) -> dict[str, Any]:
             "note": "not required on macOS",
         }
         results["dnsmasq"] = {"running": True, "note": "not required on macOS"}
+        results["nat"] = {
+            "masquerade": True,
+            "subnet": subnet,
+            "note": "not required on macOS",
+        }
         results["ssh"] = {"configured": True, "note": "not required on macOS"}
         bin_path = socket_vmnet_path()
         results["socket_vmnet"] = {
@@ -2487,6 +2639,15 @@ def verify(subnet: str = DEFAULT_SUBNET) -> dict[str, Any]:
         r = _run_quiet(["systemctl", "is-active", "dnsmasq"], check=False)
         results["dnsmasq"] = {
             "running": r.returncode == 0,
+        }
+
+        # NAT.  None == "could not read the nat table as this user",
+        # which counts as OK below for the same reason the SSH config
+        # does: this command changes nothing, and a permission wall is
+        # not a finding about the host.
+        results["nat"] = {
+            "masquerade": _nat_masquerade_present(subnet),
+            "subnet": subnet,
         }
 
         # SSH config.  /root is 0700 on most distros, so a non-root
@@ -2559,6 +2720,8 @@ def verify(subnet: str = DEFAULT_SUBNET) -> dict[str, Any]:
         results["kvm"]["available"],
         results["bridge"]["up"],
         results["dnsmasq"]["running"],
+        # None == "could not read the nat table as this user".
+        results["nat"]["masquerade"] is not False,
         results["ltvm"]["installed"],
         results["podman"]["installed"],
         results["zstd"]["installed"],
@@ -2637,6 +2800,18 @@ def print_verify(results: dict[str, Any]) -> None:
         ok("dnsmasq: running")
     else:
         fail("dnsmasq: not running")
+
+    nat = results.get("nat") or {}
+    if nat:
+        net = f"{nat.get('subnet', DEFAULT_SUBNET)}.0/24"
+        if nat.get("note"):
+            ok(f"NAT: {nat['note']}")
+        elif nat.get("masquerade") is None:
+            ok("NAT: cannot read the nat table as this user (needs root)")
+        elif nat["masquerade"]:
+            ok(f"NAT: MASQUERADE for {net}")
+        else:
+            fail(f"NAT: no MASQUERADE for {net} -- VMs cannot reach off-host")
 
     s = results["ltvm"]
     if s["installed"]:
