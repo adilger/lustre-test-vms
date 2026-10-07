@@ -808,7 +808,7 @@ def _build_in_container(
     # in-kernel-o2iblnd/ko2iblnd.ko, depending on the kernel's own
     # ib_core/rdma_cm.  extra_configure is appended after this line,
     # and autoconf takes the last spelling of a flag, so it wins.
-    cfg = "./configure --with-linux=/kernel --disable-gss --with-o2ib=no"
+    cfg = "./configure --with-linux=/kernel --with-o2ib=no"
     if cross_compiling:
         cfg += f" --host={xinfo.triple}"
         # CROSS_CC_FLAGS / CROSS_PKG_CONFIG_* come from the install branch
