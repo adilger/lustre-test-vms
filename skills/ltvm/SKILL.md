@@ -331,6 +331,20 @@ see stale data: sanity 39r fails every time.  `-H` makes `--only` honour
 the suite's `ALWAYS_EXCEPT` list; without it, a test named in `--only`
 runs even when CI skips it as known-broken.
 
+A suite left running after the ssh that started it has gone needs a
+session keyring of its own:
+
+```bash
+ssh co1-single 'cd /usr/lib64/lustre/tests &&
+    setsid nohup keyctl session - ./auster -k -r -H sanity-sec \
+    > /tmp/sec.out 2>&1 < /dev/null &'
+```
+
+Without `keyctl session`, the job inherits the ssh login's keyring,
+which is revoked at logout, and every encryption test then runs
+without encryption: mount reports "could not insert dummy encryption
+key into session keyring" and sanity-sec fails a dozen tests.
+
 Auster logs land in `/tmp/test_logs/YYYY-MM-DD/HHMMSS/` inside the VM.
 Redirect long runs to a file and grep the file afterwards rather than
 piping a slow command through `grep`.
