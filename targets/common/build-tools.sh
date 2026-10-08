@@ -134,6 +134,17 @@ if [[ -z "$CROSS_TRIPLE" ]]; then
 	make -C metabench CC=mpicc
 	cp metabench/metabench "$PREFIX/bin/"
 	cd /tmp && rm -rf /tmp/metabench
+
+	# No RDMA in the VMs, and UCX costs ~90 MB per rank: the 32 mdsrate
+	# ranks per client of parallel-scale statahead OOM a 4 GB client.
+	for f in "${DESTDIR}"/etc/openmpi*/openmpi-mca-params.conf; do
+		[[ -f "$f" ]] || continue
+		cat >> "$f" <<-EOF
+		pml = ob1
+		btl = self,vader,tcp
+		osc = ^ucx
+		EOF
+	done
 else
 	echo "--- Skipping IOR/mdtest (cross-compile; no cross-arch MPI toolchain)"
 fi

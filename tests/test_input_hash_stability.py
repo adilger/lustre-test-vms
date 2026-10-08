@@ -28,32 +28,32 @@ from ltvm_pkg.target_config import TargetConfig
 GOLDEN = [
     ("rocky8", "container", None, None, "c2fdbaa66888488a"),
     ("rocky8", "kernel", None, None, "538527744c6feba0"),
-    ("rocky8", "image", None, None, "c5e14d4affde51d5"),
+    ("rocky8", "image", None, None, "79f21e2b5920bcc6"),
     ("rocky9", "container", None, None, "4a58226592cb2cf5"),
     ("rocky9", "kernel", None, None, "77f9158647fe263a"),
-    ("rocky9", "image", None, None, "8f27d6dec97e3b7a"),
+    ("rocky9", "image", None, None, "3e51997a018dc4a6"),
     ("rocky9-64k", "container", None, None, "9ebe6bff482840f1"),
     ("rocky9-64k", "kernel", None, None, "e17374152a5f551f"),
-    ("rocky9-64k", "image", None, None, "0f3cf0869c8fc76d"),
+    ("rocky9-64k", "image", None, None, "901345bbec7846ea"),
     ("rocky10", "container", None, None, "9f9eabcec78fc131"),
     ("rocky10", "kernel", None, None, "002508deb710c273"),
-    ("rocky10", "image", None, None, "d93df24876ee33ee"),
+    ("rocky10", "image", None, None, "50c06a131216e89f"),
     ("mainline", "container", None, None, "c25d828a438d5e1b"),
     ("mainline", "kernel", None, None, "308f76a4721b789b"),
-    ("mainline", "image", None, None, "558ab3e001326ce1"),
+    ("mainline", "image", None, None, "6f5c027a8fca02e3"),
     ("ubuntu2404", "container", None, None, "26a4e30abaa1f452"),
     ("ubuntu2404", "kernel", None, None, "50a1d8e151ac94da"),
-    ("ubuntu2404", "image", None, None, "301dad7f67988f1a"),
+    ("ubuntu2404", "image", None, None, "3055ffb4206a29ae"),
     ("ubuntu2604", "container", None, None, "4fa75398253edf73"),
     ("ubuntu2604", "kernel", None, None, "08406db2cab2835e"),
-    ("ubuntu2604", "image", None, None, "3f09424cf3184a6d"),
+    ("ubuntu2604", "image", None, None, "7e7dc5dcc7ef576d"),
     # A variant must not perturb the base hashes above, and must differ
     # from them.
     ("rocky9", "container", None, "mofed-24", "cc1a03c2d0fda310"),
-    ("rocky9", "image", None, "mofed-24", "324c3a6e0f831ce3"),
+    ("rocky9", "image", None, "mofed-24", "b5865e7ddb9dd5e3"),
     # An explicitly named kernel.
     ("rocky9", "kernel", "5.14-rhel9.5", None, "76614275449e5d48"),
-    ("rocky9", "image", "5.14-rhel9.5", None, "5f98a4ddbca964f4"),
+    ("rocky9", "image", "5.14-rhel9.5", None, "9502fe3d4932d47c"),
 ]
 
 
