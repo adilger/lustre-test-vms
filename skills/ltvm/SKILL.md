@@ -276,6 +276,29 @@ ltvm cluster create co2 --kernel 5.14-rhel9.3 mgs+mds:co2-mds:1 oss:co2-oss:2
 `--wait`, and `cluster destroy` accepts `--force`/`--yes` though it
 never prompts.
 
+`--node-target VM=TARGET` (repeatable) boots one node on its own
+target, so one cluster can mix targets.  That node boots its target's
+default kernel and base variant (`--kernel` and `--variant` name things
+in the cluster-wide target), and `cluster deploy` builds Lustre once per
+distinct target and kernel:
+
+```bash
+ltvm cluster create co7 rocky9 mgs+mds+oss:co7-srv:4 client:co7-c16k \
+    --node-target co7-c16k=rocky10-16k
+```
+
+### Page sizes larger than 4 KiB
+
+`rocky10-16k` (aarch64, 6.12-rhel10.2) is rocky10 with
+`CONFIG_ARM64_16K_PAGES`, for finding Lustre `PAGE_SIZE > 4096` bugs.
+It runs at full speed under Apple Silicon HVF, whose CPUs have only the
+4K and 16K translation granules; `rocky9-64k` cannot boot there except
+under `LTVM_FORCE_TCG=1` (emulated, very slow).  Neither has a
+published release: `ltvm build all rocky10-16k --lustre-tree <tree>`.
+Start with a 16K client against 4K servers (as above); move the servers
+to 16K once that passes.  Distro userspace needs nothing special: EL
+aarch64 binaries are built with 64K segment alignment.
+
 Create and start wait up to 120 seconds for a guest to answer ssh, and
 stop sooner if its QEMU exits. A host busy enough to run out of that
 ("SSH not ready after 120s") wants `LTVM_SSH_TIMEOUT=<seconds>` exported,

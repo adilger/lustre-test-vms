@@ -158,6 +158,41 @@ targets:
     status: working
     zfs:
       version: 2.4.0
+  # 16 KiB-page aarch64, the largest page size Apple Silicon HVF can
+  # run natively (it has only the 4K and 16K translation granules, so
+  # rocky9-64k needs LTVM_FORCE_TCG there).  For finding Lustre
+  # PAGE_SIZE > 4 KiB bugs at full speed on an Apple Silicon host.
+  # Pair it with rocky10 on the same kernel as the 4 KiB baseline.
+  rocky10-16k:
+    # Explicit, as for rocky9-64k: the page-size options are a no-op
+    # anywhere else, and the arch keeps it from matching rocky10 when
+    # an unstamped machine is identified from /etc/os-release.
+    arch: aarch64
+    configure_args:
+    - --enable-gss=yes
+    - --enable-crypto=yes
+    container_image: quay.io/rockylinux/rockylinux:10.1
+    default_mem: 4096
+    kernels:
+      available:
+      - 6.12-rhel10.2
+      - 6.12-rhel10.1
+      config:
+        CONFIG_XEN_PVH: y
+        CONFIG_RDMA_RXE: m
+        # After kernel-config-aarch64.fragment's 4K, so these win.
+        CONFIG_ARM64_16K_PAGES: y
+        CONFIG_ARM64_4K_PAGES: n
+        CONFIG_ARM64_64K_PAGES: n
+      default: 6.12-rhel10.2
+    lustre:
+      mode: server_ldiskfs
+    os_name: rocky
+    os_version: '10.1'
+    srpm_url: https://dl.rockylinux.org/pub/rocky/10/BaseOS/source/tree/Packages/k
+    status: experimental
+    zfs:
+      version: 2.4.0
   # Vanilla kernel.org kernels on a Rocky 10 userspace.  Exists to get
   # Lustre building and running against mainline before any distro
   # ships it -- so it is expected to be ahead of lustre/ChangeLog, and

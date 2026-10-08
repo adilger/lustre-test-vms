@@ -84,6 +84,7 @@ with `ltvm target list --all-kernels`.
 | rocky10 | aarch64, x86_64 | server (ldiskfs) + client | 6.12-rhel10.0 | rhel10.0, 10.1 |
 | ubuntu2404 | x86_64 | client only | 6.8-ubuntu2404 | 6.8-ubuntu2404 |
 | rocky9-64k | aarch64 | server (ldiskfs) + client | 5.14-rhel9.7 | no -- build locally |
+| rocky10-16k* | aarch64 | server (ldiskfs) + client | 6.12-rhel10.2 | no -- build locally |
 | mainline* | x86_64 | server (ldiskfs) + client | see below | no -- build locally |
 | ubuntu2604* | x86_64 | client only | 7.0-ubuntu2604 | no -- build locally |
 
@@ -91,6 +92,14 @@ with `ltvm target list --all-kernels`.
 Lustre against a 64K page size.  It is aarch64-only: on an x86_64 host
 it cross-builds, and `ltvm target list` hides it behind
 `--all-arches` along with every other non-native target.
+
+`rocky10-16k` (experimental) is rocky10 with `CONFIG_ARM64_16K_PAGES`.
+Apple Silicon has only the 4K and 16K translation granules, so
+`rocky9-64k` boots there only under `LTVM_FORCE_TCG=1`, while
+`rocky10-16k` runs natively under HVF and still exercises Lustre with
+`PAGE_SIZE > 4096`.  Mix it with 4K servers in one cluster with
+`--node-target`:
+`ltvm cluster create co7 rocky9 mgs+mds+oss:co7-srv:4 client:co7-c16k --node-target co7-c16k=rocky10-16k`.
 
 `ubuntu2604` (experimental) is Ubuntu 26.04 with a kernel configured
 for nested KVM, nftables, cgroup-BPF and ext4/XFS project quota: a
