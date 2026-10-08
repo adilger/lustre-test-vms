@@ -298,6 +298,17 @@ one it finds.
 `cluster exec <role>` fans out and exits non-zero if any node did.
 `cluster ssh <role>` is interactive and lands on the first node.
 
+Security suites need a cluster, not one VM: on a single node every
+connection is over `0@lo`, which Lustre never gives a security flavor
+(LU-13343), so sanity-krb5 and sanity-sec's SSK runs (`SHARED_KEY=true`)
+cannot pass there.  SSK needs nothing more.  sanity-krb5 needs a KDC and
+keytabs, which one command sets up (KDC on the first MDS, realm
+LTVM.TEST; rerunning keeps the keys, recreating the cluster loses them):
+
+```bash
+ltvm cluster krb5 co2
+```
+
 ## Running tests
 
 ```bash

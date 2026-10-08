@@ -234,6 +234,16 @@ def cmd_cluster_llmount(args: argparse.Namespace) -> int:
     )
 
 
+def cmd_cluster_krb5(args: argparse.Namespace) -> int:
+    """Set up Kerberos across a cluster, for sanity-krb5."""
+    use_json = args.json
+    return _call(
+        _handler("cmd_cluster_krb5"),
+        _qemu_ns(name=args.name, realm=args.realm, timeout=args.timeout),
+        use_json,
+    )
+
+
 def cmd_cluster_status(args: argparse.Namespace) -> int:
     """Show a cluster's nodes and their state."""
     use_json = args.json

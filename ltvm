@@ -193,6 +193,7 @@ try:
         cmd_cluster_deploy,
         cmd_cluster_destroy,
         cmd_cluster_exec,
+        cmd_cluster_krb5,
         cmd_cluster_list,
         cmd_cluster_llmount,
         cmd_cluster_ssh,
@@ -2214,6 +2215,26 @@ def build_parser() -> argparse.ArgumentParser:
     cllum.set_defaults(
         func=cmd_cluster_llmount, cleanup=True, server_only=False
     )
+
+    ckp = cluster_sub.add_parser(
+        "krb5",
+        parents=[common],
+        help="Set up Kerberos on every node (KDC on the MDS), for sanity-krb5",
+    )
+    _ckp_name = ckp.add_argument("name", help="Cluster name")
+    _ckp_name.completer = complete_clusters  # type: ignore[attr-defined]
+    ckp.add_argument(
+        "--realm",
+        default="LTVM.TEST",
+        help="Kerberos realm (default: LTVM.TEST)",
+    )
+    ckp.add_argument(
+        "--timeout",
+        type=int,
+        default=600,
+        help="Per-step timeout in seconds (default: 600)",
+    )
+    ckp.set_defaults(func=cmd_cluster_krb5)
 
     csp = cluster_sub.add_parser(
         "status", parents=[common], help="Show a cluster's nodes and state"

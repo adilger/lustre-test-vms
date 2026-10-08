@@ -737,6 +737,13 @@ ltvm cluster list
 sudo ltvm cluster destroy co2
 ```
 
+`ltvm cluster krb5 <name>` sets up Kerberos for sanity-krb5
+([ltvm_pkg/cluster_krb5.py](ltvm_pkg/cluster_krb5.py)): a KDC on the
+first MDS node, each node's lustre_{mgs,mds,oss,root} and host keys in
+its own /etc/krb5.keytab, password principals for the test users.  The
+guest-side work is `krb5-node.sh` and `krb5-kdc.sh` beside it, piped to
+`bash -s`.  rhel-family targets only (dnf, sssd-kcm's drop-in).
+
 `cluster exec <role>` fans out across every node holding the role and
 exits non-zero if any node did; `cluster ssh <role>` opens a session on
 the first, since it execs a single interactive ssh.

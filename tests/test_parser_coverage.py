@@ -232,6 +232,7 @@ _CLUSTER_ARGS: dict[str, list[str]] = {
     "exec": ["co1", "oss", "lctl dl"],
     "list": [],
     "ssh": ["co1", "oss"],
+    "krb5": ["co1"],
 }
 
 
@@ -266,6 +267,7 @@ class TestClusterActionsDispatch:
             patch("ltvm_pkg.vm_cluster.cmd_cluster_list"),
             patch("ltvm_pkg.vm_cluster.cmd_cluster_ssh"),
             patch("ltvm_pkg.vm_cluster.cmd_cluster_llmount"),
+            patch("ltvm_pkg.vm_cluster.cmd_cluster_krb5"),
             # start/stop hand the nodes to `ltvm start/stop` itself.
             patch("ltvm_pkg.cli.cluster._node_names", return_value=["co1-a"]),
             patch("ltvm_pkg.cli.vm.cmd_vm_start", return_value=0),

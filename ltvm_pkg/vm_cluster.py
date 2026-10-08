@@ -1624,3 +1624,9 @@ def cmd_cluster_exec(args: argparse.Namespace) -> None:
             )
         )
     sys.exit(worst)
+
+
+def cmd_cluster_krb5(args: argparse.Namespace) -> None:
+    from .cluster_krb5 import cmd_cluster_krb5 as krb5
+
+    krb5(args)
