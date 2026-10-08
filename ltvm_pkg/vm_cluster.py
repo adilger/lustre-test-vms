@@ -1308,6 +1308,20 @@ def _run_llmount(
     elif server_only:
         cmd += " --server-only"
 
+    if not cleanup:
+        # The test framework mounts targets through dm-flakey maps that a
+        # forced unmount and lustre_rmmod leave behind; they hold the
+        # disks open and the format in llmount.sh then fails.
+        for n in cluster.get_nodes():
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                run(
+                    sshpass_ssh_argv(
+                        VMInfo.load(n.name).ip, "dmsetup remove_all; true"
+                    ),
+                    capture_output=True,
+                    timeout=60,
+                )
+
     print(f"Running {script} from {node.name}...", flush=True)
     try:
         r = run(

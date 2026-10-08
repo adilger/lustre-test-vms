@@ -1159,6 +1159,23 @@ class TestCmdClusterLlmountBehavior:
             vm_cluster.cmd_cluster_llmount(self._ns(cleanup=cleanup))
         assert "root@10.0.0.12" in self.run.call_args.args[0]
 
+    @pytest.mark.parametrize("cleanup", [False, True])
+    def test_mount_sweeps_dm_maps_on_every_node(self, cleanup: bool) -> None:
+        """A test framework run leaves dm-flakey maps on the disks, and
+        llmount.sh cannot format a disk one still holds."""
+        with patch.object(vm_cluster, "_node_state", return_value="up"):
+            vm_cluster.cmd_cluster_llmount(self._ns(cleanup=cleanup))
+        swept = {
+            argv[-2]
+            for argv in (c.args[0] for c in self.run.call_args_list)
+            if argv[-1] == "dmsetup remove_all; true"
+        }
+        if cleanup:
+            assert not swept
+        else:
+            assert swept == {f"root@{ip}" for ip in self._IPS.values()}
+            assert "llmount.sh" in self._remote()
+
     def test_runs_on_the_mgs_when_there_is_no_client(
         self, tmp_sockets: Path
     ) -> None:
