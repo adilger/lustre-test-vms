@@ -211,6 +211,9 @@ chmod 755 "${DESTDIR}/opt/compilebench/compilebench"
 if [[ -z "$CROSS_TRIPLE" ]]; then
 	git clone git://git.linux-nfs.org/projects/steved/cthon04.git /tmp/cthon04
 	git -C /tmp/cthon04 checkout -q "$CTHON04_REF"
+	# tests.init is tracked, but make's built-in %: %.sh rule overwrites
+	# it with tests.init.sh whenever checkout left that one newer.
+	touch /tmp/cthon04/tests.init
 	# runtests needs these four; tools/ wants libtirpc, which the image lacks.
 	for d in basic general special lock; do
 		make -C /tmp/cthon04/$d

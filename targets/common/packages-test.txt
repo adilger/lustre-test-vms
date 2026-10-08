@@ -50,11 +50,13 @@ xfsprogs
 vmtouch
 # fscrypt       conf-sanity encryption tests
 fscrypt
-# kinit/klist/kadmin  sanity-krb5, setup_kerberos.sh.  Lustre is
-#               currently built --disable-gss (lustre_build.py), so
-#               these unlock nothing today -- they're here so that
-#               flipping that switch is the only change needed.
+# kinit/klist/kadmin  sanity-krb5.  krb5-server is the KDC that
+#               `ltvm cluster krb5` runs on one node, and sssd-kcm the
+#               KCM: ccache sanity-krb5 test_11 switches to; in the
+#               image so that command needs no network.
 krb5-workstation
+krb5-server
+sssd-kcm
 # prove         pjdfstest.sh: `which prove || skip_env`.  We build
 #               pjdfstest from source in build-tools.sh, so the suite
 #               is otherwise ready to run.

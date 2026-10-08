@@ -15,7 +15,7 @@ shift 2
 NODES="$*"
 D=/var/kerberos/krb5kdc
 
-dnf install -y -q krb5-server
+rpm -q krb5-server > /dev/null || dnf install -y -q krb5-server
 
 cat > $D/kdc.conf <<EOF
 [kdcdefaults]

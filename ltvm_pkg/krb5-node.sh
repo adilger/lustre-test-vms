@@ -6,7 +6,9 @@ set -euo pipefail
 REALM=$1
 KDC=$2
 
-dnf install -y -q krb5-workstation sssd-kcm keyutils
+# in images built since they joined packages-test.txt; dnf for older ones
+pkgs="krb5-workstation sssd-kcm keyutils"
+rpm -q $pkgs > /dev/null || dnf install -y -q $pkgs
 
 # sssd-kcm's drop-in makes KCM: the default ccache ahead of anything
 # krb5.conf says; keep the keyring default (sanity-krb5 test_11 asks for

@@ -37,6 +37,9 @@ nfs-utils         nfs-common
 sg3_utils         sg3-utils
 libselinux-utils  selinux-utils
 krb5-workstation  krb5-user
+# `ltvm cluster krb5` is rhel-only
+krb5-server       -
+sssd-kcm          -
 # Debian ships prove(1) in the perl package itself (RHEL splits it
 # into perl-Test-Harness), and perl is already on the list.
 perl-Test-Harness -
