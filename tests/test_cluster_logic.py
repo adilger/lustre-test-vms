@@ -164,6 +164,11 @@ class TestGenerateLocalSh:
         assert "OSTDEV1=/dev/vdb" in text
         assert "OSTDEV2=/dev/vdc" in text
         assert "OSTDEV3=/dev/vdd" in text
+        # Per-target hosts even with one node of each: the framework's
+        # all_osts_nodes() (SSK key distribution) reads only these.
+        assert "mds1_HOST=co2-mds" in text
+        for i in (1, 2, 3):
+            assert f"ost{i}_HOST=co2-oss" in text
 
     def test_split_mgs_mds_oss(self) -> None:
         """Three dedicated nodes: MGS with its own disk, separate MDS."""

@@ -285,10 +285,9 @@ def generate_local_sh(
             for d in range(mds_node.mdt_disks):
                 letter = chr(ord("a") + disk_offset + d)
                 lines.append(f"MDSDEV{mdt_idx}=/dev/vd{letter}")
-                if len(mds_list) > 1:
-                    lines.append(
-                        f"mds{mdt_idx}_HOST={mds_node.name}",
-                    )
+                # Per target even with one MDS node: all_mdts_nodes()
+                # reads these directly, before facet_host() fills them.
+                lines.append(f"mds{mdt_idx}_HOST={mds_node.name}")
                 mdt_idx += 1
         lines.append("")
 
@@ -316,10 +315,7 @@ def generate_local_sh(
             for d in range(oss_node.ost_disks):
                 letter = chr(ord("a") + disk_offset + d)
                 lines.append(f"OSTDEV{ost_idx}=/dev/vd{letter}")
-                if len(oss_list) > 1:
-                    lines.append(
-                        f"ost{ost_idx}_HOST={oss_node.name}",
-                    )
+                lines.append(f"ost{ost_idx}_HOST={oss_node.name}")
                 ost_idx += 1
         lines.append("")
 
