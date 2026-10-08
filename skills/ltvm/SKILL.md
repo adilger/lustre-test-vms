@@ -311,6 +311,26 @@ ltvm cluster krb5 co2
 
 ## Running tests
 
+For a whole suite, or a long `--only` list, use `ltvm suite`.  It starts
+the suite the way CI does -- unmounted, `CLEANUP_DM_DEV=false`, `auster
+-k -v -r -H`, detached under its own session keyring -- each of which
+was a wrong result when left out (the paragraphs below say why):
+
+```bash
+id=$(ltvm suite run co1-single sanity)          # returns at once
+ltvm suite run co1-single sanity --only '39r 42a'
+ltvm suite run co2 sanity-sec --env SHARED_KEY=true --wait  # cluster
+ltvm suite status co1-single [$id]   # running / done rc=N / died
+ltvm suite collect co1-single $id    # logs to ./ltvm-suite/..., summary
+```
+
+A cluster runs it from its first client.  `--wait` collects at the end
+and exits non-zero on any failure; `status` flags a node that rebooted
+during the run (a crash: look in `/var/crash`).  One suite at a time per
+VM or cluster; `run` refuses a second.
+
+For a single subtest by hand:
+
 ```bash
 ssh co1-single 'sudo -E ONLY=42a bash /usr/lib64/lustre/tests/sanity.sh'
 ssh co1-single 'sudo -E auster sanity --only 42a'

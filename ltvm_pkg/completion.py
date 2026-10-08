@@ -60,6 +60,18 @@ def complete_clusters(
 
 
 @_safe
+def complete_suite_targets(
+    prefix: str = "",
+    parsed_args: argparse.Namespace | None = None,
+    **kwargs: Any,
+) -> list[str]:
+    """`ltvm suite` runs on a cluster or a single VM."""
+    from .vm_state import ClusterInfo, VMInfo
+
+    return ClusterInfo.all_names() + VMInfo.all_names()
+
+
+@_safe
 def complete_kernels(
     prefix: str = "",
     parsed_args: argparse.Namespace | None = None,

@@ -223,6 +223,9 @@ try:
         cmd_skills,
         cmd_snapshot,
         cmd_status,
+        cmd_suite_collect,
+        cmd_suite_run,
+        cmd_suite_status,
         cmd_target_export,
         cmd_target_show,
         cmd_targets,
@@ -243,6 +246,7 @@ try:
         complete_kernels,
         complete_mofed_versions,
         complete_snapshot_tags,
+        complete_suite_targets,
         complete_targets,
         complete_variants,
         complete_vms,
@@ -2302,6 +2306,105 @@ def build_parser() -> argparse.ArgumentParser:
         return EXIT_ERROR
 
     cluster_parser.set_defaults(func=_cluster_no_action)
+
+    # -- suite: run a Lustre test suite detached, the way CI does --
+    suite_parser = sub.add_parser(
+        "suite",
+        parents=[common],
+        help="Run a Lustre test suite on a VM or cluster (run/status/collect)",
+    )
+    suite_sub = suite_parser.add_subparsers(
+        dest="suite_action", metavar="<action>"
+    )
+
+    def _suite_target(sp: argparse.ArgumentParser) -> None:
+        a = sp.add_argument(
+            "target",
+            help="VM or cluster name (a cluster runs on its first client)",
+        )
+        a.completer = complete_suite_targets  # type: ignore[attr-defined]
+
+    srp = suite_sub.add_parser(
+        "run",
+        parents=[common],
+        help="Start a suite under auster, detached; prints the run id",
+    )
+    _suite_target(srp)
+    srp.add_argument("suite", help="Suite name, as auster takes it (sanity)")
+    srp.add_argument(
+        "--only",
+        action="append",
+        default=None,
+        metavar="TESTS",
+        help="Subtests to run, space-separated (repeatable); "
+        "ALWAYS_EXCEPT still applies",
+    )
+    srp.add_argument(
+        "--env",
+        action="append",
+        default=None,
+        metavar="VAR=VAL",
+        help="Environment for auster (repeatable), e.g. SHARED_KEY=true",
+    )
+    srp.add_argument(
+        "--slow",
+        action="store_true",
+        help="Run the slow subtests too (auster -s, SLOW=yes); CI does not",
+    )
+    srp.add_argument(
+        "--no-reformat",
+        dest="no_reformat",
+        action="store_true",
+        help="Do not pass auster -r (reformat before the suite)",
+    )
+    srp.add_argument(
+        "--wait",
+        action="store_true",
+        help="Wait for the suite, collect it and print the summary; "
+        "exit non-zero if a subtest failed or the suite died",
+    )
+    srp.add_argument(
+        "--timeout",
+        type=int,
+        default=None,
+        metavar="SECONDS",
+        help="With --wait, stop waiting after SECONDS (the suite keeps "
+        "running)",
+    )
+    srp.set_defaults(func=cmd_suite_run)
+
+    ssp = suite_sub.add_parser(
+        "status",
+        parents=[common],
+        help="State of a run (running / done / died), or of every run",
+    )
+    _suite_target(ssp)
+    ssp.add_argument(
+        "run_id", nargs="?", default=None, help="Run id (default: all runs)"
+    )
+    ssp.set_defaults(func=cmd_suite_status)
+
+    scp = suite_sub.add_parser(
+        "collect",
+        parents=[common],
+        help="Copy a run's logs back and summarize its results",
+    )
+    _suite_target(scp)
+    scp.add_argument("run_id", help="Run id, as `suite run` printed it")
+    _scp_dest = scp.add_argument(
+        "--dest",
+        default=None,
+        metavar="DIR",
+        help="Where to put the logs (default: ./ltvm-suite/<target>/<run-id>)",
+    )
+    _scp_dest.completer = complete_directories  # type: ignore[attr-defined]
+    scp.set_defaults(func=cmd_suite_collect)
+
+    def _suite_no_action(args: argparse.Namespace) -> int:
+        suite_parser.print_help()
+        return EXIT_ERROR
+
+    suite_parser.set_defaults(func=_suite_no_action)
 
     # -- completion (shell registration) --
     sp = sub.add_parser(

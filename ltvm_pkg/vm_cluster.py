@@ -1297,8 +1297,7 @@ def _run_llmount(
     anywhere else, llmount.sh also mounts a client there that
     llmountcleanup.sh never unmounts, and lustre_rmmod then fails on it.
     """
-    clients = cluster.client_nodes()
-    node = clients[0] if clients else cluster.mgs_node()
+    node = cluster.local_node()
     node_vm = VMInfo.load(node.name)
     lustre_dir = lustre_libdir(os_family)
     script = "llmountcleanup.sh" if cleanup else "llmount.sh"

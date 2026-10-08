@@ -1048,6 +1048,13 @@ class ClusterInfo:
     def client_nodes(self) -> list[ClusterNode]:
         return [n for n in self.get_nodes() if n.is_client]
 
+    def local_node(self) -> ClusterNode:
+        """The node the cluster block in cfg/local.sh treats as local:
+        the first client, else the MGS node.  Whole-cluster test runs
+        (llmount.sh, auster) start there."""
+        clients = self.client_nodes()
+        return clients[0] if clients else self.mgs_node()
+
 
 def drop_orphan_clusters(members: set[str]) -> list[str]:
     """Remove the records of clusters listing any of `members` whose

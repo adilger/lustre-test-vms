@@ -2,7 +2,7 @@
 
 Each cmd_* function takes an argparse.Namespace and returns an int
 exit code.  Implementation now lives in per-concern submodules
-(util, build, targets, fetch, deploy, cluster, vm, setup); this
+(util, build, targets, fetch, deploy, cluster, suite, vm, setup); this
 package's __init__ re-exports every public name those submodules
 expose so ``from ltvm_pkg.cli import cmd_build_all`` keeps working
 and attribute-patching tests (``patch.object(cli_mod, "X")``) still
@@ -142,6 +142,11 @@ from ltvm_pkg.cli.setup import (  # noqa: E402
     cmd_skills,
     cmd_update,
 )
+from ltvm_pkg.cli.suite import (  # noqa: E402
+    cmd_suite_collect,
+    cmd_suite_run,
+    cmd_suite_status,
+)
 from ltvm_pkg.cli.targets import (  # noqa: E402
     _VALIDATE_EXIT,
     _release_status,
@@ -260,6 +265,9 @@ __all__ = [
     "cmd_skills",
     "cmd_snapshot",
     "cmd_status",
+    "cmd_suite_collect",
+    "cmd_suite_run",
+    "cmd_suite_status",
     "cmd_target_export",
     "cmd_target_show",
     "cmd_telemetry",

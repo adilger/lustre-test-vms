@@ -780,6 +780,25 @@ holds only an A record for does the same.  With the block, A lookups
 and `getaddrinfo` never reach DNS; a lookup for IPv6 only (`getent
 hosts`) still does.
 
+### Running a suite
+
+`ltvm suite run|status|collect`
+([ltvm_pkg/suite_run.py](ltvm_pkg/suite_run.py)) starts one Lustre test
+suite detached in the guest and reads it back.  The value is the recipe
+in the generated `run.sh`, each line of which a burndown run got wrong
+without: `CLEANUP_DM_DEV=false` in cfg/local.sh, `llmountcleanup.sh`
+first, `auster -k -v -r -H`, launched under `setsid nohup keyctl session
+-`.  The module docstring says why each one.  A run lives in
+`/root/ltvm-suite/<run-id>/` on the VM, or on a cluster's
+`ClusterInfo.local_node()` (first client, else the MGS -- where
+`cluster llmount` runs too).  `status` is "running" while run.sh's pid
+is alive, "done" once it wrote `done`, "died" otherwise; a node whose
+uptime is shorter than the run's age crashed under it.  `collect`
+rsyncs the run dir back without `*.debug_log.*` and parses results.yml
+line by line (a killed suite leaves invalid YAML).  Out of scope on
+purpose: splitting a suite across VMs, queues, and rebuilding a crashed
+VM.
+
 ## Target Configuration
 
 Targets live in [targets/targets.yaml](targets/targets.yaml).

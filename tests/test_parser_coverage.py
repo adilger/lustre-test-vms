@@ -285,6 +285,44 @@ class TestClusterActionsDispatch:
 
 
 # ---------------------------------------------------------------------------
+# Test 3b: Every suite action dispatches
+# ---------------------------------------------------------------------------
+
+_SUITE_ARGS: dict[str, list[str]] = {
+    "run": ["co1-single", "sanity", "--only", "42a 42b", "--env", "A=b"],
+    "status": ["co1-single"],
+    "collect": ["co1-single", "sanity-20261008-120000"],
+}
+
+
+def _suite_parser_choices() -> list[str]:
+    p = ltvm.build_parser()
+    for action in p._subparsers._actions:
+        if hasattr(action, "_name_parser_map"):
+            suite_sp = action._name_parser_map.get("suite")
+            if suite_sp is not None:
+                for a in suite_sp._actions:
+                    if hasattr(a, "choices") and a.choices:
+                        return list(a.choices)
+    raise RuntimeError("Could not find suite action choices in parser")
+
+
+class TestSuiteActionsDispatch:
+    def test_every_suite_action_has_arguments_here(self) -> None:
+        assert sorted(_suite_parser_choices()) == sorted(_SUITE_ARGS)
+
+    @pytest.mark.parametrize("action", _suite_parser_choices())
+    def test_suite_action_reaches_its_handler(self, action: str) -> None:
+        args = ltvm.build_parser().parse_args(
+            ["suite", action, *_SUITE_ARGS[action]]
+        )
+        name = f"cmd_suite_{action}"
+        with patch(f"ltvm_pkg.suite_run.{name}", return_value=0) as fn:
+            assert args.func(args) == 0
+        fn.assert_called_once_with(args)
+
+
+# ---------------------------------------------------------------------------
 # Test 4: No orphan cmd_* functions in vm_commands.py
 # ---------------------------------------------------------------------------
 

@@ -1,0 +1,78 @@
+TestGroup:
+    test_group: acc-sm-co1-single
+    testhost: co1-single
+    submission: Thu Oct  8 12:00:00 UTC 2026
+    user_name: root
+project: LUSTRE
+
+Tests:
+-
+        name: sanity
+        description: auster sanity
+        submission: Thu Oct  8 12:00:00 UTC 2026
+        report_version: 2
+        SubTests:
+        -
+            name: test_setup
+            status: PASS
+            duration: 1
+            return_code: 0
+            error:
+        -
+            name: test_39r
+            status: FAIL
+            duration: 12
+            return_code: 1
+            error: 'atime not updated on disk'
+        -
+            name: test_42a
+            status: PASS
+            duration: 30
+            return_code: 0
+            error:
+        -
+            name: test_78
+            status: SKIP
+            duration: 0
+            return_code: 0
+            error: 'local OST'
+        -
+            name: test_cleanup
+            status: PASS
+            duration: 19
+            return_code: 0
+            error:
+        duration: 62
+        status: FAIL
+-
+        name: sanity-compr
+        description: auster sanity-compr
+        submission: Thu Oct  8 12:01:00 UTC 2026
+        report_version: 2
+        SubTests:
+        -
+            name: test_sanity
+        -
+            name: test_setup
+            status: PASS
+            duration: 1
+            return_code: 0
+            error:
+        -
+            name: test_cleanup
+            status: PASS
+            duration: 0
+            return_code: 0
+            error:
+            status: PASS
+            duration: 6
+            return_code: 0
+            error:
+        -
+            name: test_1000
+            status: SKIP
+            duration: 0
+            return_code: 0
+            error: 'no dense writes supported'
+        -
+            name: test_2
