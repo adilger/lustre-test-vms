@@ -514,6 +514,48 @@ def _emit(data: dict[str, Any]) -> None:
     print(json.dumps(data, indent=2))
 
 
+def _ensure_layout(
+    t: SuiteTarget, exec_vm: VMInfo, os_family: str, libdir: str
+) -> None:
+    """Make cfg/local.sh describe the target's disks before the run.
+
+    Only deploy writes them, so a VM booted from a fetched image would
+    otherwise format the framework's defaults -- one ~120 MB MDT, two
+    OSTs, 100k inodes -- and fail the larger tests with ENOSPC.  A VM
+    gets its disk block here, as `ltvm llmount` does; a cluster's block
+    names every node's role, which only `cluster deploy` writes.
+    """
+    if t.kind == "vm":
+        from .deploy import configure_test_disks
+
+        try:
+            configure_test_disks(
+                exec_vm.ip,
+                exec_vm.mdt_disks,
+                exec_vm.ost_disks,
+                disk_size_bytes=exec_vm.disk_size,
+                os_family=os_family,
+            )
+        except RuntimeError as e:
+            die(str(e))
+        return
+    from .vm_cluster import CLUSTER_BLOCK_BEGIN
+
+    cfg = f"{libdir}/tests/cfg/local.sh"
+    r = _ssh(
+        t.exec_node,
+        f"grep -qF {shlex.quote(CLUSTER_BLOCK_BEGIN)} {cfg}",
+        timeout=30,
+    )
+    if r.returncode != 0:
+        die(
+            f"{t.exec_node}'s {cfg} has no cluster block, so the suite "
+            "would format one node's defaults\n"
+            f"  ltvm cluster deploy {t.name}   (with --build <tree>, or "
+            "without to use the image's Lustre)"
+        )
+
+
 def cmd_suite_run(args: argparse.Namespace) -> int:
     check_name("suite", args.suite)
     if args.timeout is not None and not args.wait:
@@ -538,9 +580,10 @@ def cmd_suite_run(args: argparse.Namespace) -> int:
 
     from .vm_commands import _os_family_for_vm
 
-    libdir = lustre_libdir(
-        _os_family_for_vm(VMInfo.load(t.exec_node), "libdir")
-    )
+    exec_vm = VMInfo.load(t.exec_node)
+    os_family = _os_family_for_vm(exec_vm, "libdir")
+    libdir = lustre_libdir(os_family)
+    _ensure_layout(t, exec_vm, os_family, libdir)
     run_id = time.strftime(f"{args.suite}-%Y%m%d-%H%M%S")
     script = run_script(
         run_id,

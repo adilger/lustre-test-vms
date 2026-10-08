@@ -470,12 +470,28 @@ def vm_target(monkeypatch: pytest.MonkeyPatch) -> suite_run.SuiteTarget:
     monkeypatch.setattr(
         suite_run.VMInfo,
         "load",
-        lambda name: SimpleNamespace(ip="10.0.0.5", os_id="rocky9"),
+        lambda name: SimpleNamespace(
+            ip="10.0.0.5",
+            os_id="rocky9",
+            mdt_disks=2,
+            ost_disks=4,
+            disk_size=3 << 30,
+        ),
     )
     monkeypatch.setattr(suite_run, "is_running", lambda vm: True)
+    import ltvm_pkg.deploy as dp
     import ltvm_pkg.vm_commands as vc
 
     monkeypatch.setattr(vc, "_os_family_for_vm", lambda vm, ctx="": "rhel")
+    disks: list[tuple] = []
+    monkeypatch.setattr(
+        dp,
+        "configure_test_disks",
+        lambda ip, mdt, ost, disk_size_bytes=0, os_family="rhel": disks.append(
+            (ip, mdt, ost, disk_size_bytes, os_family)
+        ),
+    )
+    t.disks = disks  # type: ignore[attr-defined]
     return t
 
 
@@ -524,6 +540,42 @@ class TestCmdRun:
         assert line.endswith(" sanity --only '42a 39r'")
         run_id = capsys.readouterr().out.strip()
         assert run_id.startswith("sanity-") and run_id in cmd
+
+    def test_writes_the_vm_disk_block_first(
+        self, vm_target: suite_run.SuiteTarget, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A VM from a fetched image has no disk block until deploy."""
+        guest = FakeGuest()
+        monkeypatch.setattr(suite_run, "_ssh", guest)
+        monkeypatch.setattr(
+            suite_run.vm_claim, "require_all", lambda vms, verb: None
+        )
+        assert suite_run.cmd_suite_run(_run_args()) == 0
+        assert vm_target.disks == [  # type: ignore[attr-defined]
+            ("10.0.0.5", 2, 4, 3 << 30, "rhel")
+        ]
+
+    def test_refuses_a_cluster_never_deployed(
+        self, vm_target: suite_run.SuiteTarget, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        t = suite_run.SuiteTarget(
+            "co2", "cluster", "co2-c1", ["co2-mds", "co2-c1"]
+        )
+        monkeypatch.setattr(suite_run, "resolve_target", lambda name: t)
+        calls: list[str] = []
+
+        def no_block(node, command, *, stdin=None, timeout=60):  # type: ignore[no-untyped-def]
+            calls.append(command)
+            rc = 1 if command.startswith("grep -qF") else 0
+            return subprocess.CompletedProcess([], rc, "", "")
+
+        monkeypatch.setattr(suite_run, "_ssh", no_block)
+        monkeypatch.setattr(
+            suite_run.vm_claim, "require_all", lambda vms, verb: None
+        )
+        with pytest.raises(SystemExit):
+            suite_run.cmd_suite_run(_run_args(target="co2"))
+        assert not any("keyctl" in c for c in calls)
 
     def test_refuses_while_another_run_is_going(
         self, vm_target: suite_run.SuiteTarget, monkeypatch: pytest.MonkeyPatch
