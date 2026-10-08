@@ -2030,6 +2030,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _ccp_target.completer = complete_targets  # type: ignore[attr-defined]
     ccp.add_argument(
+        "--node-target",
+        dest="node_target",
+        action="append",
+        default=None,
+        metavar="VM=TARGET",
+        help="OS target for one node instead of --target, e.g. "
+        "co7-c16k=rocky10-16k for 4K servers with a 16K client; that "
+        "node boots its target's default kernel and base variant. "
+        "Repeat for more nodes.",
+    )
+    ccp.add_argument(
         "--kernel",
         default=None,
         help="Kernel every node boots (default: the target's); "

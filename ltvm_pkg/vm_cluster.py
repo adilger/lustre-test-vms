@@ -560,6 +560,31 @@ def _node_create_timeout() -> int:
     return max(300, SSH_TIMEOUT + _NODE_CREATE_HEADROOM)
 
 
+def _node_targets(
+    node_specs: list[ClusterNode],
+    targets: list[str | None] | None,
+    os_target: str | None,
+) -> dict[str, str | None]:
+    """Map each node name to its own target, or None for the cluster's.
+
+    A node whose own target is the cluster-wide one maps to None, so
+    `rocky9 mgs:a:1 rocky9 client:b` behaves as if written once.
+    """
+    if targets is None:
+        targets = [None] * len(node_specs)
+    if len(targets) != len(node_specs):
+        die("internal error: node_targets does not match node specs")
+    from .target_config import list_targets
+
+    known = set(list_targets())
+    result: dict[str, str | None] = {}
+    for node, t in zip(node_specs, targets):
+        if t is not None and t not in known:
+            die(f"unknown target {t!r} for node {node.name!r}")
+        result[node.name] = t if t != os_target else None
+    return result
+
+
 def _print_cluster_plan(
     cluster_name: str,
     node_specs: list[ClusterNode],
@@ -567,6 +592,7 @@ def _print_cluster_plan(
     vcpus: int,
     mem: int | None,
     os_target: str | None,
+    node_targets: dict[str, str | None],
     arch: str | None,
     kernel: str | None,
     variant: str,
@@ -590,13 +616,19 @@ def _print_cluster_plan(
             disks.append(f"{node.mdt_disks} MDT")
         if node.ost_disks:
             disks.append(f"{node.ost_disks} OST")
+        own = node_targets.get(node.name)
         print(
             f"  {node.name:<20} roles={'+'.join(node.roles):<16} "
             f"disks={', '.join(disks) or 'none'}"
+            + (f"  target={own}" if own else "")
         )
     mem_desc = f"{mem} MB" if mem is not None else "target default"
     arch_desc = f" arch={arch}" if arch else ""
-    print("Applied to every node:")
+    print(
+        "Applied to every node:"
+        if not any(node_targets.values())
+        else "Applied to every node without its own target:"
+    )
     variant_desc = f" variant={variant}" if variant != "base" else ""
     print(f"  target:  {os_target or 'default'}{arch_desc}{variant_desc}")
     print(f"  kernel:  {kernel or 'target default'}")
@@ -696,6 +728,12 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
     arch = getattr(args, "arch", None)
     kernel = getattr(args, "kernel", None)
     variant = getattr(args, "variant", None) or "base"
+    # A node named after its own target boots that target's default
+    # kernel and base variant: --kernel/--variant name things in the
+    # cluster-wide target, and another target has its own names.
+    node_targets = _node_targets(
+        node_specs, getattr(args, "node_targets", None), os_target
+    )
     disk_size = getattr(args, "disk_size", None)
     root_size = getattr(args, "root_size", None)
     # Multi-NIC: same list of --nic specs applies to every node in the
@@ -721,6 +759,7 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
             vcpus=vcpus,
             mem=mem,
             os_target=os_target,
+            node_targets=node_targets,
             arch=arch,
             kernel=kernel,
             variant=variant,
@@ -739,6 +778,9 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
         print(f"    Kernel: {kernel}")
     if variant != "base":
         print(f"    Variant: {variant}")
+    for name, t in node_targets.items():
+        if t:
+            print(f"    Target: {t} for {name}")
     print(f"    Creating {len(node_specs)} nodes in parallel...")
 
     failed = []
@@ -749,7 +791,7 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
                 node,
                 vcpus,
                 mem,
-                os_target,
+                node_targets[node.name] or os_target,
                 arch,
                 disk_size,
                 root_size,
@@ -757,8 +799,8 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
                 kernel_args,
                 owner_id,
                 wait_seconds=wait_seconds,
-                kernel=kernel,
-                variant=variant,
+                kernel=None if node_targets[node.name] else kernel,
+                variant="base" if node_targets[node.name] else variant,
             ): node
             for node in node_specs
         }
@@ -1069,6 +1111,53 @@ def _validate_lustre_source(path: Path) -> None:
         )
 
 
+def _staged_zfs(
+    build: str,
+    target: str,
+    kernel_name: str | None,
+    arch: str,
+    variant: str,
+    zfs_version_arg: str | None,
+) -> Path:
+    """Return the ZFS staging dir the Lustre build for this kernel used."""
+    from .lustre_build import read_staging_meta
+    from .lustre_build import staging_path as _staging_path
+    from .target_config import TargetConfig
+    from .zfs_build import ZfsBuildError, find_zfs_staging
+
+    tc = TargetConfig(target, arch=arch, variant=variant)
+    meta = read_staging_meta(
+        _staging_path(
+            build,
+            target,
+            arch=arch,
+            kernel=kernel_name or tc.default_kernel,
+            variant=variant,
+        )
+    )
+    staged_zfs = meta.get("zfs_version") if isinstance(meta, dict) else None
+    if not staged_zfs:
+        die(
+            "ZFS was requested but the Lustre build produced no ZFS "
+            "record -- rerun with --force to reconfigure"
+        )
+    try:
+        zfs_staging = find_zfs_staging(
+            tc,
+            kernel_name,
+            staged_zfs,
+            recorded=meta.get("zfs_dir") if isinstance(meta, dict) else None,
+        )
+    except ZfsBuildError as e:
+        die(
+            f"{e}\n  Rebuild Lustre with it: ltvm build lustre {target} "
+            f"--lustre-tree {build} --kernel {kernel_name} "
+            f"--zfs-version {staged_zfs} --force"
+        )
+    print(f"    ZFS: {staged_zfs} ({target})")
+    return zfs_staging
+
+
 def cmd_cluster_deploy(args: argparse.Namespace) -> None:
     cluster = ClusterInfo.load(args.name)
     nodes = cluster.get_nodes()
@@ -1095,44 +1184,52 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
     ip_family = getattr(args, "ip_family", None) or cluster.ip_family or "ipv4"
     lnet = probe_mgs_lnet(cluster, ip_family)
 
-    # Derive os_family and target+kernel+arch from the first node's
-    # metadata (all nodes in a cluster share the same target).  We also
-    # pull the kernel name and arch off the VM so build-lustre uses the
-    # right kernel tree and arch -- not just the target's defaults.
-    os_family = "rhel"
-    target = DEFAULT_TARGET
-    kernel_name: str | None = None
-    arch: str = "x86_64"
-    try:
-        first_vm = VMInfo.load(nodes[0].name)
-    except (VMNotFound, IndexError) as e:
-        die(f"cluster {cluster.name!r}: cannot load first node: {e}")
-    if first_vm.os_id:
-        from .target_config import TargetConfig
-
-        target = first_vm.os_id
+    # Group the nodes by what their Lustre build depends on, from each
+    # VM's own metadata: a cluster may mix targets (e.g. 4 KiB-page
+    # servers with a 16 KiB-page client), and build-lustre needs the
+    # kernel tree and arch the VM actually runs -- not just the target's
+    # defaults.
+    groups: dict[tuple[str, str | None, str, str], list[str]] = {}
+    os_families: set[str] = set()
+    for n in nodes:
+        try:
+            vm = VMInfo.load(n.name)
+        except VMNotFound as e:
+            die(f"cluster {cluster.name!r}: cannot load node: {e}")
+        target = vm.os_id or DEFAULT_TARGET
         # Let ValueError from TargetConfig propagate up with a clear
         # error.  Previously a broad `except (..., ValueError, ...): pass`
         # silently fell back to DEFAULT_TARGET, which deployed rocky9 .ko
         # files onto whatever the cluster actually ran.
-        try:
-            os_family = TargetConfig(
-                target, arch=first_vm.arch or None
-            ).os_family
-        except ValueError as e:
-            die(f"cluster {cluster.name!r}: target {target!r}: {e}")
-    if first_vm.kernel:
+        if vm.os_id:
+            from .target_config import TargetConfig
+
+            try:
+                os_families.add(
+                    TargetConfig(target, arch=vm.arch or None).os_family
+                )
+            except ValueError as e:
+                die(f"cluster {cluster.name!r}: target {target!r}: {e}")
+        else:
+            os_families.add("rhel")
         # vm.kernel points at .../kernels/<name>/vmlinuz; extract <name>
-        kernel_name = Path(first_vm.kernel).parent.name
-    if first_vm.arch:
-        arch = first_vm.arch
+        kernel_name = Path(vm.kernel).parent.name if vm.kernel else None
+        key = (target, kernel_name, vm.arch or "x86_64", vm.variant)
+        groups.setdefault(key, []).append(n.name)
+    if len(os_families) > 1:
+        die(
+            f"cluster {cluster.name!r} mixes OS families "
+            f"({', '.join(sorted(os_families))}); its nodes share one "
+            f"cfg/local.sh, so they must all be rhel or all debian"
+        )
+    os_family = os_families.pop() if os_families else "rhel"
 
     print(f"=== Deploying to cluster '{cluster.name}' ===")
     print(f"    Build: {build}")
 
-    # Build Lustre from source before deploying.  All nodes share the
-    # same target+kernel+arch, so we run build-lustre once and every
-    # node rsyncs from the same staging dir.
+    # Build Lustre from source before deploying, once per distinct
+    # target+kernel+arch+variant: nodes sharing one rsync from the same
+    # staging dir.
     # --zfs-version implies --zfs; --fstype zfs implies both, since
     # the cluster cannot mount a ZFS target without ZFS on its nodes.
     # And --zfs on a deploy means "run on ZFS" unless --fstype says
@@ -1159,65 +1256,66 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
         die("--ost-count must be 0 or more")
     ost_count = cluster.ost_count if ost_count_arg is None else ost_count_arg
 
-    build_cmd = ["ltvm", "build", "lustre", target, "--lustre-tree", build]
-    if kernel_name:
-        build_cmd += ["--kernel", kernel_name]
-    # Forward --arch unconditionally.  Comparing against the literal
-    # "x86_64" is wrong for a target whose default arch is something
-    # else -- see the matching cmd_deploy comment.
-    build_cmd += ["--arch", arch]
-    # Each node deploys from its variant's staging dir, which a base
-    # build does not write.
-    if first_vm.variant != "base":
-        build_cmd += ["--variant", first_vm.variant]
-    if getattr(args, "force_compat", False):
-        build_cmd += ["--force-compat"]
-    # Without this a tree last built with `build lustre --configure`
-    # is reconfigured with the defaults by every deploy.
-    configure = getattr(args, "configure", None)
-    if configure:
-        build_cmd += [f"--configure={configure}"]
-    if want_zfs:
-        build_cmd += ["--zfs"]
-        if zfs_version_arg:
-            build_cmd += ["--zfs-version", zfs_version_arg]
-    sudo_user = os.environ.get("SUDO_USER")
-    if sudo_user:
-        build_cmd = ["sudo", "-u", sudo_user] + build_cmd
     from .lustre_build import staging_lock
     from .lustre_build import staging_path as _staging_path
 
     if userspace_only:
-        # As single-node deploy --userspace-only: no build, the staging
-        # as it stands plus any edited scripts copied into it.
-        if not kernel_name:
-            die(f"cluster {cluster.name!r}: first node has no kernel")
-        staging = _staging_path(
-            build,
-            target,
-            arch=arch,
-            kernel=kernel_name,
-            variant=first_vm.variant,
-        )
-        if not staging.is_dir():
-            die(
-                f"No staging for {target} -- run: ltvm build lustre "
-                f"{target} --lustre-tree {build} --kernel {kernel_name}"
-            )
-        from .cli.deploy import _refresh_staged_sources
-
         print("--- Userspace-only deploy (skipping build and kernel modules)")
-        with staging_lock(staging, exclusive=True):
-            err = _refresh_staged_sources(
-                staging, src, userspace_only=True, quiet=False
+    for (target, kernel_name, arch, variant), members in groups.items():
+        which = f" for {', '.join(members)}" if len(groups) > 1 else ""
+        if userspace_only:
+            # As single-node deploy --userspace-only: no build, the staging
+            # as it stands plus any edited scripts copied into it.
+            if not kernel_name:
+                die(f"cluster {cluster.name!r}: {members[0]} has no kernel")
+            staging = _staging_path(
+                build, target, arch=arch, kernel=kernel_name, variant=variant
             )
-        if err is not None:
-            die(err)
-    else:
+            if not staging.is_dir():
+                die(
+                    f"No staging for {target}{which} -- run: ltvm build "
+                    f"lustre {target} --lustre-tree {build} --kernel "
+                    f"{kernel_name}"
+                )
+            from .cli.deploy import _refresh_staged_sources
+
+            with staging_lock(staging, exclusive=True):
+                err = _refresh_staged_sources(
+                    staging, src, userspace_only=True, quiet=False
+                )
+            if err is not None:
+                die(err)
+            continue
+
+        build_cmd = ["ltvm", "build", "lustre", target, "--lustre-tree", build]
+        if kernel_name:
+            build_cmd += ["--kernel", kernel_name]
+        # Forward --arch unconditionally.  Comparing against the literal
+        # "x86_64" is wrong for a target whose default arch is something
+        # else -- see the matching cmd_deploy comment.
+        build_cmd += ["--arch", arch]
+        # Each node deploys from its variant's staging dir, which a base
+        # build does not write.
+        if variant != "base":
+            build_cmd += ["--variant", variant]
+        if getattr(args, "force_compat", False):
+            build_cmd += ["--force-compat"]
+        # Without this a tree last built with `build lustre --configure`
+        # is reconfigured with the defaults by every deploy.
+        configure = getattr(args, "configure", None)
+        if configure:
+            build_cmd += [f"--configure={configure}"]
+        if want_zfs:
+            build_cmd += ["--zfs"]
+            if zfs_version_arg:
+                build_cmd += ["--zfs-version", zfs_version_arg]
+        sudo_user = os.environ.get("SUDO_USER")
+        if sudo_user:
+            build_cmd = ["sudo", "-u", sudo_user] + build_cmd
         # Flush first: with stdout not a terminal, this and the deploy
         # header above would otherwise land after the build's own output.
         print(
-            f"--- Building Lustre against {target} kernel tree...",
+            f"--- Building Lustre against {target} kernel tree{which}...",
             flush=True,
         )
         rb = subprocess.run(build_cmd)
@@ -1225,69 +1323,34 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
             die(f"Lustre build failed (rc={rb.returncode})")
 
     # Shared from here to the end of the streams: they may run beside
-    # another deploy's, but no other build or refresh may rewrite this
-    # staging under them.  No kernel means every node fails anyway.
-    stream_lock: contextlib.AbstractContextManager[None] = (
-        staging_lock(
-            _staging_path(
-                build,
-                target,
-                arch=arch,
-                kernel=kernel_name,
-                variant=first_vm.variant,
-            ),
-            exclusive=False,
-        )
-        if kernel_name
-        else contextlib.nullcontext()
-    )
-    with stream_lock:
-        # Which ZFS to ship is the staged build's decision (osd_zfs.ko is
-        # linked against one specific build), and every node in a cluster
-        # shares one target+kernel+arch -- so resolve it once here rather
-        # than per node.
-        zfs_staging: Path | None = None
-        if want_zfs:
-            from .lustre_build import read_staging_meta
-            from .target_config import TargetConfig
-            from .zfs_build import find_zfs_staging
-
-            tc = TargetConfig(target, arch=arch, variant=first_vm.variant)
-            meta = read_staging_meta(
-                _staging_path(
-                    build,
-                    target,
-                    arch=arch,
-                    kernel=kernel_name or tc.default_kernel,
-                    variant=first_vm.variant,
+    # another deploy's, but no other build or refresh may rewrite these
+    # stagings under them.  No kernel means that group's nodes fail anyway.
+    zfs_by_node: dict[str, Path | None] = {}
+    with contextlib.ExitStack() as stream_locks:
+        for (target, kernel_name, arch, variant), members in groups.items():
+            if kernel_name:
+                stream_locks.enter_context(
+                    staging_lock(
+                        _staging_path(
+                            build,
+                            target,
+                            arch=arch,
+                            kernel=kernel_name,
+                            variant=variant,
+                        ),
+                        exclusive=False,
+                    )
                 )
-            )
-            staged_zfs = (
-                meta.get("zfs_version") if isinstance(meta, dict) else None
-            )
-            if not staged_zfs:
-                die(
-                    "ZFS was requested but the Lustre build produced no ZFS "
-                    "record -- rerun with --force to reconfigure"
+            # Which ZFS to ship is the staged build's decision (osd_zfs.ko
+            # is linked against one specific build), so resolve it once
+            # per build rather than per node.
+            zfs_staging: Path | None = None
+            if want_zfs:
+                zfs_staging = _staged_zfs(
+                    build, target, kernel_name, arch, variant, zfs_version_arg
                 )
-            from .zfs_build import ZfsBuildError
-
-            try:
-                zfs_staging = find_zfs_staging(
-                    tc,
-                    kernel_name,
-                    staged_zfs,
-                    recorded=meta.get("zfs_dir")
-                    if isinstance(meta, dict)
-                    else None,
-                )
-            except ZfsBuildError as e:
-                die(
-                    f"{e}\n  Rebuild Lustre with it: ltvm build lustre "
-                    f"{target} --lustre-tree {build} --kernel {kernel_name} "
-                    f"--zfs-version {staged_zfs} --force"
-                )
-            print(f"    ZFS: {staged_zfs}")
+            for m in members:
+                zfs_by_node[m] = zfs_staging
 
         print(f"    Deploying to {len(nodes)} nodes in parallel...")
 
@@ -1299,7 +1362,7 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
                 node.name,
                 build,
                 os_family,
-                zfs_staging,
+                zfs_by_node.get(node.name),
                 userspace_only=userspace_only,
             ),
             success_verb="deployed",
