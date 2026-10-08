@@ -1143,8 +1143,10 @@ def cmd_publish(args: argparse.Namespace) -> int:
         )
         snap_root = kernel_dir / "lustre-artifacts"
         snap_dir = snap_root if variant == "base" else snap_root / variant
-        if not (snap_dir / ".ltvm-snapshot.json").exists():
-            lustre_tree = getattr(args, "lustre_tree", None)
+        lustre_tree = getattr(args, "lustre_tree", None)
+        # A named tree always replaces the snapshot: an older one left by
+        # an earlier publish must not ship in its place.
+        if lustre_tree or not (snap_dir / ".ltvm-snapshot.json").exists():
             if lustre_tree:
                 if not use_json:
                     print(

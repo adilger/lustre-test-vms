@@ -566,6 +566,46 @@ class TestCmdPublishNoUpload:
         assert not snap.called
         assert not rl.called
 
+    def test_lustre_tree_replaces_an_existing_snapshot(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        tmp_targets: Path,
+        tmp_path: Path,
+    ) -> None:
+        """--lustre-tree re-snapshots even when an older snapshot exists.
+
+        It used to snapshot only when none was there, so a release built
+        from a named tree shipped whatever an earlier publish had left.
+        """
+        tc = _tc(tmp_targets)
+        assets = {"manifest": tmp_path / "m.json"}
+        assets["manifest"].write_text("{}")
+        kdir = tc.output_dir / "kernels" / "5.14-rhel9.7"
+        snap_dir = kdir / "lustre-artifacts"
+        snap_dir.mkdir(parents=True)
+        (kdir / "vmlinux").write_text("")
+        (snap_dir / ".ltvm-snapshot.json").write_text(
+            '{"lustre_commit": "old"}'
+        )
+
+        with (
+            patch.object(cli_mod, "TargetConfig", return_value=tc),
+            patch.object(cli_mod, "package_target", return_value=assets),
+            patch.object(cli_mod, "snapshot_lustre") as snap,
+        ):
+            args = _ns(
+                target="rocky9",
+                no_lustre=False,
+                no_upload=True,
+                output=None,
+                lustre_tree=str(tmp_path / "lustre"),
+            )
+            rc = cmd_publish(args)
+
+        assert rc == EXIT_OK
+        assert snap.called
+        assert snap.call_args.args[0] == str(tmp_path / "lustre")
+
     def test_package_target_failure_surfaces(
         self,
         capsys: pytest.CaptureFixture[str],
