@@ -934,6 +934,19 @@ in one source tree distcleans on each switch, and staying
 on one target never does.  autogen + configure re-run on
 a narrower condition still (`_needs_reconfigure`).
 
+The Lustre version is decided on the host
+(`ltvm_pkg/lustre_version.py`): `git describe` fails in the
+container for a git worktree (its gitdir is not mounted) and
+for a rootful build (safe.directory), and LUSTRE-VERSION-GEN
+then falls back to DEFAULT_VERSION, which skips every
+version-gated test.  The host writes LUSTRE-VERSION-FILE,
+which LUSTRE-VERSION-GEN reads when its own describe fails.
+autoconf cannot see a version change (it arrives through
+`m4_esyscmd`), so a reconfigure whose `configure` carries
+another version removes it and `autom4te.cache` first.  A
+version nothing can determine (no tags, no version file) is a
+WARNING at the start and the end of the build.
+
 ## Release Manifest Schema
 
 Each published release carries `"schema": "ltvm-release/<N>"`

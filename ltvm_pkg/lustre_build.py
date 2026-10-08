@@ -29,6 +29,12 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import TypedDict
 
+from .lustre_version import (
+    check_configured,
+    configure_is_stale,
+    pin_version,
+    undetermined_warning,
+)
 from .podman_run import run_podman_with_cleanup
 from .vm_state import DEFAULT_TARGET
 
@@ -745,6 +751,12 @@ def _build_in_container(
     print(f"  Lustre:    {lustre_tree}")
     print(f"  Kernel:    {build_tree}")
     print(f"  Version:   {kver}")
+    version = pin_version(lustre_tree)
+    if version.source == "default":
+        print(undetermined_warning(version))
+    else:
+        src = "git" if version.source == "git" else "LUSTRE-VERSION-FILE"
+        print(f"  Lustre version: {version.version} (from {src})")
 
     # Check for cross-target kernel mismatch BEFORE asking
     # _needs_reconfigure.  _needs_reconfigure only inspects THIS
@@ -995,6 +1007,8 @@ def _build_in_container(
             "rm -rf conftest conftest.c conftest.dir _lpb"
             " kconftest.dir conftest.err confdefs.h 2>/dev/null || true"
         )
+        if configure_is_stale(lustre_tree, version):
+            script_parts.append("rm -rf autom4te.cache configure")
         # Remove stale config/compile lock dirs (*.d directories).
         # When a previous configure was killed mid-compile, it leaves
         # behind empty .d lock dirs that the next configure spins forever
@@ -1339,6 +1353,8 @@ fi""")
     except OSError as e:
         print(f"--- WARNING: could not record staged sources: {e}")
 
+    for line in check_configured(lustre_tree, version):
+        print(line)
     ko_files = list(host_staging.rglob("*.ko"))
     print(f"--- Build complete: {len(ko_files)} kernel modules")
 
