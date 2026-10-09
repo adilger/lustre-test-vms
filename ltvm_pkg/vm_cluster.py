@@ -784,6 +784,7 @@ def _deploy_one_node(
     lustre_tree: str | Path,
     os_family: str = "rhel",
     zfs_staging: Path | None = None,
+    userspace_only: bool = False,
 ) -> tuple[str, int, str]:
     """Deploy Lustre to one cluster node.
 
@@ -825,7 +826,13 @@ def _deploy_one_node(
         # No fstype here: the cluster block written further down
         # (generate_local_sh) sets FSTYPE for every node, after anything
         # written here.
-        deploy_to_vm(vm, staging, os_family=os_family, zfs_staging=zfs_staging)
+        deploy_to_vm(
+            vm,
+            staging,
+            os_family=os_family,
+            zfs_staging=zfs_staging,
+            userspace_only=userspace_only,
+        )
         return node_name, 0, "ok"
     except RuntimeError as e:
         return node_name, 1, str(e)
@@ -1076,6 +1083,12 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
         fstype = "zfs"
     if fstype is None:
         fstype = "ldiskfs"
+    userspace_only = bool(getattr(args, "userspace_only", False))
+    if want_zfs and userspace_only:
+        die(
+            "--zfs and --userspace-only are incompatible: a "
+            "userspace-only deploy ships no kernel modules"
+        )
 
     build_cmd = ["ltvm", "build", "lustre", target, "--lustre-tree", build]
     if kernel_name:
@@ -1102,15 +1115,45 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
     sudo_user = os.environ.get("SUDO_USER")
     if sudo_user:
         build_cmd = ["sudo", "-u", sudo_user] + build_cmd
-    # Flush first: with stdout not a terminal, this and the deploy
-    # header above would otherwise land after the build's own output.
-    print(f"--- Building Lustre against {target} kernel tree...", flush=True)
-    rb = subprocess.run(build_cmd)
-    if rb.returncode != 0:
-        die(f"Lustre build failed (rc={rb.returncode})")
-
     from .lustre_build import staging_lock
     from .lustre_build import staging_path as _staging_path
+
+    if userspace_only:
+        # As single-node deploy --userspace-only: no build, the staging
+        # as it stands plus any edited scripts copied into it.
+        if not kernel_name:
+            die(f"cluster {cluster.name!r}: first node has no kernel")
+        staging = _staging_path(
+            build,
+            target,
+            arch=arch,
+            kernel=kernel_name,
+            variant=first_vm.variant,
+        )
+        if not staging.is_dir():
+            die(
+                f"No staging for {target} -- run: ltvm build lustre "
+                f"{target} --lustre-tree {build} --kernel {kernel_name}"
+            )
+        from .cli.deploy import _refresh_staged_sources
+
+        print("--- Userspace-only deploy (skipping build and kernel modules)")
+        with staging_lock(staging, exclusive=True):
+            err = _refresh_staged_sources(
+                staging, src, userspace_only=True, quiet=False
+            )
+        if err is not None:
+            die(err)
+    else:
+        # Flush first: with stdout not a terminal, this and the deploy
+        # header above would otherwise land after the build's own output.
+        print(
+            f"--- Building Lustre against {target} kernel tree...",
+            flush=True,
+        )
+        rb = subprocess.run(build_cmd)
+        if rb.returncode != 0:
+            die(f"Lustre build failed (rc={rb.returncode})")
 
     # Shared from here to the end of the streams: they may run beside
     # another deploy's, but no other build or refresh may rewrite this
@@ -1184,7 +1227,11 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
         failed = _parallel_cluster_op(
             nodes,
             lambda node: _deploy_one_node(
-                node.name, build, os_family, zfs_staging
+                node.name,
+                build,
+                os_family,
+                zfs_staging,
+                userspace_only=userspace_only,
             ),
             success_verb="deployed",
             failure_verb="FAILED",

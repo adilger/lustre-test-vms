@@ -123,7 +123,9 @@ the old modules running; `cluster deploy` does the same on every node.
 `--userspace-only` leaves a running Lustre alone and never rebuilds, but
 edited test scripts, cfg files and other uncompiled sources are copied
 into the staging before every deploy, so a script edit needs no rebuild;
-it warns when compiled sources changed. **The tree flag is never positional** -- `--lustre-tree <path>`
+it warns when compiled sources changed. `cluster deploy --userspace-only`
+does the same on every node, from the staging an earlier `cluster deploy`
+built. **The tree flag is never positional** -- `--lustre-tree <path>`
 (`cluster deploy` also accepts `--build`).
 
 Do not use host `make` or `fullbuild` to produce something for a VM. The

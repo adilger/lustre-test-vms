@@ -2163,6 +2163,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Deploy to server nodes only, skipping clients",
     )
     cdpl.add_argument(
+        "--userspace-only",
+        dest="userspace_only",
+        action="store_true",
+        help="Deploy only userspace (tools, tests) from the existing "
+        "staging, without building -- skip kernel modules and depmod",
+    )
+    cdpl.add_argument(
         "--force-compat",
         dest="force_compat",
         action="store_true",

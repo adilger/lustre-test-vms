@@ -1320,6 +1320,87 @@ class TestCmdClusterDeployIpFamily:
         assert probe.call_args.args[1] == "ipv6"
 
 
+class TestCmdClusterDeployUserspaceOnly:
+    """--userspace-only ships the existing staging, without a build."""
+
+    def _deploy(self, tree: Path, **flags: object) -> tuple[MagicMock, ...]:
+        class _TC:
+            os_family = "rhel"
+
+        cluster = ClusterInfo(
+            name="co3", nodes=[{"name": "co3-mds", "roles": ["mgs", "mds"]}]
+        )
+        node = MagicMock(
+            os_id="rocky9",
+            arch="x86_64",
+            variant="base",
+            kernel="/a/kernels/k/vmlinuz",
+            ip="10.0.0.5",
+        )
+        with (
+            patch.object(ClusterInfo, "load", return_value=cluster),
+            patch.object(vm_cluster.VMInfo, "load", return_value=node),
+            patch.object(vm_cluster, "_validate_lustre_source"),
+            patch("ltvm_pkg.target_config.TargetConfig", return_value=_TC()),
+            patch.object(
+                vm_cluster.subprocess,
+                "run",
+                return_value=MagicMock(returncode=0),
+            ) as run,
+            patch.object(
+                vm_cluster,
+                "_deploy_one_node",
+                side_effect=lambda name, *a, **k: (name, 0, ""),
+            ) as deploy_one,
+            patch(
+                "ltvm_pkg.cli.deploy._refresh_staged_sources",
+                return_value=None,
+            ) as refresh,
+            patch.object(vm_cluster, "probe_mgs_lnet"),
+            patch.object(vm_cluster, "generate_local_sh", return_value=""),
+            patch.object(
+                vm_cluster,
+                "_write_cluster_local_sh",
+                side_effect=lambda name, *a, **k: (name, 0, ""),
+            ),
+            patch.object(
+                vm_cluster, "_distribute_cluster_hosts", return_value=[]
+            ),
+        ):
+            vm_cluster.cmd_cluster_deploy(
+                argparse.Namespace(
+                    name="co3",
+                    lustre_source=str(tree),
+                    mount=False,
+                    userspace_only=True,
+                    **flags,
+                )
+            )
+        return run, deploy_one, refresh
+
+    def test_no_build_and_userspace_reaches_each_node(
+        self, tmp_path: Path
+    ) -> None:
+        from ltvm_pkg.lustre_build import staging_path
+
+        staging = staging_path(
+            str(tmp_path), "rocky9", arch="x86_64", kernel="k", variant="base"
+        )
+        staging.mkdir(parents=True)
+        run, deploy_one, refresh = self._deploy(tmp_path)
+        run.assert_not_called()
+        assert deploy_one.call_args.kwargs["userspace_only"] is True
+        assert refresh.call_args.args[0] == staging
+
+    def test_no_staging_refuses(self, tmp_path: Path) -> None:
+        with pytest.raises(SystemExit):
+            self._deploy(tmp_path)
+
+    def test_zfs_refuses(self, tmp_path: Path) -> None:
+        with pytest.raises(SystemExit):
+            self._deploy(tmp_path, zfs=True)
+
+
 class TestCmdClusterExecBehavior:
     """cmd_cluster_exec resolves the target by name OR role."""
 
