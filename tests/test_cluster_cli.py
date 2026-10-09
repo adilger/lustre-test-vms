@@ -1174,16 +1174,34 @@ class TestCmdClusterLlmountBehavior:
         llmount.sh cannot format a disk one still holds."""
         with patch.object(vm_cluster, "_node_state", return_value="up"):
             vm_cluster.cmd_cluster_llmount(self._ns(cleanup=cleanup))
+        from ltvm_pkg.deploy import premount_sweep_script
+
         swept = {
             argv[-2]
             for argv in (c.args[0] for c in self.run.call_args_list)
-            if argv[-1] == "dmsetup remove_all; true"
+            if argv[-1] == premount_sweep_script()
         }
         if cleanup:
             assert not swept
         else:
             assert swept == {f"root@{ip}" for ip in self._IPS.values()}
             assert "llmount.sh" in self._remote()
+
+    def test_mount_takes_a_mounted_cluster_down_first(self) -> None:
+        """Regression: on a mounted cluster the dm sweep ran while the
+        targets still held their dm-flakey maps, the maps survived, and
+        llmount.sh failed with "Unable to build fs /dev/vdb".
+        llmountcleanup.sh runs first, from the node llumount uses, then
+        the sweep, then llmount.sh."""
+        with patch.object(vm_cluster, "_node_state", return_value="up"):
+            vm_cluster.cmd_cluster_llmount(self._ns())
+        calls = [c.args[0] for c in self.run.call_args_list]
+        first, *sweeps, last = calls
+        assert first[-2] == "root@10.0.0.12"
+        assert "bash llmountcleanup.sh" in first[-1]
+        assert len(sweeps) == len(self._IPS)
+        assert all("dmsetup remove_all" in argv[-1] for argv in sweeps)
+        assert "bash llmount.sh" in last[-1]
 
     def test_runs_on_the_mgs_when_there_is_no_client(
         self, tmp_sockets: Path

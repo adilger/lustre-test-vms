@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from ltvm_pkg import vm_cluster, vm_commands
+from ltvm_pkg.deploy import premount_cleanup_script
 from ltvm_pkg.vm_state import (
     DISK_SIZE_BYTES,
     ROOT_SIZE_BYTES,
@@ -1078,7 +1079,8 @@ class TestConsoleLogFollow:
 
 LIBDIR = "/usr/lib64/lustre"
 _MOUNT_CMD = (
-    f"dmsetup remove_all; cd {LIBDIR}/tests && LUSTRE={LIBDIR} bash llmount.sh"
+    f"( {premount_cleanup_script(LIBDIR)} ) >/dev/null 2>&1;"
+    f" cd {LIBDIR}/tests && LUSTRE={LIBDIR} bash llmount.sh"
 )
 _CLEANUP_CMD = f"cd {LIBDIR}/tests && LUSTRE={LIBDIR} bash llmountcleanup.sh && lustre_rmmod"
 
@@ -1120,6 +1122,41 @@ class TestCmdLlmount:
         mock_ssh.assert_called_once()
         cmd_sent = mock_ssh.call_args[0][1]
         assert cmd_sent == _MOUNT_CMD
+
+    def test_mount_takes_a_mounted_lustre_down_first(
+        self, tmp_vmdir: Path
+    ) -> None:
+        """Regression: llmount on a mounted VM ran dmsetup remove_all
+        while the targets still held their dm-flakey maps, so the maps
+        survived and llmount.sh failed with "mkfs.lustre FATAL: Unable
+        to build fs /dev/vdb".  It must unmount, then clear the maps,
+        then format -- as deploy-lustre --mount does."""
+        _seed_vm_files(tmp_vmdir, "live")
+        args = argparse.Namespace(name="live", timeout=300, cleanup=False)
+        r = MagicMock(returncode=0, stdout="", stderr="")
+        with (
+            patch("ltvm_pkg.vm_commands.is_running", return_value=True),
+            patch("ltvm_pkg.vm_commands.configure_test_disks"),
+            patch("ltvm_pkg.vm_commands.run_ssh", return_value=r) as mock_ssh,
+            pytest.raises(SystemExit),
+        ):
+            vm_commands.cmd_llmount(args)
+        cmd = mock_ssh.call_args[0][1]
+        order = [
+            "bash llmountcleanup.sh",
+            'umount -f "$m"',
+            "lustre_rmmod",
+            "dmsetup remove_all",
+            "bash llmount.sh",
+        ]
+        assert [cmd.index(step) for step in order] == sorted(
+            cmd.index(step) for step in order
+        )
+        # The cleanup's output is noise; a failure in it must not stop
+        # llmount.sh, whose own error is the one worth reading.
+        cleanup, _, mount = cmd.rpartition(";")
+        assert cleanup.endswith(">/dev/null 2>&1")
+        assert "llmount.sh" in mount
 
     def test_configure_test_disks_called_with_vm_topology(
         self, tmp_vmdir: Path

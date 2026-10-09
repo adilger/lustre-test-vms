@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from . import rootless, vm_claim
-from .deploy import configure_test_disks
+from .deploy import configure_test_disks, premount_cleanup_script
 from .host_setup import is_macos
 from .paths import load_meta_safe
 from .priv import SudoUnavailable, chmod_regular, sudo_prime, sudo_run
@@ -1636,8 +1636,10 @@ def cmd_llmount(args: argparse.Namespace) -> None:
         except RuntimeError as e:
             print(f"error: {e}", file=sys.stderr)
             sys.exit(EXIT_ERROR)
+        # The cleanup deploy-lustre --mount runs: llmount.sh alone cannot
+        # reformat disks a mounted Lustre's dm-flakey maps still hold.
         command = (
-            "dmsetup remove_all;"
+            f"( {premount_cleanup_script(libdir)} ) >/dev/null 2>&1;"
             f" cd {libdir}/tests && LUSTRE={libdir} bash llmount.sh"
         )
 

@@ -346,7 +346,9 @@ never been mounted a bare `sanity.sh` fails setup with "has not been
 formatted with mkfs.lustre". `deploy-lustre --mount` or `ltvm llmount
 <vm>` does it (`ltvm cluster llmount <cluster>` for a cluster), and
 `deploy-lustre` without `--mount` says so when the targets are blank.
-`REFORMAT=yes` on the suite, or `auster -r`, formats as well.
+`REFORMAT=yes` on the suite, or `auster -r`, formats as well. Both
+`llmount`s take down a Lustre that is already mounted and reformat, as
+`deploy-lustre --mount` does.
 
 For a whole suite, start unmounted, as CI does, and let auster format
 and mount:

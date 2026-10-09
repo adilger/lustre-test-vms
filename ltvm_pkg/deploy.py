@@ -729,6 +729,47 @@ def targets_unformatted(vm: VMInfo) -> bool:
     return r.returncode == 2
 
 
+def premount_sweep_script() -> str:
+    """Shell that frees a node's disks for llmount.sh to format.
+
+    llmount.sh stops whatever is mounted before it formats, but with
+    CLEANUP_DM_DEV=false, which init_test_env forces: the dm-flakey
+    maps the targets were mounted through survive and hold the disks,
+    and mkfs.lustre fails with "Unable to build fs /dev/vdb".  So the
+    maps go here, after every Lustre mount, since a mounted map cannot
+    be removed.  Every step tolerates having nothing to do.
+    """
+    return (
+        f"for m in $({_LUSTRE_MOUNTS} | tac); do "
+        'umount -f "$m" 2>/dev/null; done; '
+        # Export any imported zpool, as unconditionally as the dmsetup
+        # sweep and for the same reason: an imported pool holds its vdev
+        # open whichever backend is formatted next.  Export, not
+        # destroy: formatall reformats with --reformat anyway.
+        "if command -v zpool >/dev/null 2>&1; then "
+        "for p in $(zpool list -H -o name 2>/dev/null); do "
+        'zpool export -f "$p" 2>/dev/null; done; fi; '
+        "lustre_rmmod 2>/dev/null; "
+        # Must follow lustre_rmmod, which takes osd_zfs off the top of
+        # zfs.ko.  llmount.sh reloads it, which is what makes a
+        # newly-deployed ZFS of a different version take effect.
+        "modprobe -r zfs 2>/dev/null; "
+        "dmsetup remove_all 2>/dev/null; true"
+    )
+
+
+def premount_cleanup_script(libdir: str) -> str:
+    """Shell that takes a single VM's Lustre down before llmount.sh.
+
+    llmountcleanup.sh first, which stops the targets the way the test
+    framework set them up, then the sweep for anything it left.
+    """
+    return (
+        f"cd {libdir}/tests && LUSTRE={libdir} bash llmountcleanup.sh "
+        f"2>/dev/null; {premount_sweep_script()}"
+    )
+
+
 def lustre_mount_vm(name: str, os_family: str, *, quiet: bool = False) -> int:
     """Run llmount.sh inside a VM. Returns exit code.
 
@@ -742,38 +783,10 @@ def lustre_mount_vm(name: str, os_family: str, *, quiet: bool = False) -> int:
         print(f"error: {e}", file=sys.stderr)
         return EXIT_NOT_FOUND
     libdir = lustre_libdir(os_family)
-    # Export any imported zpool, as unconditionally as the dmsetup
-    # sweep below and for the same reason: an imported pool holds its
-    # vdev open, so the next format fails with "apparently in use by
-    # the system" whichever backend is being formatted.  Doing this
-    # only for ZFS would skip the case that needs it most -- switching
-    # a VM back to ldiskfs, when the pools are still imported.
-    #
-    # Export, not destroy: formatall reformats with --reformat anyway.
-    zfs_cleanup = (
-        "if command -v zpool >/dev/null 2>&1; then "
-        "for p in $(zpool list -H -o name 2>/dev/null); do "
-        'zpool export -f "$p" 2>/dev/null; done; fi; '
-    )
     out = sys.stderr if quiet else sys.stdout
     try:
         print(f"  Cleaning up previous Lustre state on {name}...", file=out)
-        # Clean up any existing Lustre state before formatting.  llmount.sh
-        # runs its own stopall internally, but does not call dmsetup remove_all
-        # afterward, so mke2fs refuses to reformat backing devices that are
-        # still "in use" by leftover dm targets on re-deploy.
-        run_ssh(
-            vm.ip,
-            f"cd {libdir}/tests && LUSTRE={libdir} bash llmountcleanup.sh 2>/dev/null; "
-            f"{zfs_cleanup}"
-            "lustre_rmmod 2>/dev/null; "
-            # Must follow lustre_rmmod, which takes osd_zfs off the top
-            # of zfs.ko.  llmount.sh reloads it, which is what makes a
-            # newly-deployed ZFS of a different version take effect.
-            "modprobe -r zfs 2>/dev/null; "
-            "dmsetup remove_all 2>/dev/null; true",
-            timeout=60,
-        )
+        run_ssh(vm.ip, premount_cleanup_script(libdir), timeout=60)
         print(f"  Running llmount.sh on {name}...", file=out)
         # Streamed: llmount.sh takes minutes, and captured its progress
         # would only appear once it was over.

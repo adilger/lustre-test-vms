@@ -1440,17 +1440,31 @@ def _run_llmount(
         cmd += " --server-only"
 
     if not cleanup:
-        # The test framework mounts targets through dm-flakey maps that a
-        # forced unmount and lustre_rmmod leave behind; they hold the
-        # disks open and the format in llmount.sh then fails.
+        # A mounted cluster first comes down as llumount takes it down,
+        # from the same node; then every node is swept for what that
+        # left, dm-flakey maps above all, which hold the disks and fail
+        # the format in llmount.sh.
+        from .deploy import premount_sweep_script
+
+        print(f"Cleaning up previous Lustre state from {node.name}...")
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            run(
+                sshpass_ssh_argv(
+                    node_vm.ip,
+                    f"cd {lustre_dir}/tests && LUSTRE={lustre_dir} "
+                    "bash llmountcleanup.sh; true",
+                ),
+                capture_output=True,
+                timeout=timeout,
+            )
         for n in cluster.get_nodes():
             with contextlib.suppress(subprocess.TimeoutExpired):
                 run(
                     sshpass_ssh_argv(
-                        VMInfo.load(n.name).ip, "dmsetup remove_all; true"
+                        VMInfo.load(n.name).ip, premount_sweep_script()
                     ),
                     capture_output=True,
-                    timeout=60,
+                    timeout=180,
                 )
 
     print(f"Running {script} from {node.name}...", flush=True)
