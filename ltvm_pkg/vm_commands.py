@@ -7,6 +7,7 @@ import getpass
 import json
 import os
 import re
+import shlex
 import stat
 import subprocess
 import sys
@@ -2111,6 +2112,66 @@ def _qmp_nmi(qmp_path: Path) -> None:
             raise RuntimeError(
                 result["error"].get("desc", str(result["error"]))
             )
+
+
+def cmd_exec(args: argparse.Namespace) -> int:
+    if not args.command:
+        return _handler_error(args, "vm exec requires a command to run")
+    vm_claim.require(args.name, "run commands on")
+    vm = VMInfo.load(args.name)
+    if not is_running(vm):
+        return _handler_error(
+            args, f"VM '{args.name}' not running", EXIT_UNREACHABLE
+        )
+    # One argument is a command line the user already quoted; several
+    # are an argv, which has to survive the remote shell's re-parse.
+    if len(args.command) == 1:
+        command = args.command[0]
+    else:
+        command = shlex.join(args.command)
+    use_json = bool(getattr(args, "json", False))
+    try:
+        # Text mode streams, so a long command shows progress as it runs.
+        r = run_ssh(
+            vm.ip,
+            command,
+            timeout=args.timeout,
+            stream=None if use_json else sys.stdout,
+        )
+    except subprocess.TimeoutExpired:
+        if use_json:
+            print(
+                json.dumps(
+                    {
+                        "name": args.name,
+                        "command": command,
+                        "rc": EXIT_TIMEOUT,
+                        "timed_out": True,
+                        "stdout": "",
+                        "stderr": f"timeout after {args.timeout}s",
+                    },
+                    indent=2,
+                )
+            )
+            return EXIT_TIMEOUT
+        return _handler_error(
+            args, f"timeout after {args.timeout}s", EXIT_TIMEOUT
+        )
+    if use_json:
+        print(
+            json.dumps(
+                {
+                    "name": args.name,
+                    "command": command,
+                    "rc": r.returncode,
+                    "timed_out": False,
+                    "stdout": r.stdout or "",
+                    "stderr": r.stderr or "",
+                },
+                indent=2,
+            )
+        )
+    return r.returncode
 
 
 def cmd_nmi(args: argparse.Namespace) -> int:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -1781,6 +1782,88 @@ class TestCmdStart:
         # launch_qemu called exactly once, for 'down'.
         assert mock_launch.call_count == 1
         assert mock_launch.call_args.args[0].name == "down"
+
+
+# ── cmd_exec ─────────────────────────────────────────────
+
+
+class TestCmdExec:
+    def _args(self, name: str, command: list[str], **kw: Any) -> Any:
+        return argparse.Namespace(
+            name=name, command=command, timeout=7, json=False, **kw
+        )
+
+    def test_no_command_is_an_error(
+        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        rc = vm_commands.cmd_exec(self._args("x-none", []))
+        assert rc == 1
+        assert "requires a command" in capsys.readouterr().err
+
+    def test_not_running_returns_unreachable(
+        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _seed_vm_files(tmp_vmdir, "x-stopped")
+        with patch("ltvm_pkg.vm_commands.is_running", return_value=False):
+            rc = vm_commands.cmd_exec(self._args("x-stopped", ["true"]))
+        assert rc == 4
+        assert "not running" in capsys.readouterr().err
+
+    def test_returns_remote_status_and_quotes_argv(
+        self, tmp_vmdir: Path
+    ) -> None:
+        _seed_vm_files(tmp_vmdir, "x-ok")
+        r = MagicMock(returncode=3, stdout=None, stderr=None)
+        with (
+            patch("ltvm_pkg.vm_commands.is_running", return_value=True),
+            patch("ltvm_pkg.vm_commands.run_ssh", return_value=r) as ssh,
+        ):
+            rc = vm_commands.cmd_exec(self._args("x-ok", ["echo", "a b"]))
+        assert rc == 3
+        assert ssh.call_args.args[1] == "echo 'a b'"
+        assert ssh.call_args.kwargs["timeout"] == 7
+
+    def test_single_argument_passes_verbatim(self, tmp_vmdir: Path) -> None:
+        _seed_vm_files(tmp_vmdir, "x-one")
+        r = MagicMock(returncode=0, stdout=None, stderr=None)
+        with (
+            patch("ltvm_pkg.vm_commands.is_running", return_value=True),
+            patch("ltvm_pkg.vm_commands.run_ssh", return_value=r) as ssh,
+        ):
+            vm_commands.cmd_exec(self._args("x-one", ["lctl dl | wc -l"]))
+        assert ssh.call_args.args[1] == "lctl dl | wc -l"
+
+    def test_timeout(
+        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _seed_vm_files(tmp_vmdir, "x-slow")
+        with (
+            patch("ltvm_pkg.vm_commands.is_running", return_value=True),
+            patch(
+                "ltvm_pkg.vm_commands.run_ssh",
+                side_effect=subprocess.TimeoutExpired("ssh", 7),
+            ),
+        ):
+            rc = vm_commands.cmd_exec(self._args("x-slow", ["sleep 99"]))
+        assert rc == 3
+        assert "timeout after 7s" in capsys.readouterr().err
+
+    def test_json_captures_output(
+        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _seed_vm_files(tmp_vmdir, "x-json")
+        r = MagicMock(returncode=0, stdout="hi\n", stderr="")
+        args = self._args("x-json", ["echo hi"])
+        args.json = True
+        with (
+            patch("ltvm_pkg.vm_commands.is_running", return_value=True),
+            patch("ltvm_pkg.vm_commands.run_ssh", return_value=r) as ssh,
+        ):
+            rc = vm_commands.cmd_exec(args)
+        assert rc == 0
+        assert ssh.call_args.kwargs["stream"] is None
+        out = json.loads(capsys.readouterr().out)
+        assert out["stdout"] == "hi\n" and out["rc"] == 0
 
 
 # ── cmd_nmi ──────────────────────────────────────────────

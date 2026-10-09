@@ -222,6 +222,7 @@ as local.
 ltvm vm console-log   <name>    Show QEMU serial log (-f to keep streaming;
                                 picks up the new log when the VM reboots)
 ltvm vm crash-collect <name>    Pull vmcore + run lustre_triage
+ltvm vm exec          <name> CMD  Run a command in the VM (ssh; its exit status)
 ltvm vm nmi           <name>    Inject NMI (panic + kdump)
 ltvm vm snapshot      <name>    Snapshot overlay disk
 ltvm vm restore       <name>    Restore to a snapshot
