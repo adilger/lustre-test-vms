@@ -29,6 +29,17 @@ from ltvm_pkg.host_setup import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_host_firewall():
+    """verify() asks the host's firewall; keep that off the dev host.
+    tests/test_host_firewall.py covers the real thing."""
+    with patch(
+        "ltvm_pkg.host_firewall.status",
+        return_value={"active": None, "trusted": True},
+    ) as m:
+        yield m
+
+
 @pytest.mark.skipif(
     platform.system() == "Darwin", reason="HostInfo is Linux-only"
 )

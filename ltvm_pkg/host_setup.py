@@ -2439,6 +2439,10 @@ def setup_network(
     _hand_over_from_host_dnsmasq(subnet)
     _start_ltvm_dnsmasq(subnet)
 
+    from ltvm_pkg import host_firewall
+
+    host_firewall.trust_bridge()
+
     # NAT is what qemu-bridge.service cannot fail loudly about (its
     # iptables calls are tolerated so a host without NAT still gets a
     # bridge), so say it here, where the user is watching.
@@ -2705,6 +2709,7 @@ def verify(subnet: str = DEFAULT_SUBNET) -> dict[str, Any]:
             "note": "not required on macOS",
         }
         results["dnsmasq"] = {"running": True, "note": "not required on macOS"}
+        results["firewall"] = {"active": None, "trusted": True}
         results["nat"] = {
             "masquerade": True,
             "subnet": subnet,
@@ -2741,6 +2746,9 @@ def verify(subnet: str = DEFAULT_SUBNET) -> dict[str, Any]:
         }
 
         results["dnsmasq"] = _verify_dnsmasq()
+        from ltvm_pkg import host_firewall
+
+        results["firewall"] = host_firewall.status()
 
         # NAT.  None == "could not read the nat table as this user",
         # which counts as OK below for the same reason the SSH config
@@ -2823,6 +2831,8 @@ def verify(subnet: str = DEFAULT_SUBNET) -> dict[str, Any]:
         results["dnsmasq"]["running"],
         # None == "could not read the nat table as this user".
         results["nat"]["masquerade"] is not False,
+        # None == "could not read ufw's rules as this user".
+        results["firewall"]["trusted"] is not False,
         results["ltvm"]["installed"],
         results["podman"]["installed"],
         results["zstd"]["installed"],
@@ -2921,6 +2931,19 @@ def print_verify(results: dict[str, Any]) -> None:
         ok(f"dnsmasq: {dns.get('service', LTVM_DNSMASQ_UNIT)} running")
     else:
         fail(f"dnsmasq: {dns.get('service', LTVM_DNSMASQ_UNIT)} not running")
+
+    fw = results.get("firewall") or {}
+    if fw.get("active"):
+        if fw["trusted"] is None:
+            ok(f"Firewall: {fw['active']} (cannot read its rules as this user)")
+        elif fw["trusted"]:
+            ok(f"Firewall: {fw['active']} trusts fcbr0")
+        else:
+            fail(
+                f"Firewall: {fw['active']} does not trust fcbr0 -- guests "
+                f"cannot reach the host's DNS or DHCP, and may not be "
+                f"routed (sudo ltvm install --network)"
+            )
 
     nat = results.get("nat") or {}
     if nat:

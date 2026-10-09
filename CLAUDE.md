@@ -685,9 +685,20 @@ Under SELinux, dnsmasq_t may not set an inotify watch on `usr_t`
 no `hosts.d/` name ever resolves.  Install labels `hosts.d`
 `dnsmasq_etc_t` with `semanage fcontext`.
 
+With **ufw or firewalld** running, the plain iptables rules are not
+enough: ufw's INPUT policy drops the guests' DNS and DHCP to the host,
+and firewalld filters from its own nftables table, which an iptables
+ACCEPT cannot overrule.  `ltvm_pkg/host_firewall.py` has the active one
+trust fcbr0 in its own persistent configuration (ufw `allow in on` and
+`route allow in/out on`; firewalld's `trusted` zone), and `install
+--verify` reports it.  ufw is detected from `ENABLED=` in
+`/etc/ufw/ufw.conf`, not `systemctl is-active ufw`, which is "active"
+whenever the oneshot unit has run.
+
 Verified 2026-10-09 on stock Rocky 9.8 (SELinux enforcing) and Ubuntu
 24.04 cloud images: fresh install, migration from the old layout, a
-host dnsmasq in real use (and libvirt's), each across a reboot.
+host dnsmasq in real use (and libvirt's), firewalld and ufw, each
+across a reboot.
 
 ### Running ltvm inside a VM it built
 
