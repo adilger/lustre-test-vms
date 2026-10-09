@@ -568,6 +568,22 @@ class TestSharedRegistration:
         vm_net.register_ssh_name("co1-a", "192.168.100.7")
         assert (hosts_dir / "co1-a").exists()
         assert f"{MARKER}:co1-a" in paths["etc"].read_text()
+        # dnsmasq watches hosts.d; a reload would only fail where its
+        # pidfile is out of reach, as inside a Patch Watcher run.
+        paths["reload"].assert_not_called()
+        vm_net.unregister_ssh_name("co1-a")
+        assert f"{MARKER}:co1-a" not in paths["etc"].read_text()
+        paths["reload"].assert_not_called()
+
+    def test_a_name_hosts_d_did_not_take_is_reloaded(
+        self, paths: dict, hosts_dir: Path
+    ) -> None:
+        with patch.object(
+            rootless, "write_hosts_entry", side_effect=OSError("full")
+        ):
+            vm_net.register_ssh_name("co1-a", "192.168.100.7")
+        assert f"{MARKER}:co1-a" in paths["etc"].read_text()
+        paths["reload"].assert_called_once()
 
     def test_unregister_removes_the_entry(
         self, paths: dict, hosts_dir: Path

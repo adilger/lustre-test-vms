@@ -545,19 +545,22 @@ def register_ssh_name(name: str, ip: str) -> None:
 
 def _register_ssh_name_locked(name: str, ip: str) -> None:
     shared = rootless.hosts_dir_writable()
+    published = False
     if shared:
         try:
             rootless.write_hosts_entry(name, ip, MARKER)
+            published = True
         except OSError as e:
             log.warning(
                 "could not publish %s in %s: %s", name, rootless.HOSTS_DIR, e
             )
     if not shared or _may_edit_etc_hosts():
-        _register_etc_hosts(name, ip)
+        # dnsmasq watches hosts.d: a name published there needs no reload.
+        _register_etc_hosts(name, ip, reload=not published)
     _register_ssh_config(name, ip)
 
 
-def _register_etc_hosts(name: str, ip: str) -> None:
+def _register_etc_hosts(name: str, ip: str, *, reload: bool = True) -> None:
     hosts = HOSTS_FILE
     marker_line = f"{MARKER}:{name}"
 
@@ -585,6 +588,8 @@ def _register_etc_hosts(name: str, ip: str) -> None:
     if filtered and not filtered[-1].endswith("\n"):
         filtered[-1] += "\n"
     _atomic_write(hosts, "".join(filtered) + new_entry)
+    if not reload:
+        return
     # Registration must not stop here either, for the same reason
     # unregister_vm doesn't (below).  reload_dns() raises when dnsmasq
     # is not running -- as on an EL host an older ltvm set up, after a
@@ -666,15 +671,20 @@ def _unregister_ssh_name_locked(name: str) -> None:
     hosts = HOSTS_FILE
     shared = rootless.hosts_dir_writable()
     ip: str | None = rootless.read_hosts_ip(name) if shared else None
+    unpublished = False
     if shared:
         try:
             rootless.remove_hosts_entry(name)
+            unpublished = True
         except PermissionError:
             # Another user's entry in the sticky hosts.d.
-            sudo_run(
-                ["rm", "-f", str(rootless.hosts_file(name))],
-                check=False,
-                quiet=True,
+            unpublished = (
+                sudo_run(
+                    ["rm", "-f", str(rootless.hosts_file(name))],
+                    check=False,
+                    quiet=True,
+                ).returncode
+                == 0
             )
         except OSError as e:
             log.warning(
@@ -706,6 +716,8 @@ def _unregister_ssh_name_locked(name: str) -> None:
             name,
             hosts,
         )
+    elif stale and unpublished:
+        _atomic_write(hosts, "".join(lines))
     elif stale:
         _atomic_write(hosts, "".join(lines))
         # Teardown must not stop here.  reload_dns() raises when
