@@ -463,6 +463,57 @@ class TestClusterCreateArgs:
             "oss:co2-oss:3",
             "client:co2-c:0",
         ]
+        assert ns.node_targets == [None, None, None]
+
+    def test_node_target_mixes_targets(self) -> None:
+        """--node-target mixes targets in one cluster, e.g. 4 KiB-page
+        servers with 16 KiB-page clients."""
+        cmd_cluster(
+            _ns(
+                "create",
+                "co7",
+                "rocky9",
+                "mgs+mds:co7-mds:1",
+                "oss:co7-oss:2",
+                "client:co7-c1",
+                "client:co7-c2",
+                "--node-target",
+                "co7-c1=rocky10-16k",
+                "--node-target=co7-c2=rocky10-16k",
+            )
+        )
+        ns = self._captured_ns()
+        assert ns.os == "rocky9"
+        assert ns.nodes == [
+            "mgs+mds:co7-mds:1",
+            "oss:co7-oss:2",
+            "client:co7-c1",
+            "client:co7-c2",
+        ]
+        assert ns.node_targets == [None, None, "rocky10-16k", "rocky10-16k"]
+
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            # A target is not a node spec anywhere but first.
+            ["client:co7-c1", "rocky10-16k"],
+            ["client:co7-c1", "--node-target", "co7-c1"],
+            ["client:co7-c1", "--node-target", "co7-c9=rocky10-16k"],
+            [
+                "client:co7-c1",
+                "--node-target",
+                "co7-c1=rocky10-16k",
+                "--node-target",
+                "co7-c1=rocky9-64k",
+            ],
+        ],
+    )
+    def test_bad_node_target_errors(self, extra: list[str]) -> None:
+        rc = cmd_cluster(
+            _ns("create", "co7", "rocky9", "mgs+mds:co7-mds:1", *extra)
+        )
+        assert rc == EXIT_ERROR
+        assert not self.handler.called
 
 
 # ─────────────────────────────────────────────────────────
@@ -1275,6 +1326,77 @@ class TestCmdClusterDeployBuildsForTheNodes:
             "5.14-rhel9.3-5.14.0-362.18.1.el9_3"
         )
         assert build[build.index("--variant") + 1] == "mofed"
+
+    def test_mixed_targets_build_once_per_target(self, tmp_path: Path) -> None:
+        """4 KiB-page servers with 16 KiB-page clients: each target gets
+        its own build, and nodes sharing one share the build."""
+
+        class _TC:
+            os_family = "rhel"
+
+        cluster = ClusterInfo(
+            name="co7",
+            nodes=[
+                {"name": "co7-srv", "roles": ["mgs", "mds", "oss"]},
+                {"name": "co7-c1", "roles": ["client"]},
+                {"name": "co7-c2", "roles": ["client"]},
+            ],
+        )
+        srv = MagicMock(
+            os_id="rocky9",
+            arch="aarch64",
+            variant="base",
+            kernel="/a/kernels/5.14-rhel9.7-5.14.0-611.55.1.el9_7/vmlinuz",
+            ip="10.0.0.5",
+        )
+        cli = MagicMock(
+            os_id="rocky10-16k",
+            arch="aarch64",
+            variant="base",
+            kernel="/a/kernels/6.12-rhel10.2-6.12.0-211.47.1.el10_2/vmlinuz",
+            ip="10.0.0.6",
+        )
+        vms = {"co7-srv": srv, "co7-c1": cli, "co7-c2": cli}
+        with (
+            patch.object(ClusterInfo, "load", return_value=cluster),
+            patch.object(
+                vm_cluster.VMInfo, "load", side_effect=vms.__getitem__
+            ),
+            patch.object(vm_cluster, "_validate_lustre_source"),
+            patch("ltvm_pkg.target_config.TargetConfig", return_value=_TC()),
+            patch.object(vm_cluster.subprocess, "run") as run,
+            patch.object(
+                vm_cluster,
+                "_deploy_one_node",
+                side_effect=lambda name, *a, **k: (name, 0, ""),
+            ) as deploy,
+            patch.object(vm_cluster, "probe_mgs_lnet"),
+            patch.object(vm_cluster, "generate_local_sh", return_value=""),
+            patch.object(
+                vm_cluster,
+                "_write_cluster_local_sh",
+                side_effect=lambda name, *a, **k: (name, 0, ""),
+            ),
+            patch.object(
+                vm_cluster, "_distribute_cluster_hosts", return_value=[]
+            ),
+        ):
+            run.return_value = MagicMock(returncode=0)
+            vm_cluster.cmd_cluster_deploy(
+                argparse.Namespace(
+                    name="co7", lustre_source=str(tmp_path), mount=False
+                )
+            )
+        builds = [c.args[0] for c in run.call_args_list]
+        assert [(b[3], b[b.index("--kernel") + 1]) for b in builds] == [
+            ("rocky9", "5.14-rhel9.7-5.14.0-611.55.1.el9_7"),
+            ("rocky10-16k", "6.12-rhel10.2-6.12.0-211.47.1.el10_2"),
+        ]
+        assert sorted(c.args[0] for c in deploy.call_args_list) == [
+            "co7-c1",
+            "co7-c2",
+            "co7-srv",
+        ]
 
 
 class TestCmdClusterDeployIpFamily:

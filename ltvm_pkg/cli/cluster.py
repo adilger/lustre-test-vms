@@ -111,6 +111,42 @@ def cmd_cluster_create(args: argparse.Namespace) -> int:
                 "<roles:vm[:disks]> ...",
             )
 
+    nodes = specs
+    bad = [s for s in nodes if ":" not in s]
+    if bad:
+        return _error(
+            f"not a node spec: {bad[0]!r}; give per-node targets with "
+            f"--node-target VM=TARGET",
+            use_json,
+            hint="ltvm cluster create <name> [TARGET] <roles:vm[:disks]> "
+            "... [--node-target VM=TARGET]",
+        )
+
+    # --node-target VM=TARGET gives one node its own target, so a cluster
+    # can mix them, e.g. 4 KiB-page servers with a 16 KiB-page client.
+    # None means the cluster-wide target.
+    names = [s.split(":")[1] for s in nodes]
+    per_node: dict[str, str] = {}
+    for item in args.node_target or []:
+        vm, sep, target = item.partition("=")
+        if not sep or not vm or not target:
+            return _error(
+                f"--node-target {item!r}: expected VM=TARGET", use_json
+            )
+        if vm not in names:
+            return _error(
+                f"--node-target {item!r}: no node {vm!r} in the node specs",
+                use_json,
+            )
+        if vm in per_node and per_node[vm] != target:
+            return _error(
+                f"--node-target gives {vm!r} two targets: "
+                f"{per_node[vm]!r} and {target!r}",
+                use_json,
+            )
+        per_node[vm] = target
+    node_targets: list[str | None] = [per_node.get(n) for n in names]
+
     flag_target = args.target
     if (
         pos_target is not None
@@ -127,7 +163,8 @@ def cmd_cluster_create(args: argparse.Namespace) -> int:
         _handler("cmd_cluster_create"),
         _qemu_ns(
             name=args.name,
-            nodes=specs,
+            nodes=nodes,
+            node_targets=node_targets,
             vcpus=args.vcpus,
             # mem=None means "let cmd_create resolve the target's
             # default_mem" (rocky10 needs 4096), rather than silently
