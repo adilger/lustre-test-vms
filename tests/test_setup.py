@@ -1511,6 +1511,18 @@ class TestChooseSubnet:
 # ------------------------------------------------------------------
 
 
+class TestBridgeServiceNat:
+    def test_masquerade_does_not_name_the_uplink(self) -> None:
+        """At boot the unit can run before the default route exists, and
+        `-o $(ip route show default ...)` then came out as `-o -j
+        MASQUERADE`: refused, and no NAT until something re-ran it."""
+        from ltvm_pkg.host_setup import HOST_CONFIG_DIR
+
+        unit = (HOST_CONFIG_DIR / "qemu-bridge.service").read_text()
+        assert "route show default" not in unit
+        assert "-s 192.168.100.0/24 ! -d 192.168.100.0/24 -j MASQUERADE" in unit
+
+
 class TestNatMasqueradePresent:
     """`install --network` reported success with no NAT at all on a host
     whose kernel could not load the MASQUERADE target, because

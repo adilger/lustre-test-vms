@@ -12,9 +12,8 @@ ExecStart=/bin/bash -c '\
       || echo "ltvm: creating bridge fcbr0 failed -- is the bridge module available?" >&2; \
     ip addr add 192.168.100.1/24 dev fcbr0 2>/dev/null || true; \
     ip link set fcbr0 up; \
-    DEFAULT_IF=$(ip route show default | awk "{print \\$5; exit}"); \
-    iptables -t nat -C POSTROUTING -s 192.168.100.0/24 -o $DEFAULT_IF -j MASQUERADE 2>/dev/null || \
-    iptables -t nat -A POSTROUTING -s 192.168.100.0/24 -o $DEFAULT_IF -j MASQUERADE \
+    iptables -t nat -C POSTROUTING -s 192.168.100.0/24 ! -d 192.168.100.0/24 -j MASQUERADE 2>/dev/null || \
+    iptables -t nat -A POSTROUTING -s 192.168.100.0/24 ! -d 192.168.100.0/24 -j MASQUERADE \
       || echo "ltvm: MASQUERADE failed -- VMs get no outbound NAT (needs xt_MASQUERADE, plus nft_compat under iptables-nft)" >&2; \
     iptables -C FORWARD -i fcbr0 -j ACCEPT 2>/dev/null || iptables -A FORWARD -i fcbr0 -j ACCEPT; \
     iptables -C FORWARD -o fcbr0 -j ACCEPT 2>/dev/null || iptables -A FORWARD -o fcbr0 -j ACCEPT'
