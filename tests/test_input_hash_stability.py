@@ -41,12 +41,12 @@ GOLDEN = [
     ("mainline", "container", None, None, "c25d828a438d5e1b"),
     ("mainline", "kernel", None, None, "308f76a4721b789b"),
     ("mainline", "image", None, None, "35b372d60d8ccf69"),
-    ("ubuntu2404", "container", None, None, "cd6651691a5b1589"),
-    ("ubuntu2404", "kernel", None, None, "50a1d8e151ac94da"),
-    ("ubuntu2404", "image", None, None, "bc59ea5cc0280e7f"),
-    ("ubuntu2604", "container", None, None, "8e2eee273bc40363"),
-    ("ubuntu2604", "kernel", None, None, "08406db2cab2835e"),
-    ("ubuntu2604", "image", None, None, "fa7baf5a1e749d1a"),
+    ("ubuntu2404", "container", None, None, "85dc6debbb892b65"),
+    ("ubuntu2404", "kernel", None, None, "f8b7128d1e8bb1c9"),
+    ("ubuntu2404", "image", None, None, "c8e6b070e6aa6b44"),
+    ("ubuntu2604", "container", None, None, "d864ce8762f0001a"),
+    ("ubuntu2604", "kernel", None, None, "153aab2f08addf1c"),
+    ("ubuntu2604", "image", None, None, "379177beff7f1729"),
     # A variant must not perturb the base hashes above, and must differ
     # from them.
     ("rocky9", "container", None, "mofed-24", "cc1a03c2d0fda310"),
