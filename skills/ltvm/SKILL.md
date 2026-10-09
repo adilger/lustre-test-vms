@@ -419,6 +419,7 @@ seconds. `ltvm vm nmi` triggers one from the host; `echo c >
 ltvm vm console-log co1-single
 ltvm vm snapshot co1-single before-test
 ltvm vm restore co1-single [tag]
+ltvm vm exec co1-single lctl dl               # run a command; exit = its rc
 ltvm vm nmi co1-single                        # NMI -> panic + kdump
 ltvm vm crash-collect co1-single --mod-dir <build>
 ltvm vm crash-collect co1-single --trigger --mod-dir <build>

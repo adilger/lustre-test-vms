@@ -208,6 +208,7 @@ try:
         cmd_deploy,
         cmd_destroy,
         cmd_doctor,
+        cmd_exec,
         cmd_fetch,
         cmd_list,
         cmd_llmount,
@@ -1468,7 +1469,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp.set_defaults(func=cmd_release)
 
-    # -- vm (console-log | crash-collect | nmi | snapshot | restore | set) --
+    # -- vm (console-log | crash-collect | exec | nmi | snapshot | restore | set) --
     vm_parser = sub.add_parser(
         "vm",
         parents=[common],
@@ -1531,6 +1532,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="Lustre build tree for triage (enables auto-triage)",
     )
     vccp.set_defaults(func=cmd_crash_collect)
+
+    vxp = vm_sub.add_parser(
+        "exec",
+        parents=[common],
+        help="Run a command in a VM over ssh and return its exit status",
+    )
+    _vxp_name = vxp.add_argument("name", help="VM name")
+    _vxp_name.completer = complete_vms  # type: ignore[attr-defined]
+    vxp.add_argument(
+        "--timeout",
+        type=int,
+        default=120,
+        help="Command timeout in seconds (default: 120).  Must come "
+        "before the VM name -- everything after it is the command.",
+    )
+    # REMAINDER keeps the command's own flags verbatim, as in `cluster
+    # exec`: ltvm's flags have to precede the VM name.
+    vxp.add_argument(
+        "command",
+        nargs=argparse.REMAINDER,
+        metavar="COMMAND...",
+        help="Command to run; everything after the VM name is passed "
+        "through untouched, flags included",
+    )
+    vxp.set_defaults(func=cmd_exec)
 
     vnp = vm_sub.add_parser(
         "nmi",
