@@ -387,13 +387,18 @@ The VM's shape is in `cfg/local.sh`: deploy appends blocks setting
 on a cluster which node holds what) after the stock `${VAR:-default}`
 lines. The two counts still take the environment's value, as on a stock
 tree, so `MDSCOUNT=1` or `OSTCOUNT=1` runs fewer targets than the VM has
-(never more: there are no devices past its disks). Reformat with the
+(a larger one puts the extra OSTs in files under /tmp). Reformat with the
 same count:
 
 ```bash
 ssh co1-single 'cd /usr/lib64/lustre/tests && MDSCOUNT=1 bash llmount.sh'
 ssh co1-single 'MDSCOUNT=1 ONLY=42a bash /usr/lib64/lustre/tests/sanity.sh'
 ```
+
+For more OSTs than disks -- sanity-ec wants 8 -- deploy with
+`deploy-lustre --ost-count 8` (or `cluster deploy --ost-count 8`): the
+OSTs past the disks are files in the root filesystem, sized to fit it,
+and later deploys keep the count until `--ost-count 0`.
 
 The rest -- devices, sizes, `FSTYPE` -- are plain assignments and win
 over the environment. A VM deployed by an older ltvm takes the counts

@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from ltvm_pkg import vm_cluster
+from ltvm_pkg import deploy, vm_cluster
 from ltvm_pkg.deploy import ENV_SAVE_BEGIN
 from ltvm_pkg.vm_state import ClusterInfo
 
@@ -317,6 +317,111 @@ _ADDRS = (
 
 def _probe(networks: str) -> str:
     return f"{networks}\n--\n{_ADDRS}"
+
+
+class TestOstCount:
+    """--ost-count on a cluster: files on the OSS nodes, in turn."""
+
+    def _two_oss(self) -> ClusterInfo:
+        return _cluster(
+            ("co2-mds", ["mgs", "mds"], 1, 0, "10.0.0.10"),
+            ("co2-oss1", ["oss"], 0, 2, "10.0.0.11"),
+            ("co2-oss2", ["oss"], 0, 1, "10.0.0.12"),
+            ("co2-client", ["client"], 0, 0, "10.0.0.13"),
+        )
+
+    def _plan(
+        self, c: ClusterInfo, count: int, space: dict[str, int], **kw
+    ) -> tuple[vm_cluster.OstFilePlan | None, list]:
+        ips = {n.name: n.ip for n in c.get_nodes()}
+        by_ip = {ips[name]: kb for name, kb in space.items()}
+        calls: list = []
+
+        def fake_prepare(ip, keep, *, prune):
+            calls.append((ip, keep, prune))
+            return by_ip.get(ip, 0)
+
+        sizes = {n.name: 500 << 20 for n in c.get_nodes()}
+        with patch("ltvm_pkg.deploy.prepare_ost_files", fake_prepare):
+            plan = vm_cluster.plan_ost_files(
+                c, count, ips, sizes, prune=kw.get("prune", True)
+            )
+        return plan, calls
+
+    def test_files_go_round_the_oss_nodes(self) -> None:
+        big = 16 << 20
+        plan, calls = self._plan(
+            self._two_oss(), 8, {"co2-oss1": big, "co2-oss2": big}
+        )
+        assert plan is not None
+        # Three disks, so the files are OSTs 4 to 8.
+        assert plan.hosts == {
+            4: "co2-oss1",
+            5: "co2-oss2",
+            6: "co2-oss1",
+            7: "co2-oss2",
+            8: "co2-oss1",
+        }
+        assert plan.size_kb == 512000
+        assert ("10.0.0.11", [4, 6, 8], True) in calls
+        assert ("10.0.0.12", [5, 7], True) in calls
+        # Only OSS nodes keep OST files.
+        assert {c[0] for c in calls} == {"10.0.0.11", "10.0.0.12"}
+
+    def test_the_tightest_node_sets_the_size(self) -> None:
+        reserve = deploy.OST_FILE_RESERVE_KB
+        plan, _ = self._plan(
+            self._two_oss(),
+            5,
+            {"co2-oss1": 16 << 20, "co2-oss2": reserve + 300 * 1024},
+        )
+        assert plan is not None
+        assert plan.size_kb == 300 * 1024
+
+    def test_too_little_space_dies(self) -> None:
+        with pytest.raises(SystemExit):
+            self._plan(self._two_oss(), 8, {"co2-oss1": 16 << 20})
+
+    def test_within_the_disks_only_prunes(self) -> None:
+        plan, calls = self._plan(self._two_oss(), 0, {})
+        assert plan is None
+        assert all(keep == [] and prune for _, keep, prune in calls)
+        assert len(calls) == 2
+
+    def test_no_oss_dies(self) -> None:
+        c = _cluster(("co2-mds", ["mgs", "mds"], 1, 0, "10.0.0.10"))
+        with pytest.raises(SystemExit):
+            self._plan(c, 4, {})
+
+    def test_local_sh_names_the_files_and_their_hosts(self) -> None:
+        plan = vm_cluster.OstFilePlan(
+            hosts={4: "co2-oss1", 5: "co2-oss2"}, size_kb=300 * 1024
+        )
+        text = vm_cluster.generate_local_sh(
+            self._two_oss(),
+            disk_sizes={"co2-oss1": 500 << 20, "co2-oss2": 500 << 20},
+            ost_count=5,
+            ost_files=plan,
+        )
+        assert "OSTCOUNT=${_ltvm_env_OSTCOUNT:-5}" in text
+        assert f"OSTSIZE={300 * 1024}" in text
+        assert "OSTSIZE=512000" not in text
+        assert "OSTDEV3=/dev/vdb" in text
+        assert f"OSTDEV4={deploy.OST_FILE_DIR}/ost4" in text
+        assert "ost4_HOST=co2-oss1" in text
+        assert f"OSTDEV5={deploy.OST_FILE_DIR}/ost5" in text
+        assert "ost5_HOST=co2-oss2" in text
+
+    def test_fewer_than_the_disks(self) -> None:
+        text = vm_cluster.generate_local_sh(self._two_oss(), ost_count=1)
+        assert "OSTCOUNT=${_ltvm_env_OSTCOUNT:-1}" in text
+
+    def test_cluster_records_its_count(self, tmp_path: Path) -> None:
+        with patch("ltvm_pkg.vm_state.SOCKETS", tmp_path):
+            ClusterInfo(name="c8", nodes=[], ost_count=8).save()
+            assert ClusterInfo.load("c8").ost_count == 8
+            ClusterInfo(name="c0", nodes=[]).save()
+            assert ClusterInfo.load("c0").ost_count == 0
 
 
 class TestLnetFromProbe:

@@ -591,6 +591,15 @@ class TestClusterDeployArgs:
         cmd_cluster(_ns("deploy", "co1"))
         assert self._ns_call().ip_family is None
 
+    def test_ost_count_flag(self) -> None:
+        cmd_cluster(_ns("deploy", "co1", "--ost-count", "8"))
+        assert self._ns_call().ost_count == 8
+
+    def test_ost_count_default_is_none(self) -> None:
+        # None, not 0: a bare deploy keeps the cluster's recorded count.
+        cmd_cluster(_ns("deploy", "co1"))
+        assert self._ns_call().ost_count is None
+
     def test_invalid_ip_family_errors(self) -> None:
         err = _expect_usage_error("deploy", "co1", "--ip-family", "ipv5")
         assert "invalid choice" in err
@@ -1318,6 +1327,116 @@ class TestCmdClusterDeployIpFamily:
         )
         probe = self._deploy(cluster, None, tmp_path)
         assert probe.call_args.args[1] == "ipv6"
+
+
+class TestCmdClusterDeployOstCount:
+    """--ost-count reaches the cluster block and outlives the deploy."""
+
+    def _deploy(
+        self, cluster: ClusterInfo, tree: Path, **flags: object
+    ) -> tuple[MagicMock, MagicMock]:
+        class _TC:
+            os_family = "rhel"
+
+        node = MagicMock(
+            os_id="rocky9",
+            arch="x86_64",
+            variant="base",
+            kernel="/a/kernels/k/vmlinuz",
+            ip="10.0.0.5",
+            disk_size=500 << 20,
+        )
+        with (
+            patch.object(ClusterInfo, "load", return_value=cluster),
+            patch.object(ClusterInfo, "save"),
+            patch.object(vm_cluster.VMInfo, "load", return_value=node),
+            patch.object(vm_cluster, "_validate_lustre_source"),
+            patch("ltvm_pkg.target_config.TargetConfig", return_value=_TC()),
+            patch.object(
+                vm_cluster.subprocess,
+                "run",
+                return_value=MagicMock(returncode=0),
+            ),
+            patch.object(
+                vm_cluster,
+                "_deploy_one_node",
+                side_effect=lambda name, *a, **k: (name, 0, ""),
+            ),
+            patch.object(vm_cluster, "probe_mgs_lnet"),
+            patch.object(vm_cluster, "plan_ost_files") as plan,
+            patch.object(
+                vm_cluster, "generate_local_sh", return_value=""
+            ) as gen,
+            patch.object(
+                vm_cluster,
+                "_write_cluster_local_sh",
+                side_effect=lambda name, *a, **k: (name, 0, ""),
+            ),
+            patch.object(
+                vm_cluster, "_distribute_cluster_hosts", return_value=[]
+            ),
+        ):
+            vm_cluster.cmd_cluster_deploy(
+                argparse.Namespace(
+                    name="co3", lustre_source=str(tree), mount=False, **flags
+                )
+            )
+        return plan, gen
+
+    def _cluster(self, ost_count: int = 0) -> ClusterInfo:
+        return ClusterInfo(
+            name="co3",
+            nodes=[
+                {"name": "co3-mds", "roles": ["mgs", "mds"], "mdt_disks": 1},
+                {"name": "co3-oss", "roles": ["oss"], "ost_disks": 2},
+            ],
+            ost_count=ost_count,
+        )
+
+    def test_flag_is_planned_and_recorded(self, tmp_path: Path) -> None:
+        cluster = self._cluster()
+        plan, gen = self._deploy(cluster, tmp_path, ost_count=8)
+        assert plan.call_args.args[1] == 8
+        assert plan.call_args.kwargs["prune"] is True
+        assert gen.call_args.kwargs["ost_count"] == 8
+        assert cluster.ost_count == 8
+
+    def test_bare_redeploy_keeps_the_count(self, tmp_path: Path) -> None:
+        plan, gen = self._deploy(self._cluster(8), tmp_path)
+        assert plan.call_args.args[1] == 8
+        assert gen.call_args.kwargs["ost_count"] == 8
+
+    def test_zero_removes_the_files_and_the_record(
+        self, tmp_path: Path
+    ) -> None:
+        cluster = self._cluster(8)
+        plan, gen = self._deploy(cluster, tmp_path, ost_count=0)
+        assert plan.call_args.args[1] == 0
+        assert gen.call_args.kwargs["ost_count"] == 0
+        assert cluster.ost_count == 0
+
+    def test_never_asked_touches_nothing(self, tmp_path: Path) -> None:
+        plan, gen = self._deploy(self._cluster(), tmp_path)
+        plan.assert_not_called()
+        assert gen.call_args.kwargs["ost_files"] is None
+
+    def test_userspace_only_removes_no_files(self, tmp_path: Path) -> None:
+        from ltvm_pkg.lustre_build import staging_path
+
+        staging_path(
+            str(tmp_path), "rocky9", arch="x86_64", kernel="k", variant="base"
+        ).mkdir(parents=True)
+        with patch(
+            "ltvm_pkg.cli.deploy._refresh_staged_sources", return_value=None
+        ):
+            plan, _ = self._deploy(
+                self._cluster(), tmp_path, ost_count=8, userspace_only=True
+            )
+        assert plan.call_args.kwargs["prune"] is False
+
+    def test_negative_refused(self, tmp_path: Path) -> None:
+        with pytest.raises(SystemExit):
+            self._deploy(self._cluster(), tmp_path, ost_count=-1)
 
 
 class TestCmdClusterDeployUserspaceOnly:

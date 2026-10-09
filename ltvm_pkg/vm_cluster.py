@@ -191,6 +191,61 @@ CLUSTER_BLOCK_BEGIN = "# --- Cluster configuration"
 CLUSTER_BLOCK_END = "# --- END cluster configuration"
 
 
+@dataclass
+class OstFilePlan:
+    """Where a cluster's file-backed OSTs go: OST index to OSS node."""
+
+    hosts: dict[int, str]
+    size_kb: int
+
+
+def plan_ost_files(
+    cluster: ClusterInfo,
+    ost_count: int,
+    node_ips: dict[str, str],
+    disk_sizes: dict[str, int] | None,
+    *,
+    prune: bool,
+) -> OstFilePlan | None:
+    """Spread the OSTs past the OSS disks over the OSS nodes, in turn.
+
+    Every OSS node is prepared, so one that holds no file OST any more
+    has its old files removed (with ``prune``).  The size is the
+    smallest any node can give its share, so all OSTs stay alike.
+    """
+    from ltvm_pkg.deploy import (
+        ost_file_kb,
+        ost_space_error,
+        prepare_ost_files,
+    )
+
+    oss_list = cluster.oss_nodes()
+    if ost_count and not oss_list:
+        die(f"cluster {cluster.name!r} has no OSS node for --ost-count")
+    first = sum(n.ost_disks for n in oss_list) + 1
+    hosts = {
+        idx: oss_list[i % len(oss_list)].name
+        for i, idx in enumerate(range(first, ost_count + 1))
+    }
+    cap_kb = _min_disk_kb(oss_list, disk_sizes)
+    size_kb = 0
+    for node in oss_list:
+        keep = [i for i, h in hosts.items() if h == node.name]
+        try:
+            space = prepare_ost_files(node_ips[node.name], keep, prune=prune)
+        except RuntimeError as e:
+            die(f"{node.name}: {e}")
+        if not keep:
+            continue
+        kb = ost_file_kb(space, len(keep), cap_kb)
+        if not kb:
+            die(ost_space_error(node.name, len(keep), space))
+        size_kb = min(size_kb, kb) if size_kb else kb
+    if not hosts:
+        return None
+    return OstFilePlan(hosts=hosts, size_kb=size_kb)
+
+
 def _min_disk_kb(
     nodes: list[ClusterNode], disk_sizes: dict[str, int] | None
 ) -> int:
@@ -207,6 +262,8 @@ def generate_local_sh(
     fstype: str = "ldiskfs",
     lnet: ClusterLnet | None = None,
     disk_sizes: dict[str, int] | None = None,
+    ost_count: int = 0,
+    ost_files: OstFilePlan | None = None,
 ) -> str:
     """Generate the cluster block for cfg/local.sh.
 
@@ -228,8 +285,11 @@ def generate_local_sh(
     sizes go in this block because it is the only one a client gets,
     and llmount formats every target from the first client: without
     them it falls back to the framework's few-hundred-MB defaults.
+
+    ``ost_count`` (--ost-count) replaces the count of OSS disks, and
+    ``ost_files`` places the OSTs past those disks in files.
     """
-    from ltvm_pkg.deploy import env_count
+    from ltvm_pkg.deploy import env_count, ost_file_path
 
     if fstype not in ("ldiskfs", "zfs"):
         raise ValueError(f"unsupported fstype: {fstype!r}")
@@ -293,9 +353,11 @@ def generate_local_sh(
 
     if oss_list:
         lines.append(f"ost_HOST={oss_list[0].name}")
-        total_osts = sum(n.ost_disks for n in oss_list)
+        total_osts = ost_count or sum(n.ost_disks for n in oss_list)
         lines.append(env_count("OSTCOUNT", total_osts))
         ost_kb = _min_disk_kb(oss_list, disk_sizes)
+        if ost_files is not None:
+            ost_kb = ost_files.size_kb
         if ost_kb:
             lines.append(f"OSTSIZE={ost_kb}")
 
@@ -317,6 +379,9 @@ def generate_local_sh(
                 lines.append(f"OSTDEV{ost_idx}=/dev/vd{letter}")
                 lines.append(f"ost{ost_idx}_HOST={oss_node.name}")
                 ost_idx += 1
+        for idx, host in (ost_files.hosts if ost_files else {}).items():
+            lines.append(f"OSTDEV{idx}={ost_file_path(idx)}")
+            lines.append(f"ost{idx}_HOST={host}")
         lines.append("")
 
     if client_list:
@@ -1089,6 +1154,10 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
             "--zfs and --userspace-only are incompatible: a "
             "userspace-only deploy ships no kernel modules"
         )
+    ost_count_arg = getattr(args, "ost_count", None)
+    if ost_count_arg is not None and ost_count_arg < 0:
+        die("--ost-count must be 0 or more")
+    ost_count = cluster.ost_count if ost_count_arg is None else ost_count_arg
 
     build_cmd = ["ltvm", "build", "lustre", target, "--lustre-tree", build]
     if kernel_name:
@@ -1273,21 +1342,33 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
             disk_sizes[node.name] = VMInfo.load(node.name).disk_size
         except VMNotFound:
             pass
+    ssh_opts = SSH_OPTS
+    try:
+        node_ips = {node.name: VMInfo.load(node.name).ip for node in nodes}
+    except VMNotFound as e:
+        die(f"cluster node missing: {e}")
+    # Also when going back to 0, to remove the files.
+    ost_files = None
+    if ost_count or ost_count_arg is not None:
+        ost_files = plan_ost_files(
+            cluster,
+            ost_count,
+            node_ips,
+            disk_sizes,
+            prune=not userspace_only,
+        )
     local_sh = generate_local_sh(
         cluster,
         os_family=os_family,
         fstype=fstype,
         lnet=lnet,
         disk_sizes=disk_sizes,
+        ost_count=ost_count,
+        ost_files=ost_files,
     )
     print("\n--- Distributing cluster config (local.sh)...")
     print(local_sh)
 
-    ssh_opts = SSH_OPTS
-    try:
-        node_ips = {node.name: VMInfo.load(node.name).ip for node in nodes}
-    except VMNotFound as e:
-        die(f"cluster node missing: {e}")
     # Again on every deploy: a cluster made before create wrote it, or a
     # node whose write failed then, gets it here.
     failed_hosts = _distribute_cluster_hosts(cluster.name, nodes, node_ips)
@@ -1311,12 +1392,16 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
 
     # Only once every node holds the new local.sh, so the record always
     # describes what the nodes run.
-    if cluster.ip_family != ip_family:
+    if cluster.ip_family != ip_family or cluster.ost_count != ost_count:
         cluster.ip_family = ip_family
+        cluster.ost_count = ost_count
         try:
             cluster.save()
         except OSError as e:
-            print(f"    warning: cannot record ip_family={ip_family}: {e}")
+            print(
+                f"    warning: cannot record ip_family={ip_family} "
+                f"ost_count={ost_count}: {e}"
+            )
 
     if args.mount:
         print("=== Mounting Lustre filesystem ===")
@@ -1522,6 +1607,7 @@ def cmd_cluster_status(args: argparse.Namespace) -> None:
                     "cluster": cluster.name,
                     "owner_id": cluster.owner_id,
                     "ip_family": cluster.ip_family or "ipv4",
+                    "ost_count": cluster.ost_count or None,
                     "nodes": rows,
                 },
                 indent=2,
@@ -1532,6 +1618,8 @@ def cmd_cluster_status(args: argparse.Namespace) -> None:
     print(f"cluster: {cluster.name}")
     print(f"owner:   {cluster.owner_id or '-'}")
     print(f"family:  {cluster.ip_family or 'ipv4'}")
+    if cluster.ost_count:
+        print(f"osts:    {cluster.ost_count} (--ost-count)")
     print(f"nodes:   {len(nodes)}")
     print()
 

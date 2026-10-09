@@ -76,6 +76,7 @@ def deploy_to_vm(
     ram_mdt: bool = False,
     zfs_staging: Path | None = None,
     fstype: str | None = None,
+    ost_count: int | None = None,
 ) -> None:
     """Stream a Lustre staging tree into a VM.
 
@@ -83,8 +84,10 @@ def deploy_to_vm(
        Lustre one -- ZFS first so one depmod covers both
     2. depmod + ldconfig
     3. Configure test disk mappings in cfg/local.sh
-    4. Optionally repoint the OSTs at brd ram devices (``ram_osts``),
-       for benchmarks that want the backing store out of the picture.
+    4. Optionally set the OST count (``ost_count``), file-backing the
+       OSTs past the VM's disks, or repoint the OSTs at brd ram devices
+       (``ram_osts``), for benchmarks that want the backing store out
+       of the picture.
     5. Pin FSTYPE in cfg/local.sh (``fstype``)
 
     Raises RuntimeError on failure.
@@ -129,6 +132,17 @@ def deploy_to_vm(
             vm.ost_disks,
             vm.disk_size,
             os_family=os_family,
+        )
+
+    if ost_count is not None:
+        configure_ost_count(
+            vm.ip,
+            ost_count,
+            vm.ost_disks,
+            vm.disk_size,
+            os_family=os_family,
+            prune=not userspace_only,
+            name=vm.name,
         )
 
     # ... then let ram OSTs override it, if asked for.  Ordering is
@@ -516,6 +530,155 @@ def configure_ram_osts(
     if r.returncode != 0:
         raise RuntimeError(
             f"Failed to configure ram OSTs: {r.stderr.strip() or r.stdout.strip()}"
+        )
+
+
+OST_FILE_DIR = "/var/lib/ltvm/ost-files"
+# Root space left over when every file-backed OST is full.
+OST_FILE_RESERVE_KB = 1024 * 1024
+OST_FILE_MIN_KB = 256 * 1024
+OST_COUNT_BEGIN = "# --- OST count"
+OST_COUNT_END = "# --- END OST count"
+
+
+def ost_file_path(n: int) -> str:
+    return f"{OST_FILE_DIR}/ost{n}"
+
+
+def prepare_ost_files(ip: str, keep: list[int], *, prune: bool) -> int:
+    """Make the node ready for file-backed OSTs ``keep``; return the KB
+    they may share.
+
+    That is the free space plus what the kept files hold already, since
+    mkfs.lustre recreates a file-backed target empty.  With ``prune``,
+    the files of every other OST are removed first.  Without either,
+    nothing runs and 0 comes back.
+    """
+    names = [f"ost{n}" for n in keep]
+    script = f"mkdir -p {OST_FILE_DIR} && cd {OST_FILE_DIR} || exit 1; "
+    if prune:
+        script += (
+            f"keep={shlex.quote(' ' + ' '.join(names) + ' ')}; "
+            'for f in ost*; do [ -e "$f" ] || continue; '
+            'case "$keep" in *" $f "*) ;; *) rm -f "$f" ;; esac; done; '
+        )
+    if names:
+        script += (
+            "used=$(du -kc " + " ".join(names) + " 2>/dev/null "
+            "| awk 'END {print $1}'); "
+            "echo \"$(df -kP . | awk 'NR == 2 {print $4}') ${used:-0}\""
+        )
+    elif not prune:
+        return 0
+    r = run_ssh(ip, script, timeout=60)
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"Failed to prepare {OST_FILE_DIR} on {ip}: "
+            f"{r.stderr.strip() or r.stdout.strip()}"
+        )
+    if not names:
+        return 0
+    try:
+        avail, used = (int(x) for x in r.stdout.split()[-2:])
+    except ValueError:
+        raise RuntimeError(
+            f"Cannot read the free space in {OST_FILE_DIR} on {ip}: "
+            f"{r.stdout.strip()!r}"
+        )
+    return avail + used
+
+
+def ost_file_kb(space_kb: int, nfiles: int, cap_kb: int) -> int:
+    """OSTSIZE for ``nfiles`` file-backed OSTs sharing ``space_kb``.
+
+    An equal share of the space after the reserve, no larger than
+    ``cap_kb`` (the VM's disk size, when it has one) and rounded down to
+    a MiB.  0 when the share is below OST_FILE_MIN_KB.
+    """
+    share = (space_kb - OST_FILE_RESERVE_KB) // nfiles
+    if cap_kb:
+        share = min(share, cap_kb)
+    share = share // 1024 * 1024
+    return share if share >= OST_FILE_MIN_KB else 0
+
+
+def ost_space_error(where: str, nfiles: int, space_kb: int) -> str:
+    need_mb = (nfiles * OST_FILE_MIN_KB + OST_FILE_RESERVE_KB) // 1024
+    return (
+        f"{nfiles} file-backed OSTs need at least {need_mb} MB free in "
+        f"{OST_FILE_DIR} on {where}, which has {space_kb // 1024} MB.  "
+        f"Ask for fewer OSTs, or recreate it with a larger --root-size "
+        f"or more --ost-disks."
+    )
+
+
+def configure_ost_count(
+    ip: str,
+    count: int,
+    ost_disks: int,
+    disk_size_bytes: int = 0,
+    os_family: str = "rhel",
+    *,
+    prune: bool = True,
+    name: str = "",
+) -> None:
+    """Run ``count`` OSTs, file-backing those past the VM's OST disks.
+
+    The block stays in cfg/local.sh until a deploy asks for another
+    count; 0 removes it, which puts the VM back on one OST per disk.
+    It is spliced in place after the disk block, which llmount and
+    `suite run` rewrite in place too, so neither undoes it.  A RAM OST
+    block would outrank it, being appended later, so it goes.
+
+    ``prune`` removes the files of OSTs no longer wanted; leave it off
+    when Lustre may still be running on them (--userspace-only).
+    """
+    testdir = f"{lustre_libdir(os_family)}/tests"
+    cfg = f"{testdir}/cfg/local.sh"
+    keep = list(range(ost_disks + 1, count + 1))
+    space = prepare_ost_files(ip, keep, prune=prune)
+
+    drop_ram = (
+        f"sed -i '/^# --- RAM OST configuration/,/^# --- END RAM OST/d' "
+        f"{cfg} 2>/dev/null || true"
+    )
+    if count == 0:
+        script = (
+            f"sed -i '/^{OST_COUNT_BEGIN}/,/^{OST_COUNT_END}/d' {cfg} "
+            f"2>/dev/null || true"
+        )
+    else:
+        lines = [env_count("OSTCOUNT", count)]
+        if keep:
+            size_kb = ost_file_kb(space, len(keep), disk_size_bytes // 1024)
+            if not size_kb:
+                raise RuntimeError(
+                    ost_space_error(name or ip, len(keep), space)
+                )
+            # One OSTSIZE for every OST: the disk-backed ones are
+            # formatted down to the files' size, so all are alike.
+            lines.append(f"OSTSIZE={size_kb}")
+            lines += [f"OSTDEV{n}={ost_file_path(n)}" for n in keep]
+            print(
+                f"  {count} OSTs: {min(count, ost_disks)} on disks, "
+                f"{len(keep)} file-backed in {OST_FILE_DIR}, "
+                f"{size_kb // 1024} MB each",
+                file=sys.stderr,
+            )
+        snippet = "\\n".join(lines)
+        tmp = "/tmp/.ltvm-ost-count-block"
+        script = (
+            f"{drop_ram}; "
+            f"printf '{OST_COUNT_BEGIN} (generated by ltvm deploy) ---\\n"
+            f"{snippet}\\n"
+            f"{OST_COUNT_END} ---\\n' > {tmp}; "
+            + splice_local_sh_block(cfg, tmp, OST_COUNT_BEGIN, OST_COUNT_END)
+            + f"; rm -f {tmp}"
+        )
+    r = run_ssh(ip, script, timeout=30)
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"Failed to set the OST count in {cfg}: {r.stderr.strip()}"
         )
 
 

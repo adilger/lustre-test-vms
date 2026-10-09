@@ -312,6 +312,16 @@ def cmd_deploy(args: argparse.Namespace) -> int:
             use_json,
         )
 
+    ost_count = getattr(args, "ost_count", None)
+    if ost_count is not None:
+        if ost_count < 0:
+            return _error("--ost-count must be 0 or more", use_json)
+        if getattr(args, "ram_osts", 0):
+            return _error(
+                "--ost-count and --ram-osts both set the OSTs; pass one",
+                use_json,
+            )
+
     # Staging now lives inside the lustre tree at
     # <build_path>/.ltvm-staging/<target>/<arch>/<kernel>/, per-kernel
     # so two kernels' userland (usr/sbin, etc.) coexist without
@@ -652,6 +662,7 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                 ram_mdt=getattr(args, "ram_mdt", False),
                 zfs_staging=zfs_staging,
                 fstype=fstype,
+                ost_count=ost_count,
             )
         except RuntimeError as e:
             return _error(str(e), use_json)
@@ -741,6 +752,7 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                 "staging": str(staging),
                 "os_family": os_family,
                 "zfs": want_zfs,
+                "ost_count": ost_count,
                 "mounted": mounted,
             },
             use_json,

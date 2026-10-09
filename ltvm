@@ -1734,6 +1734,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Deploy only userspace (tools, tests) -- skip kernel modules and depmod",
     )
     sp.add_argument(
+        "--ost-count",
+        dest="ost_count",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Run N OSTs; those past the VM's OST disks are file-backed "
+        "in its root filesystem, sized to fit it.  Kept in cfg/local.sh "
+        "by later deploys; 0 goes back to one OST per disk.",
+    )
+    sp.add_argument(
         "--ram-osts",
         dest="ram_osts",
         type=int,
@@ -2206,6 +2216,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Address family of the cluster's NIDs; ipv6 needs a tcp "
         "extra NIC (default: the family of the last deploy, else ipv4)",
+    )
+    cdpl.add_argument(
+        "--ost-count",
+        dest="ost_count",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Run N OSTs; those past the OSS disks are file-backed, "
+        "spread over the OSS nodes.  Kept by later deploys; 0 goes back "
+        "to one OST per disk.",
     )
     cdpl.set_defaults(func=cmd_cluster_deploy)
 

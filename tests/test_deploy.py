@@ -2034,6 +2034,351 @@ class TestDeployRamOstWiring:
         assert calls == ["virtio", "ram"], calls
 
 
+# ── --ost-count ──────────────────────────────────────────
+
+
+class _Sandbox:
+    """Runs what configure_ost_count sends over ssh in a local tree."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.cfg = root / "usr/lib64/lustre/tests/cfg/local.sh"
+        self.cfg.parent.mkdir(parents=True)
+        self.files = root / "ost-files"
+        self.scripts: list[str] = []
+        self.stdout: list[str] = []
+
+    def local(self, script: str) -> str:
+        return (
+            script.replace(deploy.OST_FILE_DIR, str(self.files))
+            .replace("/usr/lib64/lustre", str(self.root / "usr/lib64/lustre"))
+            .replace("/tmp/.ltvm-", str(self.root / ".ltvm-"))
+        )
+
+    def run_ssh(self, ip, script, timeout=30):
+        self.scripts.append(script)
+        r = subprocess.run(
+            ["bash", "-c", self.local(script)], capture_output=True, text=True
+        )
+        self.stdout.append(r.stdout)
+        return r
+
+    def source(self, expr: str, env: dict[str, str] | None = None) -> str:
+        return subprocess.run(
+            ["bash", "-c", f". {self.cfg}; echo {expr}"],
+            capture_output=True,
+            text=True,
+            check=True,
+            env=env,
+        ).stdout.strip()
+
+
+@pytest.fixture
+def sandbox(tmp_path: Path) -> Any:
+    box = _Sandbox(tmp_path)
+    with (
+        patch("ltvm_pkg.deploy.run_ssh", side_effect=box.run_ssh),
+        # The host's free space must not decide these tests.
+        patch.object(deploy, "OST_FILE_RESERVE_KB", 0),
+        patch.object(deploy, "OST_FILE_MIN_KB", 1024),
+    ):
+        yield box
+
+
+class TestOstFileKb:
+    """The size of each file-backed OST."""
+
+    def test_capped_at_the_disk_size(self) -> None:
+        free = 100 * 1024 * 1024
+        assert deploy.ost_file_kb(free, 6, 512000) == 512000
+
+    def test_shares_the_space_after_the_reserve(self) -> None:
+        space = deploy.OST_FILE_RESERVE_KB + 6 * 300 * 1024
+        assert deploy.ost_file_kb(space, 6, 512000) == 300 * 1024
+
+    def test_rounds_down_to_a_mib(self) -> None:
+        space = deploy.OST_FILE_RESERVE_KB + 300 * 1024 + 7
+        assert deploy.ost_file_kb(space, 1, 0) == 300 * 1024
+
+    def test_too_small_is_zero(self) -> None:
+        space = deploy.OST_FILE_RESERVE_KB + 6 * 100 * 1024
+        assert deploy.ost_file_kb(space, 6, 512000) == 0
+
+
+class TestConfigureOstCount:
+    """configure_ost_count writes the OST count block into cfg/local.sh."""
+
+    def _scripts(
+        self, count: int, ost_disks: int = 2, free_kb: int = 8 << 20, **kw
+    ) -> list[str]:
+        scripts: list[str] = []
+
+        def fake_run_ssh(ip, script, timeout=30):
+            scripts.append(script)
+            return _ok(stdout=f"{free_kb} 0\n")
+
+        with patch("ltvm_pkg.deploy.run_ssh", side_effect=fake_run_ssh):
+            deploy.configure_ost_count(
+                "10.0.0.1", count, ost_disks, 500 * 1024 * 1024, **kw
+            )
+        return scripts
+
+    def test_osts_past_the_disks_are_files(self) -> None:
+        block = self._scripts(8)[-1]
+        assert "OSTCOUNT=${_ltvm_env_OSTCOUNT:-8}" in block
+        for n in range(3, 9):
+            assert f"OSTDEV{n}={deploy.OST_FILE_DIR}/ost{n}" in block
+        # The disk block keeps OSTDEV1 and OSTDEV2.
+        assert "OSTDEV1=" not in block and "OSTDEV2=" not in block
+        assert "OSTSIZE=512000" in block
+
+    def test_size_shrinks_to_fit_the_root_disk(self) -> None:
+        free = deploy.OST_FILE_RESERVE_KB + 6 * 400 * 1024
+        block = self._scripts(8, free_kb=free)[-1]
+        assert f"OSTSIZE={400 * 1024}" in block
+
+    def test_too_little_space_is_refused(self) -> None:
+        free = deploy.OST_FILE_RESERVE_KB + 6 * 10 * 1024
+        with pytest.raises(RuntimeError, match="--root-size"):
+            self._scripts(8, free_kb=free)
+
+    def test_no_files_within_the_disks(self) -> None:
+        block = self._scripts(1)[-1]
+        assert "OSTCOUNT=${_ltvm_env_OSTCOUNT:-1}" in block
+        assert "OSTDEV" not in block and "OSTSIZE" not in block
+
+    def test_userspace_only_removes_no_files(self) -> None:
+        """Lustre may still be running on them."""
+        probe = self._scripts(8, prune=False)[0]
+        assert "rm -f" not in probe
+
+    def test_zero_removes_the_block(self) -> None:
+        scripts = self._scripts(0)
+        assert "rm -f" in scripts[0]
+        assert "OSTCOUNT" not in scripts[-1]
+        assert (
+            f"/^{deploy.OST_COUNT_BEGIN}/,/^{deploy.OST_COUNT_END}/d"
+            in (scripts[-1])
+        )
+
+    def test_debian_libdir(self) -> None:
+        block = self._scripts(4, os_family="debian")[-1]
+        assert "/usr/lib/lustre/tests/cfg/local.sh" in block
+        assert "/usr/lib64/" not in block
+
+
+class TestOstCountInLocalSh:
+    """The block, run for real against a cfg/local.sh."""
+
+    _DISKS = (
+        "OSTCOUNT=${OSTCOUNT:-2}\n"
+        "# --- VM disk configuration (generated by ltvm deploy) ---\n"
+        "OSTSIZE=512000\n"
+        "OSTCOUNT=${_ltvm_env_OSTCOUNT:-2}\n"
+        "OSTDEV1=/dev/vdc\n"
+        "OSTDEV2=/dev/vdd\n"
+        "# --- END VM disk configuration ---\n"
+    )
+
+    def _configure(self, box: _Sandbox, count: int, **kw: Any) -> None:
+        deploy.configure_ost_count(
+            "10.0.0.1", count, 2, 500 * 1024 * 1024, **kw
+        )
+
+    def test_sourcing_gives_the_count_and_the_files(
+        self, sandbox: _Sandbox
+    ) -> None:
+        sandbox.cfg.write_text(self._DISKS)
+        self._configure(sandbox, 8)
+        assert sandbox.source("$OSTCOUNT") == "8"
+        assert sandbox.source("$OSTDEV2") == "/dev/vdd"
+        assert sandbox.source("$OSTDEV8") == str(sandbox.files / "ost8")
+        assert sandbox.source("$OSTSIZE") == "512000"
+        assert sandbox.files.is_dir()
+
+    def test_environment_count_still_wins(self, sandbox: _Sandbox) -> None:
+        sandbox.cfg.write_text(self._DISKS)
+        self._configure(sandbox, 8)
+        env = {"PATH": "/usr/bin:/bin", "OSTCOUNT": "3"}
+        assert sandbox.source("$OSTCOUNT", env) == "3"
+
+    def test_llmount_rewriting_the_disk_block_keeps_it(
+        self, sandbox: _Sandbox
+    ) -> None:
+        """llmount and `suite run` rewrite the disk block; the count
+        must survive them, as it survives a plain redeploy."""
+        sandbox.cfg.write_text(self._DISKS)
+        self._configure(sandbox, 8)
+        deploy.configure_test_disks("10.0.0.1", 1, 2, 500 * 1024 * 1024)
+        assert sandbox.source("$OSTCOUNT") == "8"
+        body = sandbox.cfg.read_text()
+        assert body.count(deploy.OST_COUNT_BEGIN) == 1
+
+    def test_a_new_count_replaces_the_old(self, sandbox: _Sandbox) -> None:
+        sandbox.cfg.write_text(self._DISKS)
+        self._configure(sandbox, 8)
+        (sandbox.files / "ost8").write_text("x")
+        self._configure(sandbox, 4)
+        assert sandbox.source("$OSTCOUNT") == "4"
+        assert sandbox.source("${OSTDEV8:-unset}") == "unset"
+        assert sandbox.cfg.read_text().count(deploy.OST_COUNT_BEGIN) == 1
+        assert not (sandbox.files / "ost8").exists()
+
+    def test_zero_goes_back_to_the_disks(self, sandbox: _Sandbox) -> None:
+        sandbox.cfg.write_text(self._DISKS)
+        self._configure(sandbox, 8)
+        (sandbox.files / "ost3").write_text("x")
+        self._configure(sandbox, 0)
+        assert sandbox.source("$OSTCOUNT") == "2"
+        assert deploy.OST_COUNT_BEGIN not in sandbox.cfg.read_text()
+        assert not (sandbox.files / "ost3").exists()
+
+    def test_kept_files_survive_userspace_only(self, sandbox: _Sandbox) -> None:
+        sandbox.cfg.write_text(self._DISKS)
+        self._configure(sandbox, 8)
+        (sandbox.files / "ost8").write_text("x")
+        self._configure(sandbox, 4, prune=False)
+        assert (sandbox.files / "ost8").exists()
+
+    def test_a_ram_ost_block_is_dropped(self, sandbox: _Sandbox) -> None:
+        """Appended after ours, it would otherwise keep winning."""
+        sandbox.cfg.write_text(
+            self._DISKS
+            + "\n# --- RAM OST configuration (generated by ltvm deploy) ---\n"
+            "OSTCOUNT=4\nOSTDEV1=/dev/ram0\n"
+            "# --- END RAM OST configuration ---\n"
+        )
+        self._configure(sandbox, 8)
+        assert "RAM OST" not in sandbox.cfg.read_text()
+        assert sandbox.source("$OSTDEV1") == "/dev/vdc"
+        assert sandbox.source("$OSTCOUNT") == "8"
+
+    def test_space_counts_files_about_to_be_reformatted(
+        self, sandbox: _Sandbox
+    ) -> None:
+        """mkfs.lustre recreates a file-backed target empty, so what a
+        kept file holds now is space it may use again."""
+        sandbox.files.mkdir()
+        (sandbox.files / "ost3").write_bytes(b"x" * (64 * 1024))
+        (sandbox.files / "ost9").write_bytes(b"x" * (64 * 1024))
+        free = deploy.prepare_ost_files("10.0.0.1", [3], prune=True)
+        avail, used = (int(x) for x in sandbox.stdout[-1].split())
+        assert used >= 64
+        assert free == avail + used
+        assert (sandbox.files / "ost3").exists()
+        assert not (sandbox.files / "ost9").exists()
+
+
+class TestDeployOstCountWiring:
+    """deploy_to_vm applies --ost-count after the disk block."""
+
+    def test_not_called_when_unset(self, staging: Path) -> None:
+        vm = _make_vm(mdt_disks=1, ost_disks=2)
+        with (
+            patch("ltvm_pkg.deploy.subprocess.run", return_value=_ok()),
+            patch("ltvm_pkg.deploy.run_ssh", return_value=_ok()),
+            patch("ltvm_pkg.deploy.configure_test_disks"),
+            patch("ltvm_pkg.deploy.configure_ost_count") as mock_cnt,
+        ):
+            deploy.deploy_to_vm(vm, staging)
+        mock_cnt.assert_not_called()
+
+    def test_zero_is_passed_on(self, staging: Path) -> None:
+        """0 is a request (back to the disks), not "unset"."""
+        vm = _make_vm(mdt_disks=1, ost_disks=2)
+        with (
+            patch("ltvm_pkg.deploy.subprocess.run", return_value=_ok()),
+            patch("ltvm_pkg.deploy.run_ssh", return_value=_ok()),
+            patch("ltvm_pkg.deploy.configure_test_disks"),
+            patch("ltvm_pkg.deploy.configure_ost_count") as mock_cnt,
+        ):
+            deploy.deploy_to_vm(vm, staging, ost_count=0)
+        assert mock_cnt.call_args.args[1] == 0
+
+    def test_after_the_disks_and_pruning_only_with_modules(
+        self, staging: Path
+    ) -> None:
+        calls: list[str] = []
+        vm = _make_vm(mdt_disks=1, ost_disks=2, disk_size=12345)
+        with (
+            patch("ltvm_pkg.deploy.subprocess.run", return_value=_ok()),
+            patch("ltvm_pkg.deploy.run_ssh", return_value=_ok()),
+            patch(
+                "ltvm_pkg.deploy.configure_test_disks",
+                side_effect=lambda *a, **k: calls.append("disks"),
+            ),
+            patch(
+                "ltvm_pkg.deploy.configure_ost_count",
+                side_effect=lambda *a, **k: calls.append("count"),
+            ) as mock_cnt,
+        ):
+            deploy.deploy_to_vm(vm, staging, ost_count=8)
+            assert mock_cnt.call_args.kwargs["prune"] is True
+            deploy.deploy_to_vm(vm, staging, ost_count=8, userspace_only=True)
+            assert mock_cnt.call_args.kwargs["prune"] is False
+        assert calls[:2] == ["disks", "count"]
+        assert mock_cnt.call_args.args == (vm.ip, 8, 2, 12345)
+
+
+class TestCmdDeployOstCount:
+    """deploy-lustre --ost-count reaches deploy_to_vm, or is refused."""
+
+    def _run(self, tmp_path: Path, **flags: Any) -> tuple[int, MagicMock]:
+        from ltvm_pkg import cli as cli_mod
+        from ltvm_pkg.lustre_build import staging_path
+
+        build_path = tmp_path / "lustre-release"
+        _setup_lustre_tree(build_path)
+        staging = staging_path(
+            build_path, "rocky9", arch="x86_64", kernel="5.14-rhel9.7"
+        )
+        staging.mkdir(parents=True)
+        (staging / "lustre.ko").write_text("")
+        (staging / ".ltvm-staging-stamp").write_text("")
+        _mark_staging_fresh(staging, build_path, _stub_tc())
+
+        vm = _make_vm(name="co1-osts", ip="10.0.0.16")
+        vm.os_id = "rocky9"
+        vm.save()
+
+        args = _deploy_args(vm="co1-osts", lustre_tree=str(build_path))
+        for k, v in flags.items():
+            setattr(args, k, v)
+        with (
+            patch.object(cli_mod, "TargetConfig", return_value=_stub_tc()),
+            patch("ltvm_pkg.cli.deploy_to_vm") as deploy_mock,
+            patch(
+                "subprocess.run",
+                return_value=MagicMock(returncode=0, stdout=""),
+            ),
+        ):
+            rc = cli_mod.cmd_deploy(args)
+        return rc, deploy_mock
+
+    def test_forwarded(self, tmp_sockets: Path, tmp_path: Path) -> None:
+        rc, deploy_mock = self._run(tmp_path, ost_count=8)
+        assert rc == 0
+        assert deploy_mock.call_args.kwargs["ost_count"] == 8
+
+    def test_absent_is_none(self, tmp_sockets: Path, tmp_path: Path) -> None:
+        """A plain redeploy leaves the VM's count as it is."""
+        rc, deploy_mock = self._run(tmp_path)
+        assert rc == 0
+        assert deploy_mock.call_args.kwargs["ost_count"] is None
+
+    def test_negative_refused(self, tmp_sockets: Path, tmp_path: Path) -> None:
+        rc, deploy_mock = self._run(tmp_path, ost_count=-1)
+        assert rc == 1
+        deploy_mock.assert_not_called()
+
+    def test_with_ram_osts_refused(
+        self, tmp_sockets: Path, tmp_path: Path
+    ) -> None:
+        rc, deploy_mock = self._run(tmp_path, ost_count=8, ram_osts=4)
+        assert rc == 1
+        deploy_mock.assert_not_called()
+
+
 class TestTargetsUnformatted:
     """deploy-lustre's hint that a suite needs llmount.sh first."""
 

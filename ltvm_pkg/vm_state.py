@@ -13,7 +13,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import IO
+from typing import IO, Any
 
 
 def _atomic_write(
@@ -929,6 +929,9 @@ class ClusterInfo:
     # `cluster deploy` wrote, so a bare redeploy keeps it.  "" for a
     # cluster never deployed with --ip-family.
     ip_family: str = ""
+    # The --ost-count the last `cluster deploy` was given, kept the same
+    # way; 0 for one OST per OSS disk.
+    ost_count: int = 0
 
     @property
     def path(self) -> Path:
@@ -942,13 +945,15 @@ class ClusterInfo:
             from .vm_owner import validate_owner_id
 
             validate_owner_id(self.owner_id)
-        data = {
+        data: dict[str, Any] = {
             "name": self.name,
             "nodes": self.nodes,
             "owner_id": self.owner_id,
         }
         if self.ip_family:
             data["ip_family"] = self.ip_family
+        if self.ost_count:
+            data["ost_count"] = self.ost_count
         text = json.dumps(data, indent=2) + "\n"
         _atomic_write(self.path, text)
 
@@ -981,6 +986,7 @@ class ClusterInfo:
             nodes=data["nodes"],
             owner_id=data.get("owner_id"),
             ip_family=data.get("ip_family", ""),
+            ost_count=int(data.get("ost_count", 0) or 0),
         )
 
     @staticmethod
