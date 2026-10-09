@@ -1,0 +1,15 @@
+[Unit]
+Description=ltvm DNS and DHCP for the VM bridge fcbr0
+After=network.target qemu-bridge.service
+Wants=qemu-bridge.service
+
+[Service]
+Type=forking
+PIDFile=@PID@
+ExecStartPre=@DNSMASQ@ --test --conf-file=@CONF@
+ExecStart=@DNSMASQ@ --conf-file=@CONF@ --pid-file=@PID@
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

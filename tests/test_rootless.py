@@ -787,25 +787,10 @@ class TestClusterPrivileges:
 
 
 class TestInstall:
-    def test_dnsmasq_hostsdir_is_added_once(self, tmp_path: Path) -> None:
-        conf = tmp_path / "qemu-vms.conf"
-        conf.write_text("interface=fcbr0")
-        with (
-            patch.object(host_setup, "DNSMASQ_VM_CONF", conf),
-            patch.object(host_setup, "VM_DIR", tmp_path / "vm"),
-        ):
-            assert host_setup._ensure_dnsmasq_hostsdir()
-            assert not host_setup._ensure_dnsmasq_hostsdir()
-        hosts_dir = tmp_path / "vm" / "hosts.d"
-        assert hosts_dir.is_dir()
-        assert conf.read_text() == (f"interface=fcbr0\nhostsdir={hosts_dir}\n")
-
-    def test_dnsmasq_left_alone_without_our_conf(self, tmp_path: Path) -> None:
-        with (
-            patch.object(host_setup, "DNSMASQ_VM_CONF", tmp_path / "absent"),
-            patch.object(host_setup, "VM_DIR", tmp_path / "vm"),
-        ):
-            assert not host_setup._ensure_dnsmasq_hostsdir()
+    def test_ltvm_dnsmasq_serves_hosts_d(self, tmp_path: Path) -> None:
+        with patch.object(host_setup, "VM_DIR", tmp_path / "vm"):
+            text = host_setup._render_ltvm_dnsmasq_conf("192.168.200")
+        assert f"hostsdir={tmp_path / 'vm' / 'hosts.d'}\n" in text
 
     def _apt_host(self) -> MagicMock:
         host = MagicMock()

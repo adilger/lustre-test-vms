@@ -1,6 +1,6 @@
 [Unit]
 Description=QEMU VM bridge fcbr0
-Before=dnsmasq.service
+Before=ltvm-dnsmasq.service
 After=network.target
 
 [Service]

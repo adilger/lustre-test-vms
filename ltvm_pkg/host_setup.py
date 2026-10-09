@@ -1898,25 +1898,14 @@ def install_qemu(host: HostInfo, force: bool = False) -> None:
 
 
 def _network_already_configured(subnet: str) -> bool:
-    """Detect a working pre-existing network setup we should not touch.
+    """Is fcbr0 already up on *subnet* and served by a dnsmasq that
+    ltvm did not set up?  A hand-rolled setup is left alone.
 
-    Returns True if BOTH:
-      - the fcbr0 bridge interface exists and has the expected subnet
-        address (so the user has already brought it up), AND
-      - dnsmasq.service is active (so something is already serving DHCP
-        on the bridge)
-
-    When True, setup_network() short-circuits.  This protects users who
-    have a hand-rolled or coexisting dnsmasq setup (e.g. a separate
-    firecracker drop-in shipping `bind-interfaces`, which would conflict
-    with our `bind-dynamic` and prevent dnsmasq from restarting).  We
-    only touch the network when nothing is there.
-
-    The check is intentionally narrow: we don't try to inspect the
-    dnsmasq config or verify it serves the *right* subnet -- if the
-    bridge has the right address and dnsmasq is running, that's
-    "working from the host's perspective" and we leave it alone.
+    ltvm's own unit, or an older ltvm's drop-in in the host's dnsmasq,
+    means the setup is ltvm's to update, not someone else's.
     """
+    if LTVM_DNSMASQ_UNIT_PATH.exists() or LEGACY_DNSMASQ_CONF.exists():
+        return False
     expected_addr = f"{subnet}.1/24"
     r = _run_quiet(["ip", "-4", "addr", "show", "dev", "fcbr0"], check=False)
     if r.returncode != 0 or expected_addr not in r.stdout:
@@ -2008,121 +1997,252 @@ def choose_subnet(requested: str | None) -> str:
     )
 
 
-DNSMASQ_VM_CONF = Path("/etc/dnsmasq.d/qemu-vms.conf")
-DNSMASQ_MAIN_CONF = Path("/etc/dnsmasq.conf")
-# Debian/Ubuntu keep the drop-in directory here, and start dnsmasq with
-# `-7 <that>`; RHEL spells the same thing `conf-dir=` in the main file.
-DNSMASQ_DEFAULTS = Path("/etc/default/dnsmasq")
-# What Debian's init passes when /etc/default/dnsmasq names no CONFIG_DIR.
-DNSMASQ_DROPIN_SPEC = "/etc/dnsmasq.d,.dpkg-dist,.dpkg-old,.dpkg-new"
+# On Linux, as on macOS, ltvm runs its own dnsmasq: its own unit, config
+# and pidfile, reading nothing of the host's /etc/dnsmasq.conf or
+# /etc/dnsmasq.d.  Several dnsmasq options -- interface=, no-resolv,
+# except-interface= -- belong to the whole process, so sharing the host's
+# instance redefined what that served for everything else on the host.
+LTVM_DNSMASQ_UNIT = "ltvm-dnsmasq.service"
+LTVM_DNSMASQ_UNIT_PATH = Path("/etc/systemd/system") / LTVM_DNSMASQ_UNIT
+LTVM_DNSMASQ_CONF = Path("/etc/ltvm/dnsmasq.conf")
+LTVM_DNSMASQ_PID = Path("/run/ltvm-dnsmasq.pid")
+# What an older ltvm put into the host's dnsmasq instead.
+LEGACY_DNSMASQ_CONF = Path("/etc/dnsmasq.d/qemu-vms.conf")
+# The host's drop-in directory, on Debian and on RHEL alike.  What ltvm
+# writes there only keeps the host's dnsmasq off fcbr0.
+HOST_DNSMASQ_DIR = Path("/etc/dnsmasq.d")
+HOST_DNSMASQ_EXCEPT = HOST_DNSMASQ_DIR / "ltvm-fcbr0.conf"
+HOST_DNSMASQ_EXCEPT_TEXT = (
+    "# Written by ltvm: fcbr0 is served by ltvm-dnsmasq.service.\n"
+    "except-interface=fcbr0\n"
+)
+# Added when the host's dnsmasq was found on the wildcard address, which
+# leaves no other DNS server port 53 -- what libvirt's Debian drop-in
+# does for the same reason.  Kept by every later install.
+HOST_DNSMASQ_BIND_DYNAMIC_TEXT = (
+    "# dnsmasq listened on the wildcard address, which leaves no other\n"
+    "# DNS server port 53; bind-dynamic binds each address instead.\n"
+    "# Remove this if you set bind-interfaces: dnsmasq refuses both.\n"
+    "bind-dynamic\n"
+)
+WILDCARD_DNS = ("0.0.0.0:53", "*:53", "[::]:53")
 
-_BIND_INTERFACES_RE = re.compile(r"^[ \t]*bind-interfaces[ \t]*$", re.M)
+
+def _render_ltvm_dnsmasq_conf(subnet: str) -> str:
+    text = (HOST_CONFIG_DIR / "qemu-dnsmasq.conf").read_text()
+    text = text.replace("192.168.100", subnet)
+    # dnsmasq watches hosts.d itself, so a VM registered by an
+    # unprivileged user resolves without a reload.
+    text += f"hostsdir={VM_DIR / 'hosts.d'}\n"
+    try:
+        import pwd
+
+        pwd.getpwnam("dnsmasq")
+        text += "user=dnsmasq\n"
+    except KeyError:
+        pass
+    return text
 
 
-def _dnsmasq_dir_files(spec: str) -> list[Path]:
-    """The files dnsmasq reads for one ``conf-dir`` / ``CONFIG_DIR`` spec.
+def _render_ltvm_dnsmasq_unit(dnsmasq: str) -> str:
+    return (
+        (HOST_CONFIG_DIR / LTVM_DNSMASQ_UNIT)
+        .read_text()
+        .replace("@DNSMASQ@", dnsmasq)
+        .replace("@CONF@", str(LTVM_DNSMASQ_CONF))
+        .replace("@PID@", str(LTVM_DNSMASQ_PID))
+    )
 
-    A spec is ``<dir>[,<filter>...]``.  dnsmasq reads a filter starting
-    with ``*`` as "only these suffixes" and one starting with ``.`` as
-    "not these", so both have to be honoured: guessing either way means
-    rewriting a file dnsmasq never reads, or missing the one it does.
 
-    In particular this is not ``*.conf``.  Debian's libvirt drop-in is
-    ``/etc/dnsmasq.d/libvirt-daemon`` -- extensionless, and read.
-    """
-    parts = [p.strip() for p in spec.split(",") if p.strip()]
-    if not parts:
-        return []
-    directory = Path(parts[0])
-    include = [p[1:] for p in parts[1:] if p.startswith("*")]
-    exclude = [p for p in parts[1:] if p.startswith(".")]
-    if not directory.is_dir():
-        return []
-    found: list[Path] = []
-    for entry in sorted(directory.iterdir()):
-        if not entry.is_file():
+def _systemctl_ok(*args: str) -> bool:
+    return _run_quiet(["systemctl", *args], check=False).returncode == 0
+
+
+def _main_pid(unit: str) -> int:
+    r = _run_quiet(
+        ["systemctl", "show", "--property=MainPID", "--value", unit],
+        check=False,
+    )
+    try:
+        return int((r.stdout or "").strip() or 0)
+    except ValueError:
+        return 0
+
+
+def _bridge_sockets(subnet: str) -> list[str]:
+    """``ss`` lines for the sockets ltvm's dnsmasq needs, whoever holds
+    them: anything on the bridge address or bound to fcbr0, and
+    wildcard DNS listeners, which keep any other process off port 53."""
+    r = _run_quiet(["ss", "-Hlntup"], check=False)
+    found = []
+    for line in (r.stdout or "").splitlines():
+        parts = line.split()
+        if len(parts) < 5:
             continue
-        if include and not any(entry.name.endswith(s) for s in include):
-            continue
-        if any(entry.name.endswith(s) for s in exclude):
-            continue
-        found.append(entry)
+        local = parts[4]
+        if (
+            local.startswith(f"{subnet}.1:")
+            or "%fcbr0:" in local
+            or local in WILDCARD_DNS
+        ):
+            found.append(line)
     return found
 
 
-def _dnsmasq_config_files() -> list[Path]:
-    """Every config file dnsmasq will read: main file and drop-ins."""
-    files: list[Path] = []
-    if DNSMASQ_MAIN_CONF.is_file():
-        files.append(DNSMASQ_MAIN_CONF)
-        for line in DNSMASQ_MAIN_CONF.read_text(errors="replace").splitlines():
-            text = line.strip()
-            if text.startswith("conf-dir="):
-                files.extend(_dnsmasq_dir_files(text.split("=", 1)[1]))
-            elif text.startswith("conf-file="):
-                extra = Path(text.split("=", 1)[1].strip())
-                if extra.is_file():
-                    files.append(extra)
-
-    spec = DNSMASQ_DROPIN_SPEC
-    if DNSMASQ_DEFAULTS.is_file():
-        for line in DNSMASQ_DEFAULTS.read_text(errors="replace").splitlines():
-            text = line.strip()
-            if text.startswith("CONFIG_DIR="):
-                spec = text.split("=", 1)[1].strip().strip("\"'")
-    files.extend(_dnsmasq_dir_files(spec))
-
-    unique: list[Path] = []
-    seen: set[str] = set()
-    for f in files:
-        key = str(f)
-        if key not in seen:
-            seen.add(key)
-            unique.append(f)
-    return unique
+def _socket_pids(lines: list[str]) -> set[int]:
+    return {int(p) for ln in lines for p in re.findall(r"pid=(\d+)", ln)}
 
 
-def _rewrite_bind_interfaces() -> list[Path]:
-    """Turn ``bind-interfaces`` into ``bind-dynamic`` wherever dnsmasq
-    reads it.  Returns the files changed.
+def _selinux_enabled() -> bool:
+    return (
+        shutil.which("selinuxenabled") is not None
+        and _run_quiet(["selinuxenabled"], check=False).returncode == 0
+    )
 
-    dnsmasq refuses to start with both set -- "cannot set
-    --bind-interfaces and --bind-dynamic" -- and ltvm's own drop-in
-    ships ``bind-dynamic``.  Debian and Ubuntu hit this through
-    libvirt-daemon-system, whose postinst drops an extensionless
-    ``/etc/dnsmasq.d/libvirt-daemon`` carrying ``bind-interfaces``:
-    scanning only ``/etc/dnsmasq.conf``, as this used to, misses it and
-    leaves `install` dying at `systemctl restart dnsmasq` with nothing
-    naming the cause.
 
-    Rewritten rather than commented out, because removing
-    ``bind-interfaces`` altogether reverts dnsmasq to its default
-    wildcard bind -- on a multi-homed host that widens what it answers
-    on from a list of interface addresses to ``0.0.0.0:53``.
-    ``bind-dynamic`` binds the same addresses, so the host keeps the
-    exposure it had.
+def _label_hosts_dir(hosts_dir: Path) -> None:
+    """Let dnsmasq watch *hosts_dir* under SELinux.
+
+    dnsmasq_t may not set an inotify watch on usr_t, which is what
+    anything under /opt is, and the denial is dontaudit: no AVC, only
+    dnsmasq's own "failed to create inotify ... Permission denied", and
+    no VM published there ever resolves.  dnsmasq_etc_t it may watch.
     """
-    changed: list[Path] = []
-    for conf in _dnsmasq_config_files():
-        try:
-            text = conf.read_text()
-        except OSError:
+    spec = re.sub(r"([.^$*+?()\[\]{}|\\])", r"\\\1", str(hosts_dir))
+    spec += "(/.*)?"
+    if shutil.which("semanage"):
+        r = _run_quiet(
+            ["semanage", "fcontext", "-a", "-t", "dnsmasq_etc_t", spec],
+            check=False,
+        )
+        if r.returncode != 0:
+            _run_quiet(
+                ["semanage", "fcontext", "-m", "-t", "dnsmasq_etc_t", spec],
+                check=False,
+            )
+        _run_quiet(["restorecon", "-RF", str(hosts_dir)], check=False)
+    else:
+        log.warning(
+            "semanage not found: labelling %s with chcon, which a full "
+            "relabel will undo (install policycoreutils-python-utils)",
+            hosts_dir,
+        )
+        _run_quiet(
+            ["chcon", "-R", "-t", "dnsmasq_etc_t", str(hosts_dir)],
+            check=False,
+        )
+
+
+def _write_if_changed(path: Path, text: str) -> bool:
+    try:
+        if path.read_text() == text:
+            return False
+    except OSError:
+        pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return True
+
+
+def _write_host_except(bind_dynamic: bool) -> None:
+    text = HOST_DNSMASQ_EXCEPT_TEXT
+    if bind_dynamic:
+        text += HOST_DNSMASQ_BIND_DYNAMIC_TEXT
+    _write_if_changed(HOST_DNSMASQ_EXCEPT, text)
+
+
+def _hand_over_from_host_dnsmasq(subnet: str) -> None:
+    """Get the host's dnsmasq.service off fcbr0, leaving the rest of it
+    as it would be had ltvm never touched it.
+
+    An older ltvm put its config into the host's instance.  That file
+    goes, and an ``except-interface=fcbr0`` drop-in keeps the host's
+    instance off the bridge from now on -- without it, one running
+    ``bind-dynamic`` takes the bridge address the moment it appears.
+    The host's service is restarted only while it holds sockets ltvm's
+    own needs, the one case in which that cannot start.
+    """
+    legacy = LEGACY_DNSMASQ_CONF.exists()
+    if legacy:
+        LEGACY_DNSMASQ_CONF.unlink()
+        log.info("Removed %s (an older ltvm's layout)", LEGACY_DNSMASQ_CONF)
+    have_dir = HOST_DNSMASQ_DIR.is_dir()
+    try:
+        bind_dynamic = "bind-dynamic" in HOST_DNSMASQ_EXCEPT.read_text().split()
+    except OSError:
+        bind_dynamic = False
+    if have_dir:
+        _write_host_except(bind_dynamic)
+
+    # Legacy on a host without systemd-resolved (Debian): restarted
+    # without ltvm's settings, the package's own config listens on the
+    # wildcard address, which takes a second pass.
+    for attempt in range(3):
+        pid = _main_pid("dnsmasq.service")
+        lines = _bridge_sockets(subnet)
+        if not pid or pid not in _socket_pids(lines):
+            return
+        if (
+            attempt == 0
+            and legacy
+            and not _systemctl_ok("is-enabled", "--quiet", "dnsmasq")
+        ):
+            # An older ltvm started it and never enabled it, so it would
+            # not have come back at the next boot anyway.
+            log.info(
+                "Stopping dnsmasq.service, which ltvm had started for fcbr0"
+            )
+            _run_quiet(["systemctl", "stop", "dnsmasq"], check=False)
+            return
+        wildcard = [ln for ln in lines if ln.split()[4] in WILDCARD_DNS]
+        if pid in _socket_pids(wildcard):
+            if not have_dir or bind_dynamic:
+                return
+            bind_dynamic = True
+            _write_host_except(bind_dynamic)
+            log.info(
+                "dnsmasq.service listens on the wildcard address, which "
+                "leaves no other DNS server port 53; it now binds each "
+                "address instead, the same ones less fcbr0 (bind-dynamic, "
+                "in %s)",
+                HOST_DNSMASQ_EXCEPT,
+            )
+        log.info("Restarting dnsmasq.service to take it off fcbr0")
+        if _systemctl_ok("restart", "dnsmasq"):
             continue
-        rewritten = _BIND_INTERFACES_RE.sub("bind-dynamic", text)
-        if rewritten == text:
-            continue
-        # Debian points /etc/dnsmasq.d/libvirt-daemon at
-        # /etc/dnsmasq.d-available/, and writing through that symlink
-        # would edit the packaged copy for every other consumer.
-        # Replace the link with a regular file: libvirt-daemon-system's
-        # postinst re-links only when the path does not exist, so this
-        # survives its upgrades.
-        if conf.is_symlink():
-            conf.unlink()
-        conf.write_text(rewritten)
-        changed.append(conf)
-        log.info("Rewrote bind-interfaces to bind-dynamic in %s", conf)
-    return changed
+        if legacy:
+            log.warning(
+                "dnsmasq.service does not start without the settings ltvm "
+                "used to give it, so it was serving only fcbr0 -- which "
+                "%s does now.  If nothing else needs it:  systemctl "
+                "disable dnsmasq   (journalctl -u dnsmasq says why it fails)",
+                LTVM_DNSMASQ_UNIT,
+            )
+        else:
+            log.warning(
+                "dnsmasq.service did not restart with %s: see "
+                "journalctl -u dnsmasq",
+                HOST_DNSMASQ_EXCEPT,
+            )
+        return
+
+
+def _start_ltvm_dnsmasq(subnet: str) -> None:
+    _run_quiet(["systemctl", "enable", LTVM_DNSMASQ_UNIT], check=False)
+    if _systemctl_ok("restart", LTVM_DNSMASQ_UNIT):
+        return
+    journal = _run_quiet(
+        ["journalctl", "-u", LTVM_DNSMASQ_UNIT, "-n", "8", "--no-pager"],
+        check=False,
+    ).stdout
+    holders = "\n".join(_bridge_sockets(subnet)) or "(none)"
+    raise RuntimeError(
+        f"{LTVM_DNSMASQ_UNIT} did not start:\n{journal}\n"
+        f"Sockets on {subnet}.1, fcbr0 and wildcard port 53:\n{holders}\n"
+        f"A DNS server listening on the wildcard address (0.0.0.0:53) "
+        f"keeps every other one off port 53; set it to bind-interfaces, "
+        f"or stop it."
+    )
 
 
 def _nat_masquerade_present(subnet: str) -> bool | None:
@@ -2168,26 +2288,6 @@ def _write_root_file(path: Path, text: str, mode: int = 0o644) -> None:
         f.write(text)
 
 
-def _ensure_dnsmasq_hostsdir() -> bool:
-    """Have ltvm's dnsmasq serve VM names from hosts.d.
-
-    dnsmasq watches the directory itself, so a VM registered by an
-    unprivileged user resolves without a reload.  Returns True when the
-    config file changed.
-    """
-    hosts_dir = VM_DIR / "hosts.d"
-    hosts_dir.mkdir(parents=True, exist_ok=True)
-    if not DNSMASQ_VM_CONF.exists():
-        return False
-    text = DNSMASQ_VM_CONF.read_text()
-    if any(ln.startswith("hostsdir=") for ln in text.splitlines()):
-        return False
-    if text and not text.endswith("\n"):
-        text += "\n"
-    DNSMASQ_VM_CONF.write_text(text + f"hostsdir={hosts_dir}\n")
-    return True
-
-
 def setup_network(
     host: HostInfo, subnet: str = DEFAULT_SUBNET, force: bool = False
 ) -> None:
@@ -2206,7 +2306,8 @@ def setup_network(
 
     if _network_already_configured(subnet):
         log.info(
-            "fcbr0 bridge on %s.0/24 and dnsmasq already configured -- "
+            "fcbr0 on %s.0/24 is already served by a dnsmasq ltvm did "
+            "not set up -- "
             "leaving network setup untouched",
             subnet,
         )
@@ -2214,8 +2315,6 @@ def setup_network(
         # right value at import time even when we skip everything else.
         VM_DIR.mkdir(parents=True, exist_ok=True)
         _write_root_file(VM_DIR / "subnet", subnet + "\n")
-        if _ensure_dnsmasq_hostsdir():
-            _run(["systemctl", "restart", "dnsmasq"])
         return
 
     log.info("Configuring network bridge (fcbr0) on %s.0/24", subnet)
@@ -2242,10 +2341,14 @@ def setup_network(
                 )
             log.info("WSL2: using iptables-legacy")
 
+    # Only the binary: ltvm-dnsmasq.service runs it.  Debian's dnsmasq
+    # package would also enable a host-wide dnsmasq.service.
     if host.pkg_mgr == "dnf":
         _pkg_install(host, "dnsmasq", "iptables-nft")
+        if _selinux_enabled() and not shutil.which("semanage"):
+            _pkg_install(host, "policycoreutils-python-utils")
     elif host.pkg_mgr == "apt":
-        _pkg_install(host, "dnsmasq", "iptables")
+        _pkg_install(host, "dnsmasq-base", "iptables")
 
     # Verify critical deps installed
     for cmd in ("dnsmasq", "iptables"):
@@ -2301,20 +2404,19 @@ def setup_network(
     svc_text = svc_tmpl.replace("192.168.100", subnet)
     Path("/etc/systemd/system/qemu-bridge.service").write_text(svc_text)
 
-    # Generate dnsmasq config
-    dns_tmpl = (HOST_CONFIG_DIR / "qemu-dnsmasq.conf").read_text()
-    dns_text = dns_tmpl.replace("192.168.100", subnet)
-    DNSMASQ_VM_CONF.parent.mkdir(exist_ok=True)
-    DNSMASQ_VM_CONF.write_text(dns_text)
-    _ensure_dnsmasq_hostsdir()
-
-    # Some distros ship bind-interfaces, which conflicts with the
-    # bind-dynamic in our drop-in and stops dnsmasq starting at all.
-    _rewrite_bind_interfaces()
+    dnsmasq = shutil.which("dnsmasq")
+    assert dnsmasq is not None  # checked above
+    hosts_dir = VM_DIR / "hosts.d"
+    hosts_dir.mkdir(parents=True, exist_ok=True)
+    if _selinux_enabled():
+        _label_hosts_dir(hosts_dir)
+    _write_if_changed(LTVM_DNSMASQ_CONF, _render_ltvm_dnsmasq_conf(subnet))
+    _write_if_changed(
+        LTVM_DNSMASQ_UNIT_PATH, _render_ltvm_dnsmasq_unit(dnsmasq)
+    )
 
     _run(["systemctl", "daemon-reload"])
     _run(["systemctl", "enable", "--now", "qemu-bridge"])
-    _run(["systemctl", "restart", "dnsmasq"])
 
     # qemu-bridge is Type=oneshot with RemainAfterExit=yes, so a unit
     # left `active` by an earlier run whose bridge is since gone -- an
@@ -2333,6 +2435,9 @@ def setup_network(
         raise RuntimeError(
             "fcbr0 bridge not created -- check: systemctl status qemu-bridge"
         )
+
+    _hand_over_from_host_dnsmasq(subnet)
+    _start_ltvm_dnsmasq(subnet)
 
     # NAT is what qemu-bridge.service cannot fail loudly about (its
     # iptables calls are tolerated so a host without NAT still gets a
@@ -2635,11 +2740,7 @@ def verify(subnet: str = DEFAULT_SUBNET) -> dict[str, Any]:
             "address": addr,
         }
 
-        # dnsmasq
-        r = _run_quiet(["systemctl", "is-active", "dnsmasq"], check=False)
-        results["dnsmasq"] = {
-            "running": r.returncode == 0,
-        }
+        results["dnsmasq"] = _verify_dnsmasq()
 
         # NAT.  None == "could not read the nat table as this user",
         # which counts as OK below for the same reason the SSH config
@@ -2735,6 +2836,18 @@ def verify(subnet: str = DEFAULT_SUBNET) -> dict[str, Any]:
     return results
 
 
+def _verify_dnsmasq() -> dict[str, Any]:
+    if _systemctl_ok("is-active", "--quiet", LTVM_DNSMASQ_UNIT):
+        return {"running": True, "service": LTVM_DNSMASQ_UNIT}
+    if LEGACY_DNSMASQ_CONF.exists():
+        return {
+            "running": _systemctl_ok("is-active", "--quiet", "dnsmasq"),
+            "service": "dnsmasq.service",
+            "legacy": True,
+        }
+    return {"running": False, "service": LTVM_DNSMASQ_UNIT}
+
+
 def _verify_ssh_config() -> dict[str, Any]:
     """Is ltvm's block in /root/.ssh/config?  ``None`` if unreadable.
 
@@ -2796,10 +2909,18 @@ def print_verify(results: dict[str, Any]) -> None:
     dns = results["dnsmasq"]
     if dns.get("note"):
         ok(f"dnsmasq: {dns['note']}")
+    elif dns.get("legacy"):
+        state = "running" if dns["running"] else "NOT running"
+        msg = (
+            f"dnsmasq: the host's dnsmasq.service serves fcbr0 ({state}), "
+            f"as an older ltvm set it up -- sudo ltvm install --network "
+            f"moves it to {LTVM_DNSMASQ_UNIT}"
+        )
+        (ok if dns["running"] else fail)(msg)
     elif dns["running"]:
-        ok("dnsmasq: running")
+        ok(f"dnsmasq: {dns.get('service', LTVM_DNSMASQ_UNIT)} running")
     else:
-        fail("dnsmasq: not running")
+        fail(f"dnsmasq: {dns.get('service', LTVM_DNSMASQ_UNIT)} not running")
 
     nat = results.get("nat") or {}
     if nat:

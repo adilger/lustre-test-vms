@@ -428,37 +428,58 @@ def alloc_ip(
 
 
 def reload_dns() -> None:
-    """SIGHUP dnsmasq to re-read /etc/hosts.
+    """SIGHUP ltvm's dnsmasq to re-read /etc/hosts.
 
-    Linux runs dnsmasq on the qemu-bridge interface; macOS runs its
-    own dnsmasq under launchd bound to the socket_vmnet gateway IP
-    so guests can resolve each other by name (their resolv.conf
-    points at fc_gw, where nothing else is listening).  Both daemons
-    pick up new /etc/hosts entries on SIGHUP -- only the pidfile
-    location differs.
+    Linux runs ltvm-dnsmasq.service on the qemu-bridge interface; macOS
+    runs its own dnsmasq under launchd bound to the socket_vmnet gateway
+    IP so guests can resolve each other by name (their resolv.conf
+    points at fc_gw, where nothing else is listening).  Both pick up
+    new /etc/hosts entries on SIGHUP -- only the pidfile differs.
+
+    A Linux host an older ltvm set up still serves the bridge from the
+    host's own dnsmasq.service until `ltvm install --network` moves it,
+    so that one is signalled there.  Otherwise no other dnsmasq is: the
+    host may run its own, or libvirt's, for other things.
     """
-    from .host_setup import DNSMASQ_PID_PATH, is_macos
+    from .host_setup import (
+        DNSMASQ_PID_PATH,
+        LEGACY_DNSMASQ_CONF,
+        LTVM_DNSMASQ_PID,
+        is_macos,
+    )
 
-    pid_path: Path
+    pid_paths: list[Path]
     if is_macos():
-        pid_path = DNSMASQ_PID_PATH
+        pid_paths, use_pgrep = [DNSMASQ_PID_PATH], True
+    elif LTVM_DNSMASQ_PID.exists() or not LEGACY_DNSMASQ_CONF.exists():
+        pid_paths, use_pgrep = [LTVM_DNSMASQ_PID], False
     else:
-        pid_path = Path("/run/dnsmasq.pid")
+        pid_paths = [Path("/run/dnsmasq.pid"), Path("/run/dnsmasq/dnsmasq.pid")]
+        use_pgrep = True
     pid: int | None = None
     pid_err: str | None = None
-    if pid_path.exists():
+    for pid_path in pid_paths:
+        if not pid_path.exists():
+            continue
         try:
             pid = int(pid_path.read_text().strip())
+            break
         except (ValueError, OSError) as e:
             pid_err = f"read {pid_path}: {e}"
     if pid is None:
+        tried = ", ".join(str(p) for p in pid_paths)
+        if not use_pgrep:
+            raise RuntimeError(
+                f"failed to reload dnsmasq: pidfile {tried} unusable "
+                f"({pid_err or 'missing'}) -- is ltvm-dnsmasq running?"
+            )
         r = run(["pgrep", "-x", "dnsmasq"])
         if r.returncode == 0 and r.stdout.strip():
             pid = int(r.stdout.strip().splitlines()[0])
         else:
             raise RuntimeError(
                 "failed to reload dnsmasq: "
-                f"pidfile {pid_path} unusable ({pid_err or 'missing'}) "
+                f"pidfile {tried} unusable ({pid_err or 'missing'}) "
                 f"and pgrep -x dnsmasq returned rc={r.returncode}"
             )
     # dnsmasq runs as root, so signalling it from an unprivileged user
@@ -566,15 +587,14 @@ def _register_etc_hosts(name: str, ip: str) -> None:
     _atomic_write(hosts, "".join(filtered) + new_entry)
     # Registration must not stop here either, for the same reason
     # unregister_vm doesn't (below).  reload_dns() raises when dnsmasq
-    # is not running, and host_setup restarts dnsmasq without ever
-    # `systemctl enable`-ing it while qemu-bridge *is* enabled -- so
-    # after a reboot on EL the bridge comes back and dnsmasq does not.
-    # The VM by this point has booted, answered SSH and been written to
+    # is not running -- as on an EL host an older ltvm set up, after a
+    # reboot: it started the host's dnsmasq without enabling it.  The
+    # VM by this point has booted, answered SSH and been written to
     # /etc/hosts; raising here reached cmd_create's `except
     # BaseException`, which rolled the working VM back and re-raised.
     # A stale DNS cache is not worth a destroyed VM: the host resolves
-    # the VM through /etc/hosts regardless, and `ltvm doctor` reports
-    # dnsmasq.
+    # the VM through /etc/hosts regardless, and `ltvm install --verify`
+    # reports dnsmasq.
     try:
         reload_dns()
     except RuntimeError as e:

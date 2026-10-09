@@ -14,15 +14,12 @@ from ltvm_pkg.host_setup import (
     SSH_BLOCK_MARKER,
     HostInfo,
     _check_stale_ltvm_launcher,
-    _dnsmasq_config_files,
-    _dnsmasq_dir_files,
     _install_ltvm_launcher,
     _ltvm_launcher_needs_write,
     _nat_masquerade_present,
     _network_already_configured,
     _qemu_installed_version,
     _render_ltvm_launcher,
-    _rewrite_bind_interfaces,
     _translate_pkgs,
     check_kvm,
     check_prerequisites,
@@ -167,9 +164,22 @@ class TestHostInfoNoPkgMgr:
 
 class TestNetworkAlreadyConfigured:
     """The detection short-circuit must respect a working pre-existing
-    setup, so a host with a hand-rolled or coexisting dnsmasq drop-in
-    (e.g. an older firecracker tooling shipping `bind-interfaces`) is
-    not stomped on by `ltvm install`."""
+    setup that ltvm did not make, so a hand-rolled dnsmasq serving fcbr0
+    is not stomped on by `ltvm install`."""
+
+    @pytest.fixture(autouse=True)
+    def _no_ltvm_layout(self, tmp_path: Path):
+        with (
+            patch(
+                "ltvm_pkg.host_setup.LTVM_DNSMASQ_UNIT_PATH",
+                tmp_path / "absent.service",
+            ),
+            patch(
+                "ltvm_pkg.host_setup.LEGACY_DNSMASQ_CONF",
+                tmp_path / "absent.conf",
+            ),
+        ):
+            yield
 
     def _mock_run_quiet(self, ip_returncode, ip_stdout, dnsmasq_returncode):
         def side(cmd, **kw):
@@ -231,6 +241,29 @@ class TestNetworkAlreadyConfigured:
             ),
         ):
             assert _network_already_configured("192.168.100") is True
+
+    @pytest.mark.parametrize(
+        "ours", ["LTVM_DNSMASQ_UNIT_PATH", "LEGACY_DNSMASQ_CONF"]
+    )
+    def test_ltvm_layout_is_not_hand_rolled(
+        self, tmp_path: Path, ours: str
+    ) -> None:
+        """ltvm's own unit, or an older ltvm's drop-in, is ltvm's to
+        update -- above all the drop-in, which must be migrated."""
+        mine = tmp_path / "mine"
+        mine.write_text("")
+        with (
+            patch(f"ltvm_pkg.host_setup.{ours}", mine),
+            patch(
+                "ltvm_pkg.host_setup._run_quiet",
+                side_effect=self._mock_run_quiet(
+                    ip_returncode=0,
+                    ip_stdout="    inet 192.168.100.1/24 scope global fcbr0\n",
+                    dnsmasq_returncode=0,
+                ),
+            ),
+        ):
+            assert _network_already_configured("192.168.100") is False
 
 
 # ------------------------------------------------------------------
@@ -1375,10 +1408,6 @@ class TestSubnetCollision:
                 return_value=True,
             ),
             patch("ltvm_pkg.host_setup.VM_DIR", Path("/tmp/ltvm-test-vmdir")),
-            patch(
-                "ltvm_pkg.host_setup.DNSMASQ_VM_CONF",
-                Path("/tmp/ltvm-test-vmdir/absent.conf"),
-            ),
         ):
             setup_network(MagicMock(), subnet="192.168.100", force=True)
 
@@ -1464,205 +1493,6 @@ class TestChooseSubnet:
             choose_subnet(None)
 
         assert "--subnet" in str(e.value)
-
-
-# ------------------------------------------------------------------
-# TestDnsmasqConfigDiscovery
-# ------------------------------------------------------------------
-
-
-class TestDnsmasqDirFiles:
-    """`conf-dir` / `CONFIG_DIR` specs carry filters, and both forms
-    have to be honoured: dnsmasq reads `*suffix` as "only these" and
-    `.suffix` as "not these"."""
-
-    def test_extensionless_file_is_included(self, tmp_path: Path) -> None:
-        """The case that mattered: Debian's libvirt drop-in has no
-        extension, so a `*.conf` assumption would skip it."""
-        (tmp_path / "libvirt-daemon").write_text("bind-interfaces\n")
-        found = _dnsmasq_dir_files(str(tmp_path))
-        assert [f.name for f in found] == ["libvirt-daemon"]
-
-    def test_excluded_suffixes_are_skipped(self, tmp_path: Path) -> None:
-        (tmp_path / "live").write_text("x\n")
-        (tmp_path / "old.dpkg-old").write_text("x\n")
-        found = _dnsmasq_dir_files(f"{tmp_path},.dpkg-old")
-        assert [f.name for f in found] == ["live"]
-
-    def test_star_filter_is_include_only(self, tmp_path: Path) -> None:
-        (tmp_path / "a.conf").write_text("x\n")
-        (tmp_path / "b.bak").write_text("x\n")
-        found = _dnsmasq_dir_files(f"{tmp_path},*.conf")
-        assert [f.name for f in found] == ["a.conf"]
-
-    def test_missing_directory_is_not_an_error(self, tmp_path: Path) -> None:
-        assert _dnsmasq_dir_files(str(tmp_path / "nope")) == []
-
-    def test_empty_spec_is_not_an_error(self) -> None:
-        assert _dnsmasq_dir_files("") == []
-
-
-class TestDnsmasqConfigFiles:
-    def test_collects_main_conf_and_dropin_dir(self, tmp_path: Path) -> None:
-        main = tmp_path / "dnsmasq.conf"
-        main.write_text("# nothing\n")
-        dropins = tmp_path / "dnsmasq.d"
-        dropins.mkdir()
-        (dropins / "libvirt-daemon").write_text("bind-interfaces\n")
-
-        with (
-            patch("ltvm_pkg.host_setup.DNSMASQ_MAIN_CONF", main),
-            patch("ltvm_pkg.host_setup.DNSMASQ_DEFAULTS", tmp_path / "absent"),
-            patch("ltvm_pkg.host_setup.DNSMASQ_DROPIN_SPEC", str(dropins)),
-        ):
-            files = _dnsmasq_config_files()
-
-        assert main in files
-        assert dropins / "libvirt-daemon" in files
-
-    def test_config_dir_from_defaults_file_wins(self, tmp_path: Path) -> None:
-        """Debian's /etc/default/dnsmasq can move the drop-in dir."""
-        elsewhere = tmp_path / "custom.d"
-        elsewhere.mkdir()
-        (elsewhere / "a").write_text("bind-interfaces\n")
-        defaults = tmp_path / "default-dnsmasq"
-        defaults.write_text(f'CONFIG_DIR="{elsewhere},.dpkg-old"\n')
-
-        with (
-            patch("ltvm_pkg.host_setup.DNSMASQ_MAIN_CONF", tmp_path / "absent"),
-            patch("ltvm_pkg.host_setup.DNSMASQ_DEFAULTS", defaults),
-            patch(
-                "ltvm_pkg.host_setup.DNSMASQ_DROPIN_SPEC",
-                str(tmp_path / "unused.d"),
-            ),
-        ):
-            files = _dnsmasq_config_files()
-
-        assert elsewhere / "a" in files
-
-    def test_conf_dir_inside_main_conf_is_followed(
-        self, tmp_path: Path
-    ) -> None:
-        """RHEL spells the drop-in dir `conf-dir=` in the main file."""
-        extra = tmp_path / "extra.d"
-        extra.mkdir()
-        (extra / "z.conf").write_text("bind-interfaces\n")
-        main = tmp_path / "dnsmasq.conf"
-        main.write_text(f"conf-dir={extra},*.conf\n")
-
-        with (
-            patch("ltvm_pkg.host_setup.DNSMASQ_MAIN_CONF", main),
-            patch("ltvm_pkg.host_setup.DNSMASQ_DEFAULTS", tmp_path / "absent"),
-            patch(
-                "ltvm_pkg.host_setup.DNSMASQ_DROPIN_SPEC",
-                str(tmp_path / "unused.d"),
-            ),
-        ):
-            files = _dnsmasq_config_files()
-
-        assert extra / "z.conf" in files
-
-
-# ------------------------------------------------------------------
-# TestRewriteBindInterfaces
-# ------------------------------------------------------------------
-
-
-class TestRewriteBindInterfaces:
-    """dnsmasq refuses to start with both bind-interfaces and
-    bind-dynamic set, and ltvm's own drop-in ships bind-dynamic."""
-
-    def _patches(self, tmp_path: Path, dropins: Path) -> Any:
-        return (
-            patch(
-                "ltvm_pkg.host_setup.DNSMASQ_MAIN_CONF",
-                tmp_path / "dnsmasq.conf",
-            ),
-            patch("ltvm_pkg.host_setup.DNSMASQ_DEFAULTS", tmp_path / "absent"),
-            patch("ltvm_pkg.host_setup.DNSMASQ_DROPIN_SPEC", str(dropins)),
-        )
-
-    def test_rewrites_a_dropin_not_just_the_main_conf(
-        self, tmp_path: Path
-    ) -> None:
-        """The regression: on Debian/Ubuntu libvirt-daemon-system drops
-        bind-interfaces into /etc/dnsmasq.d, never /etc/dnsmasq.conf,
-        so scanning only the main file left `install` dying at
-        `systemctl restart dnsmasq`."""
-        (tmp_path / "dnsmasq.conf").write_text("# stock\n")
-        dropins = tmp_path / "dnsmasq.d"
-        dropins.mkdir()
-        dropin = dropins / "libvirt-daemon"
-        dropin.write_text("bind-interfaces\nexcept-interface=virbr0\n")
-
-        a, b, c = self._patches(tmp_path, dropins)
-        with a, b, c:
-            changed = _rewrite_bind_interfaces()
-
-        assert changed == [dropin]
-        assert dropin.read_text() == ("bind-dynamic\nexcept-interface=virbr0\n")
-
-    def test_rewrites_rather_than_removing(self, tmp_path: Path) -> None:
-        """Dropping the directive reverts dnsmasq to a wildcard bind,
-        widening what a multi-homed host answers on; bind-dynamic binds
-        the same per-interface addresses."""
-        (tmp_path / "dnsmasq.conf").write_text("bind-interfaces\n")
-        dropins = tmp_path / "dnsmasq.d"
-        dropins.mkdir()
-
-        a, b, c = self._patches(tmp_path, dropins)
-        with a, b, c:
-            _rewrite_bind_interfaces()
-
-        text = (tmp_path / "dnsmasq.conf").read_text()
-        assert "bind-dynamic" in text
-        assert "bind-interfaces" not in text
-
-    def test_replaces_a_symlink_leaving_its_target_alone(
-        self, tmp_path: Path
-    ) -> None:
-        """Debian points /etc/dnsmasq.d/libvirt-daemon at
-        /etc/dnsmasq.d-available/; writing through it would edit the
-        packaged copy every other consumer reads."""
-        (tmp_path / "dnsmasq.conf").write_text("# stock\n")
-        available = tmp_path / "available"
-        available.mkdir()
-        packaged = available / "libvirt-daemon"
-        packaged.write_text("bind-interfaces\nexcept-interface=virbr0\n")
-        dropins = tmp_path / "dnsmasq.d"
-        dropins.mkdir()
-        link = dropins / "libvirt-daemon"
-        link.symlink_to(packaged)
-
-        a, b, c = self._patches(tmp_path, dropins)
-        with a, b, c:
-            changed = _rewrite_bind_interfaces()
-
-        assert changed == [link]
-        assert not link.is_symlink()
-        assert "bind-dynamic" in link.read_text()
-        # The packaged copy is untouched.
-        assert packaged.read_text().startswith("bind-interfaces")
-
-    def test_leaves_a_commented_directive_alone(self, tmp_path: Path) -> None:
-        (tmp_path / "dnsmasq.conf").write_text("#bind-interfaces\n")
-        dropins = tmp_path / "dnsmasq.d"
-        dropins.mkdir()
-
-        a, b, c = self._patches(tmp_path, dropins)
-        with a, b, c:
-            assert _rewrite_bind_interfaces() == []
-
-        assert (tmp_path / "dnsmasq.conf").read_text() == "#bind-interfaces\n"
-
-    def test_is_idempotent(self, tmp_path: Path) -> None:
-        (tmp_path / "dnsmasq.conf").write_text("bind-dynamic\n")
-        dropins = tmp_path / "dnsmasq.d"
-        dropins.mkdir()
-
-        a, b, c = self._patches(tmp_path, dropins)
-        with a, b, c:
-            assert _rewrite_bind_interfaces() == []
 
 
 # ------------------------------------------------------------------

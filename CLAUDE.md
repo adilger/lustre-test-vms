@@ -647,6 +647,48 @@ the remaining `cluster` actions need nothing.
 
 Verified 2026-09-11 by running the whole lifecycle as a non-root user.
 
+### Host network (Linux)
+
+`install --network` makes `fcbr0` (`qemu-bridge.service`, which also adds
+the iptables NAT and FORWARD rules) and runs ltvm's **own** dnsmasq,
+`ltvm-dnsmasq.service`, on it: `/etc/ltvm/dnsmasq.conf`,
+`/run/ltvm-dnsmasq.pid`, `leasefile-ro`.  It reads nothing of the host's
+`/etc/dnsmasq.conf` or `/etc/dnsmasq.d`, as on macOS.  apt hosts get
+only `dnsmasq-base` (the binary), not Debian's `dnsmasq`, which would
+enable a host-wide service.
+
+The host's own dnsmasq is left as it is, apart from one drop-in,
+`/etc/dnsmasq.d/ltvm-fcbr0.conf` (`except-interface=fcbr0`), written
+when that directory exists.  Without it a host instance running
+`bind-interfaces` takes the bridge address when it starts after the
+bridge, and one running `bind-dynamic` takes it the moment it appears;
+libvirt's Debian drop-in does the same for `virbr0`.  The host service
+is restarted only when it holds the bridge's sockets.
+
+An older ltvm instead wrote `/etc/dnsmasq.d/qemu-vms.conf` into the
+host's dnsmasq, with process-wide options (`interface=`, `no-resolv`,
+`except-interface=lo`) that took over everything else it served.
+Re-running `install --network` migrates it
+(`_hand_over_from_host_dnsmasq`): the file goes, and a host
+`dnsmasq.service` that was serving the bridge is stopped if it was not
+enabled (EL: ltvm started it, and it never came back after a reboot) or
+restarted otherwise.  On Ubuntu that restart fails -- systemd-resolved
+holds port 53, so the service only ever ran with ltvm's settings -- and
+install says so and names `systemctl disable dnsmasq` rather than
+disabling a host service itself.  Until then `reload_dns` and `install
+--verify` still recognise that layout; otherwise `reload_dns` signals
+only ltvm-dnsmasq, never whatever `pgrep dnsmasq` finds.
+
+Under SELinux, dnsmasq_t may not set an inotify watch on `usr_t`
+(anything under `/opt`), and the denial is dontaudit: no AVC, just
+"failed to create inotify ... Permission denied" in dnsmasq's log, and
+no `hosts.d/` name ever resolves.  Install labels `hosts.d`
+`dnsmasq_etc_t` with `semanage fcontext`.
+
+Verified 2026-10-09 on stock Rocky 9.8 (SELinux enforcing) and Ubuntu
+24.04 cloud images: fresh install, migration from the old layout, a
+host dnsmasq in real use (and libvirt's), each across a reboot.
+
 ### Running ltvm inside a VM it built
 
 `deploy-lustre` runs on the build host and pushes Lustre
