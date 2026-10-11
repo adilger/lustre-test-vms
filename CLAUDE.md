@@ -374,6 +374,29 @@ ltvm target validate rocky9 --lustre-tree ~/lustre-release
 ltvm build all rocky9 --lustre-tree ~/lustre-release --force-compat
 ```
 
+A server series comes from `which_patch` when it is listed there.
+Otherwise it is chosen the way Lustre's configure chooses it: by
+version for vanilla kernels (`vanilla_ldiskfs_series`), by base
+version and ABI for Ubuntu ones (`ubuntu_ldiskfs_series`), by
+filename for the rest.  When a kernel build-tree exists, the series is
+then applied in order to a scratch copy of the files it touches, as
+the ldiskfs build stages them -- each patch on top of the ones before,
+with GNU patch, because BSD patch rejects hunks GNU patch's fuzz takes.
+A host with no GNU patch (stock macOS) skips that step and says so.
+
+**Ubuntu servers** (`ubuntu2604-server`).  configure treats a kernel
+as Ubuntu's only when its utsrelease.h defines
+`UTS_UBUNTU_RELEASE_ABI`, which Ubuntu's packaging writes and a kbuild
+from linux-source does not, and reads the ABI from the release's
+second field.  So the target pins the exact source upload
+(`kernel_deb_source: linux-source-7.0.0=7.0.0-14.14`), sets
+`CONFIG_LOCALVERSION="-14-lustre"`, and `kernel_build._mark_ubuntu_abi`
+adds the line to the build-tree.  Miss either and Lustre quietly
+builds the vanilla `ldiskfs-7.0-ml` series instead.  The kernel is
+defconfig plus ubuntu2604's options plus the target's own -- notably
+`CONFIG_KPROBES`, without which every Lustre module fails to load with
+-EOPNOTSUPP (libcfs finds `kallsyms_lookup_name` through a kprobe).
+
 ## ZFS
 
 ZFS is a per-build option, not a property of a target.  It

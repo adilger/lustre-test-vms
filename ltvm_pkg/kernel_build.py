@@ -1262,6 +1262,10 @@ def _build_kernel_deb(
         )
         _run_kernel_podman(container_cmd, kernel_out)
 
+    abi = deb_abi(deb_source)
+    if abi is not None:
+        _mark_ubuntu_abi(kernel_out / "build-tree", abi)
+
     return _finalize_kernel_build(
         target_config,
         kernel_out,
@@ -1270,6 +1274,43 @@ def _build_kernel_deb(
         patches_applied=0,
         extra_meta={"deb_source": deb_source},
     )
+
+
+def deb_abi(deb_source: str) -> str | None:
+    """The Ubuntu ABI of a pinned kernel source package, else None.
+
+    ``linux-source-7.0.0=7.0.0-14.14`` is upload 14 of ABI 14.  An
+    unpinned package (the client targets) has none.
+    """
+    m = re.fullmatch(r"[^=]+=\d+(?:\.\d+)*-(\d+)\.\d+.*", deb_source)
+    return m.group(1) if m else None
+
+
+def _mark_ubuntu_abi(build_tree: Path, abi: str) -> None:
+    """Make a pinned Ubuntu kernel's build-tree read as Ubuntu's.
+
+    Lustre's configure takes a kernel for Ubuntu's only when
+    include/generated/utsrelease.h defines UTS_UBUNTU_RELEASE_ABI,
+    which Ubuntu's packaging writes and a plain kbuild from
+    linux-source does not; then it picks the ldiskfs series from the
+    release's ABI field (``7.0.0-14-lustre``: 14, from the target's
+    CONFIG_LOCALVERSION).  Without the line the kernel reads as vanilla
+    and Lustre builds a different series (ldiskfs-7.0-ml, not
+    ldiskfs-7.0.0-14-ubuntu26).  External module builds do not
+    regenerate the file, so adding the line here is enough.
+    """
+    uts = build_tree / "include" / "generated" / "utsrelease.h"
+    release = (build_tree / "kernel-version").read_text().strip()
+    fields = release.split("-")
+    if len(fields) < 2 or fields[1] != abi:
+        raise RuntimeError(
+            f"kernel release {release!r} does not carry Ubuntu ABI {abi} "
+            f"as its second field; set CONFIG_LOCALVERSION to "
+            f'"-{abi}-<flavour>" in the target\'s kernels.config'
+        )
+    text = uts.read_text()
+    if "UTS_UBUNTU_RELEASE_ABI" not in text:
+        uts.write_text(text + f"#define UTS_UBUNTU_RELEASE_ABI {abi}\n")
 
 
 def _build_kernel_srpm(

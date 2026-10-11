@@ -278,50 +278,99 @@ def parse_ldiskfs_series_file(tree: Path, series_stem: str) -> list[Path]:
     return result
 
 
+_PATCH_TARGET_RE = re.compile(r"^(?:\+\+\+|---) (?:[^/\s]+/)?(\S+)", re.M)
+
+
+def _patch_program() -> str | None:
+    """GNU patch, or None.  The ldiskfs build applies its series with
+    GNU patch; macOS's BSD patch rejects hunks GNU patch's fuzz takes,
+    so judging a series with it refuses series that build fine."""
+    import shutil
+
+    for name in ("gpatch", "patch"):
+        path = shutil.which(name)
+        if path is None:
+            continue
+        try:
+            out = subprocess.run(
+                [path, "--version"], capture_output=True, text=True
+            ).stdout
+        except OSError:
+            continue
+        if "GNU patch" in out:
+            return path
+    return None
+
+
 def dry_apply_patches(
     patches: list[Path], kernel_src: Path
 ) -> tuple[bool, list[str]]:
-    """Dry-apply a list of patches against a kernel source tree.
+    """Apply a series of patches, in order, to a copy of a kernel tree.
 
-    Returns (all_clean, failures) where failures is a list of
-    '<patch> <reason>' strings for patches that did not apply.
-    Uses `patch -p1 --dry-run -F2 --no-backup-if-mismatch` so
-    minor context drift is tolerated but genuine hunks that can't
-    be found at any offset are caught.
+    Returns (all_clean, failures) where failures names the first patch
+    that did not apply and why.  The patches of an ldiskfs series build
+    on each other -- most of them touch ext4.h or namei.c after an
+    earlier one did -- so each is applied to the result of the ones
+    before it, in a scratch copy of only the files the series touches,
+    the way the ldiskfs build stages them.  A series is judged by its
+    first failure, as the build would stop there.  Uses ``-p1 -F2``, so
+    minor context drift is tolerated (GNU patch's default fuzz, as the
+    build uses) but a hunk that can't be found at any offset is not.
     """
-    failures: list[str] = []
-    for patch_path in patches:
-        try:
-            proc = subprocess.run(
-                [
-                    "patch",
-                    "-p1",
-                    "--dry-run",
-                    "-F2",
-                    "--no-backup-if-mismatch",
-                    "-d",
-                    str(kernel_src),
-                ],
-                stdin=patch_path.open("rb"),
-                capture_output=True,
-            )
-        except OSError as exc:
-            failures.append(f"{patch_path.name}: cannot run patch: {exc}")
-            continue
-        if proc.returncode != 0:
-            stderr = proc.stderr.decode(errors="replace").strip()
-            stdout = proc.stdout.decode(errors="replace").strip()
-            detail = stderr or stdout
-            first_fail = ""
-            for line in (stdout + "\n" + stderr).splitlines():
-                if "FAILED" in line:
-                    first_fail = line.strip()
-                    break
-            reason = (
-                first_fail or detail.splitlines()[0] if detail else "rejected"
-            )
-            failures.append(f"{patch_path.name}: {reason}")
-    return (len(failures) == 0, failures)
+    import shutil
+    import tempfile
+
+    if not patches:
+        return (True, [])
+    with tempfile.TemporaryDirectory(prefix="ltvm-dryapply-") as td:
+        work = Path(td)
+        for patch_path in patches:
+            try:
+                text = patch_path.read_text(errors="replace")
+            except OSError as exc:
+                return (False, [f"{patch_path.name}: cannot read: {exc}"])
+            for rel in _PATCH_TARGET_RE.findall(text):
+                src = kernel_src / rel
+                dst = work / rel
+                if src.is_file() and not dst.exists():
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src, dst)
+        prog = _patch_program() or "patch"
+        for patch_path in patches:
+            try:
+                proc = subprocess.run(
+                    [
+                        prog,
+                        "-p1",
+                        "-F2",
+                        "-f",
+                        "--no-backup-if-mismatch",
+                        "-r",
+                        "-",
+                        "-d",
+                        str(work),
+                    ],
+                    stdin=patch_path.open("rb"),
+                    capture_output=True,
+                )
+            except OSError as exc:
+                return (False, [f"{patch_path.name}: cannot run patch: {exc}"])
+            if proc.returncode != 0:
+                stderr = proc.stderr.decode(errors="replace").strip()
+                stdout = proc.stdout.decode(errors="replace").strip()
+                detail = stderr or stdout
+                first_fail = ""
+                for line in (stdout + "\n" + stderr).splitlines():
+                    if "FAILED" in line:
+                        first_fail = line.strip()
+                        break
+                reason = (
+                    first_fail or detail.splitlines()[0]
+                    if detail
+                    else "rejected"
+                )
+                return (False, [f"{patch_path.name}: {reason}"])
+    return (True, [])
 
 
 # ------------------------------------------------------------------
@@ -457,6 +506,126 @@ def vanilla_ldiskfs_series(version: str) -> str | None:
         else:
             break
     return chosen
+
+
+# Lustre's configure picks an Ubuntu kernel's ldiskfs series from its
+# release string, ``<base>-<abi>-<flavour>``: the base version selects a
+# band and, for a few bands, the ABI number selects among that band's
+# series (LDISKFS_LINUX_SERIES in config/lustre-build-ldiskfs.m4).  As
+# with the vanilla ladder, the filename heuristic cannot stand in for
+# it: a 7.0.0 kernel below ABI 14 gets ldiskfs-7.0-ml, and a 6.8.0 one
+# below ABI 44 gets ldiskfs-6.7-ml.
+#
+# Each band is (inclusive floor, series for the base version itself
+# keyed by minimum ABI, highest first -- a 0 entry being the
+# fallback -- and the series for any later base version up to the
+# next floor).  Below the first floor there is no series.  Keep in
+# sync with the m4 when Lustre adds an Ubuntu series.
+_UBUNTU_LDISKFS_LADDER: tuple[
+    tuple[str, tuple[tuple[int, str], ...], str], ...
+] = (
+    (
+        "4.15.0",
+        (
+            (24, "4.15.0-24-ubuntu18"),
+            (20, "4.15.0-20-ubuntu18"),
+        ),
+        "4.15.0-24-ubuntu18",
+    ),
+    ("5.0.0", ((0, "5.0.0-13-ubuntu19"),), "5.0.0-13-ubuntu19"),
+    (
+        "5.4.0",
+        (
+            (90, "5.4.0-90-ubuntu20"),
+            (80, "5.4.0-80-ubuntu20"),
+            (66, "5.4.0-66-ubuntu20"),
+            (0, "5.4.0-42-ubuntu20"),
+        ),
+        "5.4.0-ml",
+    ),
+    (
+        "5.8.0",
+        ((63, "5.8.0-63-ubuntu20"), (0, "5.8.0-53-ubuntu20")),
+        "5.8.0-ml",
+    ),
+    ("5.11.0", ((0, "5.11.0-40-ubuntu20"),), "5.11.0-40-ubuntu20"),
+    (
+        "5.15.0",
+        ((106, "5.15.0-106-ubuntu20"), (0, "5.15.0-83-ubuntu20")),
+        "5.15.0-83-ubuntu20",
+    ),
+    ("5.19.0", ((0, "5.19.0-35-ubuntu"),), "5.19.0-35-ubuntu"),
+    (
+        "6.8.0",
+        (
+            (106, "6.8.0-106-ubuntu24"),
+            (100, "6.8.0-100-ubuntu24"),
+            (90, "6.8.0-90-ubuntu24"),
+            (44, "6.8.0-45-ubuntu24"),
+            (0, "6.7-ml"),
+        ),
+        "6.7-ml",
+    ),
+    ("6.10.0", ((0, "6.10-ml"),), "6.10-ml"),
+    ("6.11.0", ((0, "6.11-ml"),), "6.11-ml"),
+    ("6.15.0", ((0, "7.0.0-14-ubuntu26"),), "7.0.0-14-ubuntu26"),
+    (
+        "7.0.0",
+        ((14, "7.0.0-14-ubuntu26"), (0, "7.0-ml")),
+        "7.0-ml",
+    ),
+)
+
+# The m4's special cases the table cannot carry: no ABI at all means
+# "assume the latest" for the bands that look at it, and 5.4.0-1007
+# is an old cloud ABI that stays on the -42 series.
+_UBUNTU_NO_ABI = {
+    "4.15.0": "4.15.0-24-ubuntu18",
+    "5.4.0": "5.4.0-90-ubuntu20",
+    "5.8.0": "5.8.0-63-ubuntu20",
+    "5.15.0": "5.15.0-106-ubuntu20",
+    "6.8.0": "6.8.0-106-ubuntu24",
+    "7.0.0": "7.0.0-14-ubuntu26",
+}
+
+
+def ubuntu_ldiskfs_series(release: str) -> str | None:
+    """The ldiskfs series stem Lustre would pick for an Ubuntu kernel.
+
+    ``release`` is an Ubuntu kernel release, or an ltvm kernel name of
+    the same shape: ``7.0.0-14-generic``, ``7.0.0-14-ubuntu26``.  Its
+    first two dash-separated fields are the base version and the ABI,
+    as configure reads them.  Returns the stem with its ``ldiskfs-``
+    prefix and without ``.series``, or None below Lustre's first Ubuntu
+    series.
+    """
+    fields = release.split("-")
+    base = fields[0]
+    abi_s = fields[1] if len(fields) > 1 else ""
+    abi = int(abi_s) if abi_s.isdigit() else None
+    v = _version_tuple(base)
+    for i, (floor, by_abi, later) in enumerate(_UBUNTU_LDISKFS_LADDER):
+        nxt = (
+            _UBUNTU_LDISKFS_LADDER[i + 1][0]
+            if i + 1 < len(_UBUNTU_LDISKFS_LADDER)
+            else None
+        )
+        if v < _version_tuple(floor):
+            return None
+        if nxt is not None and v >= _version_tuple(nxt):
+            continue
+        if v > _version_tuple(floor):
+            return f"ldiskfs-{later}"
+        if abi is None:
+            return f"ldiskfs-{_UBUNTU_NO_ABI.get(floor, by_abi[0][1])}"
+        if floor == "5.4.0" and abi == 1007:
+            return "ldiskfs-5.4.0-42-ubuntu20"
+        for min_abi, stem in by_abi:
+            if abi >= min_abi:
+                return f"ldiskfs-{stem}"
+        # 4.15.0 below ABI 20: configure finds no series either.
+        return None
+    return None
 
 
 def _distro_tokens(tc: Any) -> set[str]:
@@ -661,6 +830,22 @@ def validate_target(
                         f"for this kernel"
                     ),
                 )
+        elif getattr(tc, "os_name", None) == "ubuntu":
+            # Ubuntu, like vanilla, is chosen by version and ABI.
+            match_stem = ubuntu_ldiskfs_series(kver)
+            if match_stem is not None and match_stem not in stems:
+                return ValidationResult(
+                    status="refuse",
+                    mode=mode,
+                    kernel_version=kver,
+                    matched_in="not_listed",
+                    message=(
+                        f"Ubuntu kernel {kver} maps to ldiskfs series "
+                        f"{match_stem!r}, which this Lustre tree does "
+                        f"not ship -- the tree predates server support "
+                        f"for this kernel"
+                    ),
+                )
         else:
             match_stem = _ldiskfs_series_matches(
                 stems, kver_mm, _distro_tokens(tc)
@@ -668,12 +853,15 @@ def validate_target(
         if match_stem is not None:
             bt = kernel_build_tree
             sysfs_c = bt / "fs" / "ext4" / "sysfs.c" if bt else None
-            if (
+            have_gnu_patch = _patch_program() is not None
+            tree_ok = (
                 bt is not None
                 and bt.is_dir()
                 and sysfs_c is not None
                 and sysfs_c.exists()
-            ):
+            )
+            if tree_ok and have_gnu_patch:
+                assert bt is not None
                 patches = parse_ldiskfs_series_file(lustre_tree, match_stem)
                 all_clean, failures = dry_apply_patches(patches, bt)
                 if all_clean:
@@ -701,17 +889,26 @@ def validate_target(
                         + (" ..." if len(failures) > 3 else "")
                     ),
                 )
-            no_bt_note = (
-                "patch dry-apply not run (kernel not built yet); "
-                "rerun validate after `ltvm build kernel`"
-                if bt is None
-                else "patch dry-apply not run (kernel build-tree incomplete)"
-            )
-            how = (
-                "selected by Lustre's own mainline version ladder"
-                if tc.is_upstream
-                else f"matched by filename prefix ldiskfs-{kver_mm}."
-            )
+            if bt is None:
+                no_bt_note = (
+                    "patch dry-apply not run (kernel not built yet); "
+                    "rerun validate after `ltvm build kernel`"
+                )
+            elif not tree_ok:
+                no_bt_note = (
+                    "patch dry-apply not run (kernel build-tree incomplete)"
+                )
+            else:
+                no_bt_note = (
+                    "patch dry-apply not run (no GNU patch on this host; "
+                    "`brew install gpatch` on macOS)"
+                )
+            if tc.is_upstream:
+                how = "selected by Lustre's own mainline version ladder"
+            elif getattr(tc, "os_name", None) == "ubuntu":
+                how = "selected by Lustre's own Ubuntu version/ABI ladder"
+            else:
+                how = f"matched by filename prefix ldiskfs-{kver_mm}."
             return ValidationResult(
                 status="ok",
                 mode=mode,

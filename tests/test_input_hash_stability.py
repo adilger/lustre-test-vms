@@ -50,6 +50,9 @@ GOLDEN = [
     ("ubuntu2604", "container", None, None, "d864ce8762f0001a"),
     ("ubuntu2604", "kernel", None, None, "153aab2f08addf1c"),
     ("ubuntu2604", "image", None, None, "379177beff7f1729"),
+    ("ubuntu2604-server", "container", None, None, "3b62965ab14bb802"),
+    ("ubuntu2604-server", "kernel", None, None, "8d037a8bc5115771"),
+    ("ubuntu2604-server", "image", None, None, "3205f66100d47ee3"),
     # A variant must not perturb the base hashes above, and must differ
     # from them.
     ("rocky9", "container", None, "mofed-24", "cc1a03c2d0fda310"),

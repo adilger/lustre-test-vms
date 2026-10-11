@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from ltvm_pkg import lustre_compat
 from ltvm_pkg.lustre_compat import (
     ChangeLogEntry,
     TargetIn,
@@ -852,6 +853,11 @@ def _make_ldiskfs_validate_tree(
 
 
 class TestValidateTargetLdiskfsBuildTree:
+    @pytest.fixture(autouse=True)
+    def _any_patch(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """These one-hunk patches apply alike with BSD or GNU patch."""
+        monkeypatch.setattr(lustre_compat, "_patch_program", lambda: "patch")
+
     def test_no_build_tree_ok_with_note(self, tmp_path: Path) -> None:
         tree = _make_ldiskfs_validate_tree(
             tmp_path, "ldiskfs-6.8.0-90-ubuntu24", _CLEAN_PATCH
