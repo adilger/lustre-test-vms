@@ -371,6 +371,20 @@ def _kver_from_target_in(ti: TargetIn) -> str:
     return f"{ti.lnxmaj}-{ti.lnxrel}"
 
 
+def _built_kver(kernel_build_tree: Path | None) -> str | None:
+    """The version of the kernel artifact a build tree belongs to, as
+    which_patch would write it, or None."""
+    if kernel_build_tree is None:
+        return None
+    from .paths import load_meta_safe
+
+    meta = load_meta_safe(Path(kernel_build_tree).parent / "meta.json")
+    v = meta.get("kernel_version") if isinstance(meta, dict) else None
+    if not isinstance(v, str) or not v:
+        return None
+    return v.removesuffix("_lustre")
+
+
 def _kver_matches(declared: str, target_kver: str) -> bool:
     return _normalize_kver(declared) == _normalize_kver(target_kver)
 
@@ -599,6 +613,15 @@ def validate_target(
                 ),
             )
         kver = _kver_from_target_in(ti)
+    # Building Lustre against a kernel already built: that kernel is the
+    # one the patches must fit, whatever version this tree's .target.in
+    # would build.  A b2_16 tree declares 553.16.1 for rhel8.10 while
+    # the kernel artifact is 553.155.1, and the gate refused a tree whose
+    # which_patch named the artifact's kernel exactly.
+    declared_by_tree = kver
+    built = _built_kver(kernel_build_tree)
+    if built and not tc.is_upstream and not tc.kernel_deb_source:
+        kver = built
 
     if mode == LustreMode.SERVER_LDISKFS:
         try:
@@ -622,7 +645,13 @@ def validate_target(
                     matched_in="which_patch_primary",
                     message=(
                         f"{series} is listed in which_patch with matching "
-                        f"kernel {declared} (target.in: {kver})"
+                        f"kernel {declared} (target.in: {declared_by_tree}"
+                        + (
+                            f", built: {kver}"
+                            if kver != declared_by_tree
+                            else ""
+                        )
+                        + ")"
                     ),
                 )
             return ValidationResult(
@@ -632,9 +661,14 @@ def validate_target(
                 matched_in="not_listed",
                 message=(
                     f"{series} is listed in which_patch as {declared}, "
-                    f"but target.in declares {kver} -- kernel version "
-                    f"mismatch; this series does not match the kernel "
-                    f"it claims to patch"
+                    + (
+                        f"but the kernel built is {kver} (its target.in "
+                        f"declares {declared_by_tree})"
+                        if kver != declared_by_tree
+                        else f"but target.in declares {kver}"
+                    )
+                    + " -- kernel version mismatch; this series does not "
+                    "match the kernel it claims to patch"
                 ),
             )
         # Fallback: ldiskfs patches may ship under

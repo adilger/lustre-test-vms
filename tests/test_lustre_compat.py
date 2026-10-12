@@ -503,6 +503,50 @@ class TestValidateTarget:
         assert r.matched_in == "not_listed"
         assert "mismatch" in r.message
 
+    def _built(self, tmp_path: Path, kernel_version: str) -> Path:
+        import json
+
+        kdir = tmp_path / "kernel"
+        (kdir / "build-tree").mkdir(parents=True)
+        (kdir / "meta.json").write_text(
+            json.dumps({"kernel_version": kernel_version})
+        )
+        return kdir / "build-tree"
+
+    def test_the_built_kernel_decides_not_target_in(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression: a b2_16 tree whose target.in declares an older
+        rhel8.10 kernel was refused against the 553.155.1 kernel it was
+        being built for, though its which_patch named that kernel."""
+        tree = _make_tree(
+            tmp_path,
+            which_patch=_WP_BASIC,
+            changelog=_CL_PRIMARY,
+            target_ins={"5.14-rhel9.7": _TI_RHEL97_MISMATCH},
+        )
+        tc = _FakeTC("5.14-rhel9.7", LustreMode.SERVER_LDISKFS)
+        bt = self._built(tmp_path, "5.14.0-611.13.1.el9_7_lustre")
+        r = validate_target(tc, tree, kernel_build_tree=bt)
+        assert r.status == "ok"
+        assert r.kernel_version == "5.14.0-611.13.1.el9_7"
+        assert "target.in: 5.14.0-999.99.9.el9_7" in r.message
+
+    def test_a_built_kernel_which_patch_does_not_name_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        tree = _make_tree(
+            tmp_path,
+            which_patch=_WP_BASIC,
+            changelog=_CL_PRIMARY,
+            target_ins={"5.14-rhel9.7": _TI_RHEL97},
+        )
+        tc = _FakeTC("5.14-rhel9.7", LustreMode.SERVER_LDISKFS)
+        bt = self._built(tmp_path, "5.14.0-999.99.9.el9_7_lustre")
+        r = validate_target(tc, tree, kernel_build_tree=bt)
+        assert r.status == "refuse"
+        assert "the kernel built is 5.14.0-999.99.9.el9_7" in r.message
+
     def test_ldiskfs_series_absent(self, tmp_path: Path) -> None:
         tree = _make_tree(
             tmp_path,
