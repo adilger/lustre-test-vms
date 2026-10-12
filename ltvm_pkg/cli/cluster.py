@@ -242,6 +242,7 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> int:
             name=args.name,
             lustre_source=args.lustre_source,
             mount=args.mount,
+            mount_timeout=args.mount_timeout,
             server_only=args.server_only,
             userspace_only=args.userspace_only,
             force_compat=args.force_compat,

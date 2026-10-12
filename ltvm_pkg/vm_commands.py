@@ -1633,7 +1633,7 @@ def cmd_llmount(args: argparse.Namespace) -> None:
                 disk_size_bytes=vm.disk_size,
                 os_family=os_family,
             )
-        except RuntimeError as e:
+        except (RuntimeError, subprocess.TimeoutExpired) as e:
             print(f"error: {e}", file=sys.stderr)
             sys.exit(EXIT_ERROR)
         # The cleanup deploy-lustre --mount runs: llmount.sh alone cannot

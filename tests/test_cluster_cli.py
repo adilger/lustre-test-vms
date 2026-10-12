@@ -598,6 +598,11 @@ class TestClusterDeployArgs:
         cmd_cluster(_ns("deploy", "co1", "--mount"))
         ns = self._ns_call()
         assert ns.mount is True
+        assert ns.mount_timeout is None
+
+    def test_mount_timeout(self) -> None:
+        cmd_cluster(_ns("deploy", "co1", "--mount", "--mount-timeout", "2100"))
+        assert self._ns_call().mount_timeout == 2100
 
     def test_server_only_flag(self) -> None:
         cmd_cluster(_ns("deploy", "co1", "--server-only"))
@@ -1271,6 +1276,80 @@ class TestCmdClusterLlmountBehavior:
             with pytest.raises(SystemExit) as exc:
                 vm_cluster.cmd_cluster_llmount(self._ns())
         assert exc.value.code == EXIT_ERROR
+
+
+class TestCmdClusterDeployMountLimit:
+    """llmount.sh under `cluster deploy --mount` had a fixed 300s, which
+    a four-MDT cluster on a loaded host overran mid-format."""
+
+    def _deploy(self, tmp_path: Path, **args: Any) -> int:
+        class _TC:
+            os_family = "rhel"
+
+        cluster = ClusterInfo(
+            name="co4",
+            nodes=[
+                {"name": "co4-mds", "roles": ["mgs", "mds"], "mdt_disks": 4},
+                {"name": "co4-oss", "roles": ["oss"], "ost_disks": 2},
+                {"name": "co4-c1", "roles": ["client"]},
+            ],
+        )
+        node = MagicMock(
+            os_id="rocky9",
+            arch="x86_64",
+            variant="base",
+            kernel="/a/kernels/5.14-rhel9.7-5.14.0-611.55.1.el9_7/vmlinuz",
+            ip="10.0.0.5",
+        )
+        with (
+            patch.object(ClusterInfo, "load", return_value=cluster),
+            patch.object(vm_cluster.VMInfo, "load", return_value=node),
+            patch.object(vm_cluster, "_validate_lustre_source"),
+            patch("ltvm_pkg.target_config.TargetConfig", return_value=_TC()),
+            patch.object(vm_cluster.subprocess, "run") as run,
+            patch.object(
+                vm_cluster,
+                "_deploy_one_node",
+                side_effect=lambda name, *a, **k: (name, 0, ""),
+            ),
+            patch.object(vm_cluster, "probe_mgs_lnet"),
+            patch.object(vm_cluster, "generate_local_sh", return_value=""),
+            patch.object(
+                vm_cluster,
+                "_write_cluster_local_sh",
+                side_effect=lambda name, *a, **k: (name, 0, ""),
+            ),
+            patch.object(
+                vm_cluster, "_distribute_cluster_hosts", return_value=[]
+            ),
+            patch.object(vm_cluster, "_run_llmount") as llmount,
+        ):
+            run.return_value = MagicMock(returncode=0)
+            vm_cluster.cmd_cluster_deploy(
+                argparse.Namespace(
+                    name="co4",
+                    lustre_source=str(tmp_path),
+                    mount=True,
+                    server_only=False,
+                    **args,
+                )
+            )
+        return int(llmount.call_args.kwargs["timeout"])
+
+    def test_scales_with_the_targets(self, tmp_path: Path) -> None:
+        from ltvm_pkg.deploy import llmount_timeout
+
+        assert self._deploy(tmp_path) == llmount_timeout(6)
+
+    def test_zfs(self, tmp_path: Path) -> None:
+        from ltvm_pkg.deploy import llmount_timeout
+
+        with patch.object(vm_cluster, "_staged_zfs", return_value=None):
+            got = self._deploy(tmp_path, fstype="zfs")
+        assert got == llmount_timeout(6, zfs=True)
+
+    def test_flag_wins(self, tmp_path: Path) -> None:
+        assert self._deploy(tmp_path, mount_timeout=4000) == 4000
 
 
 class TestCmdClusterDeployBuildsForTheNodes:

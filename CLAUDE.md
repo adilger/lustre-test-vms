@@ -535,6 +535,18 @@ ltvm vm crash-collect co1-single --mod-dir $CO/1
 ltvm destroy co1-single
 ```
 
+A deploy's guest steps (depmod, ldconfig, cfg/local.sh) may each take
+`LTVM_DEPLOY_TIMEOUT` seconds (default 600), and the tar|gzip|ssh copy
+stops only after that long without progress
+([ltvm_pkg/deploy.py](ltvm_pkg/deploy.py) `step_timeout`).  A fixed 120s
+on the whole copy failed every deploy of a 380 MB staging on a host at
+load 60; ssh's keepalives catch a dead guest in 30s, so the limits only
+bound a command that is still running.  llmount.sh under `--mount` gets
+`llmount_timeout()`, which grows with the target count and triples per
+target on ZFS; `--mount-timeout` overrides it.  ssh and scp get the
+guest password through `SSHPASS` (`sshpass -e`), never argv, so no
+exception or `ps` listing shows it.
+
 The VM commands answer under `vm` too: `ltvm vm create` is `ltvm
 create`, and likewise for `destroy`, `start`, `stop`, `list`,
 `deploy-lustre`, `llmount`, `llumount` and `doctor`.  One parser

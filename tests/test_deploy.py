@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -259,28 +261,69 @@ class TestDeployToVm:
             deploy.deploy_to_vm(vm, tmp_path / "nope")
 
     def test_tar_failure_raises(self, staging: Path) -> None:
-        """subprocess nonzero rc surfaces as RuntimeError with output."""
+        """A failed transfer stops the deploy before depmod."""
         vm = _make_vm()
+        ssh_cmds: list[str] = []
         with (
             patch(
-                "ltvm_pkg.deploy.subprocess.run",
-                return_value=MagicMock(
-                    returncode=2, stdout="", stderr="tar: boom"
-                ),
+                "ltvm_pkg.deploy._stream_tree",
+                side_effect=RuntimeError("tar deploy failed (rc=2): boom"),
             ),
-            patch("ltvm_pkg.deploy.run_ssh", return_value=_ok()),
+            patch(
+                "ltvm_pkg.deploy.run_ssh",
+                side_effect=lambda ip, cmd, **kw: ssh_cmds.append(cmd) or _ok(),
+            ),
         ):
             with pytest.raises(RuntimeError, match="tar deploy failed"):
                 deploy.deploy_to_vm(vm, staging)
+        assert ssh_cmds == [deploy._UNLOAD_SCRIPT]
+
+    def test_depmod_timeout_is_an_error_not_a_traceback(
+        self, staging: Path
+    ) -> None:
+        """A guest step past its limit raises RuntimeError, which
+        cmd_deploy and cluster deploy report, and names the knob."""
+        from ltvm_pkg.vm_net import SshTimeout
+
+        def fake_ssh(ip: str, cmd: str, **kw: Any) -> MagicMock:
+            if cmd.startswith("depmod"):
+                raise SshTimeout(ip, cmd, kw["timeout"])
+            return _ok()
+
+        with (
+            patch("ltvm_pkg.deploy._stream_tree"),
+            patch("ltvm_pkg.deploy.run_ssh", side_effect=fake_ssh),
+        ):
+            with pytest.raises(RuntimeError) as exc:
+                deploy.deploy_to_vm(_make_vm(name="co1-slow"), staging)
+        msg = str(exc.value)
+        assert "co1-slow" in msg
+        assert "depmod -a && ldconfig" in msg
+        assert "timed out after 600s" in msg
+        assert "LTVM_DEPLOY_TIMEOUT" in msg
+
+    def test_guest_steps_take_the_deploy_timeout(
+        self, staging: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("LTVM_DEPLOY_TIMEOUT", "1500")
+        timeouts: dict[str, int] = {}
+
+        def fake_ssh(ip: str, cmd: str, **kw: Any) -> MagicMock:
+            timeouts[cmd] = kw["timeout"]
+            return _ok()
+
+        with (
+            patch("ltvm_pkg.deploy._stream_tree"),
+            patch("ltvm_pkg.deploy.run_ssh", side_effect=fake_ssh),
+        ):
+            deploy.deploy_to_vm(_make_vm(), staging)
+        assert timeouts["depmod -a && ldconfig"] == 1500
 
     def test_depmod_failure_raises(self, staging: Path) -> None:
         """A failed depmod after successful tar propagates with rc."""
         vm = _make_vm()
         with (
-            patch(
-                "ltvm_pkg.deploy.subprocess.run",
-                return_value=_ok(),
-            ),
+            patch("ltvm_pkg.deploy._stream_tree"),
             patch(
                 "ltvm_pkg.deploy.run_ssh",
                 return_value=_fail(rc=7, stderr="depmod: boom"),
@@ -293,10 +336,7 @@ class TestDeployToVm:
         """A VM with no data disks never calls configure_test_disks."""
         vm = _make_vm(mdt_disks=0, ost_disks=0)
         with (
-            patch(
-                "ltvm_pkg.deploy.subprocess.run",
-                return_value=_ok(),
-            ),
+            patch("ltvm_pkg.deploy._stream_tree"),
             patch("ltvm_pkg.deploy.run_ssh", return_value=_ok()),
             patch("ltvm_pkg.deploy.configure_test_disks") as mock_cfg,
         ):
@@ -307,10 +347,7 @@ class TestDeployToVm:
         """VMs with data disks forward topology to configure_test_disks."""
         vm = _make_vm(mdt_disks=1, ost_disks=2, disk_size=12345)
         with (
-            patch(
-                "ltvm_pkg.deploy.subprocess.run",
-                return_value=_ok(),
-            ),
+            patch("ltvm_pkg.deploy._stream_tree"),
             patch("ltvm_pkg.deploy.run_ssh", return_value=_ok()),
             patch("ltvm_pkg.deploy.configure_test_disks") as mock_cfg,
         ):
@@ -323,40 +360,11 @@ class TestDeployToVm:
                 os_family="rhel",
             )
 
-    def test_tar_command_targets_staging_and_vm_ip(self, staging: Path) -> None:
-        """The bash tar|ssh pipeline references the staging dir and VM IP."""
-        vm = _make_vm(ip="10.11.12.13")
-        captured = {}
-
-        def fake_run(args, **kwargs):
-            captured["args"] = args
-            return _ok()
-
-        with (
-            patch("ltvm_pkg.deploy.subprocess.run", side_effect=fake_run),
-            patch("ltvm_pkg.deploy.run_ssh", return_value=_ok()),
-        ):
-            deploy.deploy_to_vm(vm, staging)
-        # bash -c "... tar cf - -C <staging> . | ... ssh ... root@<ip> ..."
-        assert captured["args"][0] == "bash"
-        assert captured["args"][1] == "-c"
-        pipeline = captured["args"][2]
-        assert f"-C {staging}" in pipeline or str(staging) in pipeline
-        assert "root@10.11.12.13" in pipeline
-        assert "tar cf -" in pipeline
-        assert "tar xf -" in pipeline
-
     def test_userspace_only_skips_modules_and_depmod(
         self, staging: Path
     ) -> None:
         """userspace_only excludes lib/modules and runs ldconfig only."""
         vm = _make_vm()
-        captured = {}
-
-        def fake_run(args, **kwargs):
-            captured["args"] = args
-            return _ok()
-
         ssh_cmds = []
 
         def fake_ssh(ip, cmd, timeout=60):
@@ -364,11 +372,11 @@ class TestDeployToVm:
             return _ok()
 
         with (
-            patch("ltvm_pkg.deploy.subprocess.run", side_effect=fake_run),
+            patch("ltvm_pkg.deploy._stream_tree") as stream,
             patch("ltvm_pkg.deploy.run_ssh", side_effect=fake_ssh),
         ):
             deploy.deploy_to_vm(vm, staging, userspace_only=True)
-        assert "--exclude=./lib/modules" in captured["args"][2]
+        stream.assert_called_once_with(vm, staging, exclude_modules=True)
         # post-deploy should be ldconfig only (no depmod)
         assert ssh_cmds == ["ldconfig"]
 
@@ -382,7 +390,7 @@ class TestDeployToVm:
             return _ok()
 
         with (
-            patch("ltvm_pkg.deploy.subprocess.run", return_value=_ok()),
+            patch("ltvm_pkg.deploy._stream_tree"),
             patch("ltvm_pkg.deploy.run_ssh", side_effect=fake_ssh),
         ):
             deploy.deploy_to_vm(vm, staging)
@@ -394,7 +402,7 @@ class TestDeployToVm:
         """Nothing is streamed: the new files would not take effect."""
         vm = _make_vm()
         with (
-            patch("ltvm_pkg.deploy.subprocess.run") as tar,
+            patch("ltvm_pkg.deploy._stream_tree") as tar,
             patch(
                 "ltvm_pkg.deploy.run_ssh",
                 return_value=_ok(stdout="unmounted\nmounted\nloaded libcfs\n"),
@@ -403,6 +411,164 @@ class TestDeployToVm:
             with pytest.raises(RuntimeError, match="still loaded"):
                 deploy.deploy_to_vm(vm, staging)
         tar.assert_not_called()
+
+
+def _gnu_tar() -> bool:
+    try:
+        r = subprocess.run(
+            ["tar", "--version"], capture_output=True, text=True, check=False
+        )
+    except OSError:
+        return False
+    return "GNU tar" in r.stdout
+
+
+class TestStreamTree:
+    """The transfer is limited by progress, not by its total time.
+
+    A fixed 120s on the whole tar|ssh failed every deploy of a 380 MB
+    staging on a host at load 60.  Here "ssh" is a local shell running
+    the remote command against a scratch root.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _need_gnu_tar(self) -> None:
+        if not _gnu_tar():
+            pytest.skip("needs GNU tar (--keep-directory-symlink)")
+
+    def _remote(self, root: Path, *, script: str | None = None) -> Any:
+        def argv(ip: str, command: str, **kw: Any) -> list[str]:
+            assert ip == "10.9.8.7"
+            cmd = command.replace(" -C / ", f" -C {root} ")
+            return ["bash", "-c", script if script is not None else cmd]
+
+        return patch("ltvm_pkg.deploy.sshpass_ssh_argv", side_effect=argv)
+
+    def test_tree_arrives(self, staging: Path, tmp_path: Path) -> None:
+        root = tmp_path / "root"
+        root.mkdir()
+        (staging / ".ltvm-staging-meta.json").write_text("{}")
+        (staging / "usr/lib64/lustre/tests/sanity.sh").write_text("x" * 5000)
+        with self._remote(root):
+            deploy._stream_tree(_make_vm(ip="10.9.8.7"), staging)
+        assert (root / "usr/lib64/lustre/tests/sanity.sh").read_text() == (
+            "x" * 5000
+        )
+        assert (root / "lib/modules/5.14/lustre.ko").exists()
+        assert not (root / ".ltvm-staging-meta.json").exists()
+
+    def test_plain_gzip_without_pigz(
+        self, staging: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(deploy.shutil, "which", lambda name: None)
+        assert deploy._compressor()[0] == "gzip"
+        root = tmp_path / "root"
+        root.mkdir()
+        with self._remote(root):
+            deploy._stream_tree(_make_vm(ip="10.9.8.7"), staging)
+        assert (root / "lib/modules/5.14/lustre.ko").exists()
+
+    def test_exclude_modules(self, staging: Path, tmp_path: Path) -> None:
+        root = tmp_path / "root"
+        root.mkdir()
+        with self._remote(root):
+            deploy._stream_tree(
+                _make_vm(ip="10.9.8.7"), staging, exclude_modules=True
+            )
+        assert (root / "usr/lib64/lustre/tests").is_dir()
+        assert not (root / "lib/modules").exists()
+
+    def test_slow_but_moving_is_not_stopped(
+        self,
+        staging: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Takes longer in total than the limit, but never stalls."""
+        monkeypatch.setenv("LTVM_DEPLOY_TIMEOUT", "2")
+        monkeypatch.setattr(deploy, "_CHUNK", 64 * 1024)
+        (staging / "big").write_bytes(os.urandom(1 << 20))
+        root = tmp_path / "root"
+        root.mkdir()
+        # Reads 64 KiB every 0.2s: about 3s for the 1 MiB.
+        slow = (
+            "while dd bs=64k count=1 iflag=fullblock status=none "
+            "| grep -qc ''; do sleep 0.2; done"
+        )
+        start = time.monotonic()
+        with self._remote(root, script=slow):
+            deploy._stream_tree(_make_vm(ip="10.9.8.7"), staging)
+        assert time.monotonic() - start > 2
+
+    def test_stall_is_stopped_and_named(
+        self,
+        staging: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("LTVM_DEPLOY_TIMEOUT", "1")
+        (staging / "big").write_bytes(os.urandom(4 << 20))
+        with self._remote(tmp_path, script="sleep 60"):
+            start = time.monotonic()
+            with pytest.raises(RuntimeError) as exc:
+                deploy._stream_tree(_make_vm(ip="10.9.8.7"), staging)
+        assert time.monotonic() - start < 30
+        assert "no progress for 1s" in str(exc.value)
+        assert "LTVM_DEPLOY_TIMEOUT" in str(exc.value)
+
+    def test_remote_failure_carries_its_output(
+        self, staging: Path, tmp_path: Path
+    ) -> None:
+        with self._remote(
+            tmp_path, script="cat >/dev/null; echo 'disk full' >&2; exit 2"
+        ):
+            with pytest.raises(RuntimeError) as exc:
+                deploy._stream_tree(_make_vm(ip="10.9.8.7"), staging)
+        assert "tar deploy failed (rc=2)" in str(exc.value)
+        assert "disk full" in str(exc.value)
+
+    def test_unreachable_guest_does_not_hang(
+        self, staging: Path, tmp_path: Path
+    ) -> None:
+        """ssh exiting before reading must not leave tar blocked."""
+        (staging / "big").write_bytes(os.urandom(4 << 20))
+        with self._remote(tmp_path, script="echo 'no route' >&2; exit 255"):
+            with pytest.raises(RuntimeError, match="no route"):
+                deploy._stream_tree(_make_vm(ip="10.9.8.7"), staging)
+
+
+class TestStepTimeout:
+    def test_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("LTVM_DEPLOY_TIMEOUT", raising=False)
+        assert deploy.step_timeout() == 600
+
+    def test_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("LTVM_DEPLOY_TIMEOUT", "1800")
+        assert deploy.step_timeout() == 1800
+
+    @pytest.mark.parametrize("bad", ["0", "-5", "lots"])
+    def test_bad_value_warns_and_keeps_the_default(
+        self,
+        bad: str,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        monkeypatch.setenv("LTVM_DEPLOY_TIMEOUT", bad)
+        assert deploy.step_timeout() == 600
+        assert "LTVM_DEPLOY_TIMEOUT" in capsys.readouterr().err
+
+
+class TestLlmountTimeout:
+    def test_grows_with_targets(self) -> None:
+        assert deploy.llmount_timeout(8) > deploy.llmount_timeout(3)
+
+    def test_zfs_gets_more(self) -> None:
+        """1 MDT + 4 OSTs on ZFS took about 10 minutes."""
+        assert deploy.llmount_timeout(5, zfs=True) >= 900
+        assert deploy.llmount_timeout(5, zfs=True) > deploy.llmount_timeout(5)
+
+    def test_no_disks_is_the_framework_default(self) -> None:
+        assert deploy.llmount_timeout(0) == deploy.llmount_timeout(3)
 
 
 class TestUnloadLustre:
@@ -521,6 +687,45 @@ class TestLustreMountVm:
         # The cleanup's output is noise; only llmount.sh streams.
         assert "stream" not in cleanup.kwargs
         assert mount.kwargs["stream"] is (sys.stderr if quiet else sys.stdout)
+
+    def test_llmount_limit_scales_with_targets(self, tmp_sockets: Path) -> None:
+        """A fixed 180s killed llmount.sh on ZFS with 4 MDTs and 4 OSTs."""
+        vm = _make_vm(
+            name="mount-zfs", ip="10.0.0.11", mdt_disks=4, ost_disks=4
+        )
+        vm.save()
+        with patch("ltvm_pkg.deploy.run_ssh", return_value=_ok()) as ssh:
+            deploy.lustre_mount_vm("mount-zfs", os_family="rhel", zfs=True)
+        assert ssh.call_args_list[1].kwargs["timeout"] == (
+            deploy.llmount_timeout(8, zfs=True)
+        )
+        with patch("ltvm_pkg.deploy.run_ssh", return_value=_ok()) as ssh:
+            deploy.lustre_mount_vm("mount-zfs", os_family="rhel", ost_count=10)
+        assert ssh.call_args_list[1].kwargs["timeout"] == (
+            deploy.llmount_timeout(14)
+        )
+        with patch("ltvm_pkg.deploy.run_ssh", return_value=_ok()) as ssh:
+            deploy.lustre_mount_vm("mount-zfs", os_family="rhel", timeout=77)
+        assert ssh.call_args_list[1].kwargs["timeout"] == 77
+
+    def test_llmount_timeout_says_what_to_do(
+        self, tmp_sockets: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from ltvm_pkg.vm_net import SshTimeout
+
+        vm = _make_vm(name="mount-slow", ip="10.0.0.12")
+        vm.save()
+        results: list[Any] = [
+            _ok(),
+            SshTimeout(vm.ip, "cd /x && bash llmount.sh", 360),
+        ]
+        with patch("ltvm_pkg.deploy.run_ssh", side_effect=results):
+            rc = deploy.lustre_mount_vm("mount-slow", os_family="rhel")
+        assert rc != 0
+        err = capsys.readouterr().err
+        assert "timed out after 360s" in err
+        assert "partly mounted" in err
+        assert "--timeout" in err
 
     def test_mount_uses_debian_libdir(self, tmp_sockets: Path) -> None:
         """debian os_family passes /usr/lib/lustre into the mount commands."""
@@ -1490,7 +1695,50 @@ class TestCmdDeployMountAndKver:
         assert rc == 0
         # quiet= is how --json keeps llmount's stdout out of the JSON
         # document; this is the human path, so it is False.
-        mount_mock.assert_called_once_with("co1-mount", "rhel", quiet=False)
+        mount_mock.assert_called_once_with(
+            "co1-mount",
+            "rhel",
+            quiet=False,
+            timeout=None,
+            zfs=False,
+            ost_count=None,
+        )
+
+    def test_mount_timeout_reaches_llmount(
+        self, tmp_sockets: Path, tmp_path: Path
+    ) -> None:
+        from ltvm_pkg import cli as cli_mod
+        from ltvm_pkg.lustre_build import staging_path
+
+        build_path = tmp_path / "lustre-release"
+        _setup_lustre_tree(build_path)
+        staging = staging_path(
+            build_path, "rocky9", arch="x86_64", kernel="5.14-rhel9.7"
+        )
+        staging.mkdir(parents=True)
+        (staging / "lustre.ko").write_text("")
+        (staging / ".ltvm-staging-stamp").write_text("")
+        _mark_staging_fresh(staging, build_path, _stub_tc())
+
+        vm = _make_vm(name="co1-mount", ip="10.0.0.25")
+        vm.os_id = "rocky9"
+        vm.save()
+
+        args = _deploy_args(
+            vm="co1-mount", lustre_tree=str(build_path), mount=True
+        )
+        args.mount_timeout = 1234
+        with (
+            patch.object(cli_mod, "TargetConfig", return_value=_stub_tc()),
+            patch("ltvm_pkg.cli.deploy_to_vm"),
+            patch(
+                "subprocess.run",
+                return_value=MagicMock(returncode=0, stdout=""),
+            ),
+            patch("ltvm_pkg.cli.lustre_mount_vm", return_value=0) as mount_mock,
+        ):
+            cli_mod.cmd_deploy(args)
+        assert mount_mock.call_args.kwargs["timeout"] == 1234
 
     def test_json_emits_an_envelope_on_success(
         self, tmp_sockets: Path, tmp_path: Path, capsys: pytest.CaptureFixture
@@ -1579,7 +1827,14 @@ class TestCmdDeployMountAndKver:
             rc = cli_mod.cmd_deploy(args)
 
         assert rc == 0
-        mount_mock.assert_called_once_with("co1-jmount", "rhel", quiet=True)
+        mount_mock.assert_called_once_with(
+            "co1-jmount",
+            "rhel",
+            quiet=True,
+            timeout=None,
+            zfs=False,
+            ost_count=None,
+        )
 
     def test_mount_failure_propagates(
         self, tmp_sockets: Path, tmp_path: Path
@@ -1990,7 +2245,7 @@ class TestDeployRamOstWiring:
     def test_not_called_when_zero(self, staging: Path) -> None:
         vm = _make_vm(mdt_disks=1, ost_disks=2)
         with (
-            patch("ltvm_pkg.deploy.subprocess.run", return_value=_ok()),
+            patch("ltvm_pkg.deploy._stream_tree"),
             patch("ltvm_pkg.deploy.run_ssh", return_value=_ok()),
             patch("ltvm_pkg.deploy.configure_test_disks"),
             patch("ltvm_pkg.deploy.configure_ram_osts") as mock_ram,
@@ -2001,7 +2256,7 @@ class TestDeployRamOstWiring:
     def test_forwarded_when_requested(self, staging: Path) -> None:
         vm = _make_vm(mdt_disks=1, ost_disks=0)
         with (
-            patch("ltvm_pkg.deploy.subprocess.run", return_value=_ok()),
+            patch("ltvm_pkg.deploy._stream_tree"),
             patch("ltvm_pkg.deploy.run_ssh", return_value=_ok()),
             patch("ltvm_pkg.deploy.configure_test_disks"),
             patch("ltvm_pkg.deploy.configure_ram_osts") as mock_ram,
@@ -2019,7 +2274,7 @@ class TestDeployRamOstWiring:
         calls: list[str] = []
         vm = _make_vm(mdt_disks=1, ost_disks=2)
         with (
-            patch("ltvm_pkg.deploy.subprocess.run", return_value=_ok()),
+            patch("ltvm_pkg.deploy._stream_tree"),
             patch("ltvm_pkg.deploy.run_ssh", return_value=_ok()),
             patch(
                 "ltvm_pkg.deploy.configure_test_disks",
@@ -2275,7 +2530,7 @@ class TestDeployOstCountWiring:
     def test_not_called_when_unset(self, staging: Path) -> None:
         vm = _make_vm(mdt_disks=1, ost_disks=2)
         with (
-            patch("ltvm_pkg.deploy.subprocess.run", return_value=_ok()),
+            patch("ltvm_pkg.deploy._stream_tree"),
             patch("ltvm_pkg.deploy.run_ssh", return_value=_ok()),
             patch("ltvm_pkg.deploy.configure_test_disks"),
             patch("ltvm_pkg.deploy.configure_ost_count") as mock_cnt,
@@ -2287,7 +2542,7 @@ class TestDeployOstCountWiring:
         """0 is a request (back to the disks), not "unset"."""
         vm = _make_vm(mdt_disks=1, ost_disks=2)
         with (
-            patch("ltvm_pkg.deploy.subprocess.run", return_value=_ok()),
+            patch("ltvm_pkg.deploy._stream_tree"),
             patch("ltvm_pkg.deploy.run_ssh", return_value=_ok()),
             patch("ltvm_pkg.deploy.configure_test_disks"),
             patch("ltvm_pkg.deploy.configure_ost_count") as mock_cnt,
@@ -2301,7 +2556,7 @@ class TestDeployOstCountWiring:
         calls: list[str] = []
         vm = _make_vm(mdt_disks=1, ost_disks=2, disk_size=12345)
         with (
-            patch("ltvm_pkg.deploy.subprocess.run", return_value=_ok()),
+            patch("ltvm_pkg.deploy._stream_tree"),
             patch("ltvm_pkg.deploy.run_ssh", return_value=_ok()),
             patch(
                 "ltvm_pkg.deploy.configure_test_disks",

@@ -728,7 +728,14 @@ def cmd_deploy(args: argparse.Namespace) -> int:
         # _cli_attr resolves at call time (so tests can patch), which
         # means it is typed Any; the callee returns an exit code.
         rc = int(
-            _cli_attr("lustre_mount_vm")(args.vm, os_family, quiet=use_json)
+            _cli_attr("lustre_mount_vm")(
+                args.vm,
+                os_family,
+                quiet=use_json,
+                timeout=getattr(args, "mount_timeout", None),
+                zfs=fstype == "zfs",
+                ost_count=ost_count,
+            )
         )
         if rc != EXIT_OK:
             return rc

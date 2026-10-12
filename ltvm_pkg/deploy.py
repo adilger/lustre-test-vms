@@ -6,63 +6,185 @@ multi-node cluster deploy (vm_cluster.py).
 
 from __future__ import annotations
 
+import contextlib
+import os
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
+import threading
+import time
 from pathlib import Path
 
 from .paths import read_modinfo_field
-from .vm_net import SSH_OPTS, run_ssh
+from .vm_net import SSH_KEEPALIVE_OPTS, run_ssh, sshpass_ssh_argv
 from .vm_state import (
     EXIT_ERROR,
     EXIT_NOT_FOUND,
-    ROOT_PASSWORD,
     VMInfo,
     VMNotFound,
     lustre_libdir,
 )
 
+DEPLOY_TIMEOUT_ENV = "LTVM_DEPLOY_TIMEOUT"
+# A deploy's guest steps are short (depmod, ldconfig, rewriting
+# cfg/local.sh) but a guest on a host at load 60 has taken over a minute
+# for depmod alone.  A dead guest fails sooner, through ssh's keepalives.
+DEFAULT_STEP_TIMEOUT = 600
+
+
+def step_timeout() -> int:
+    """Seconds one guest step of a deploy may take.
+
+    Also how long the tree transfer may go without moving a byte.
+    LTVM_DEPLOY_TIMEOUT overrides it.
+    """
+    raw = os.environ.get(DEPLOY_TIMEOUT_ENV, "").strip()
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            value = 0
+        if value > 0:
+            return value
+        print(
+            f"warning: ignoring {DEPLOY_TIMEOUT_ENV}={raw!r}: not a whole "
+            f"number of seconds > 0",
+            file=sys.stderr,
+        )
+    return DEFAULT_STEP_TIMEOUT
+
+
+def timeout_hint() -> str:
+    return f"raise {DEPLOY_TIMEOUT_ENV}=<seconds> on a slow host"
+
+
+def llmount_timeout(targets: int, *, zfs: bool = False) -> int:
+    """A time limit for llmount.sh that grows with what it formats.
+
+    Each target is formatted and mounted in turn, and on ZFS each is a
+    zpool create as well: 1 MDT and 4 OSTs took 10 minutes on a loaded
+    host.  The framework's own default is 1 MDT and 2 OSTs.
+    """
+    per_target = 180 if zfs else 60
+    return 180 + per_target * (targets or 3)
+
+
+_CHUNK = 1 << 20
+
+
+def _compressor() -> list[str]:
+    # pigz writes the same format on every core; gzip -1 alone is about
+    # 100 MB/s, as fast as ssh to a VM on an idle host.
+    return [shutil.which("pigz") or "gzip", "-1", "-c"]
+
 
 def _stream_tree(
     vm: VMInfo, tree: Path, *, exclude_modules: bool = False
 ) -> None:
-    """tar | ssh a DESTDIR tree into the VM's /.
+    """tar | gzip | ssh a DESTDIR tree into the VM's /.
 
     ``exclude_modules`` drops lib/modules/ so kernel modules already in
     the VM are not overwritten (the --userspace-only path; depmod is
     skipped for it too).
 
-    COMPROMISE: this is the ONLY shell-string SSH caller in the codebase
-    (all others use vm_net.sshpass_*_argv). The tests patch
-    subprocess.run with a bash -c pipeline expectation, so a full
-    Popen(argv) pipeline rewrite would break them.  At minimum we build
-    the ssh option string from vm_net.SSH_OPTS so
-    UserKnownHostsFile=/dev/null isn't silently dropped here (as it was
-    before), keeping this call site consistent with the rest.
+    The stream goes through this process so that the limit is on
+    progress rather than on the whole transfer: a 380 MB staging takes
+    minutes to cross ssh on a loaded host, so any fixed limit on the
+    whole either fails such a host or waits that long on a hung one.
+    gzip -1 takes a staging to about 40% of its size.
     """
-    exclude_mod = "--exclude=./lib/modules" if exclude_modules else ""
+    tar_argv = ["tar", "cf", "-", "-C", str(tree)]
+    if exclude_modules:
+        tar_argv.append("--exclude=./lib/modules")
     # Never ship ltvm's own build bookkeeping into the VM's /.
-    exclude_bookkeeping = "--exclude=./.ltvm-*"
-    ssh_opt_str = " ".join(shlex.quote(o) for o in SSH_OPTS)
-    tar_cmd = (
-        f"set -o pipefail; "
-        f"tar cf - -C {shlex.quote(str(tree))} "
-        f"{exclude_mod} {exclude_bookkeeping} . "
-        f"| sshpass -p {shlex.quote(ROOT_PASSWORD)} ssh {ssh_opt_str} "
-        f"root@{shlex.quote(vm.ip)} "
-        f"'tar xf - -C / --keep-directory-symlink --no-same-owner'"
+    tar_argv += ["--exclude=./.ltvm-*", "."]
+    ssh_argv = sshpass_ssh_argv(
+        vm.ip,
+        "tar xzf - -C / --keep-directory-symlink --no-same-owner",
+        extra_opts=["-o", "ConnectTimeout=5", *SSH_KEEPALIVE_OPTS],
     )
-    try:
-        r = subprocess.run(
-            ["bash", "-c", tar_cmd], capture_output=True, text=True, timeout=120
+    stall = step_timeout()
+    last = [time.monotonic()]
+    stalled = threading.Event()
+    done = threading.Event()
+    sent = 0
+
+    with (
+        tempfile.TemporaryFile() as local_err,
+        tempfile.TemporaryFile() as ssh_out,
+    ):
+        tar = subprocess.Popen(
+            tar_argv, stdout=subprocess.PIPE, stderr=local_err
         )
-    except subprocess.TimeoutExpired as e:
-        raise RuntimeError(
-            f"tar deploy to {vm.ip} timed out after {e.timeout}s"
+        assert tar.stdout is not None
+        gz = subprocess.Popen(
+            _compressor(),
+            stdin=tar.stdout,
+            stdout=subprocess.PIPE,
+            stderr=local_err,
         )
-    if r.returncode != 0:
-        output = (r.stdout or "") + (r.stderr or "")
-        raise RuntimeError(f"tar deploy failed: {output.strip()}")
+        # gzip holds the pipe now; tar must see SIGPIPE if gzip dies.
+        tar.stdout.close()
+        ssh = subprocess.Popen(
+            ssh_argv,
+            stdin=subprocess.PIPE,
+            stdout=ssh_out,
+            stderr=subprocess.STDOUT,
+        )
+        procs = (tar, gz, ssh)
+
+        def watchdog() -> None:
+            while not done.wait(min(5.0, stall / 4)):
+                if time.monotonic() - last[0] > stall:
+                    stalled.set()
+                    for p in procs:
+                        with contextlib.suppress(OSError):
+                            p.kill()
+                    return
+
+        dog = threading.Thread(target=watchdog, daemon=True)
+        dog.start()
+        assert gz.stdout is not None and ssh.stdin is not None
+        try:
+            while chunk := os.read(gz.stdout.fileno(), _CHUNK):
+                ssh.stdin.write(chunk)
+                sent += len(chunk)
+                last[0] = time.monotonic()
+        except (BrokenPipeError, ValueError):
+            # ssh exited, or the watchdog killed it; its status says which.
+            pass
+        finally:
+            gz.stdout.close()
+            with contextlib.suppress(BrokenPipeError, ValueError):
+                ssh.stdin.close()
+        tar_rc, gz_rc = tar.wait(), gz.wait()
+        local_rc = tar_rc or gz_rc
+        # The guest is still writing out what it has received.
+        last[0] = time.monotonic()
+        ssh_rc = ssh.wait()
+        done.set()
+        dog.join()
+
+        if stalled.is_set():
+            raise RuntimeError(
+                f"tar deploy to {vm.ip} stopped: no progress for {stall}s "
+                f"after {sent // (1 << 20)} MB (compressed) of {tree}; "
+                f"{timeout_hint()}"
+            )
+        local_err.seek(0)
+        local_msg = local_err.read().decode(errors="replace").strip()
+        if ssh_rc != 0:
+            ssh_out.seek(0)
+            output = ssh_out.read().decode(errors="replace").strip()
+            if local_rc != 0 and local_msg:
+                output += f"; {local_msg}"
+            raise RuntimeError(f"tar deploy failed (rc={ssh_rc}): {output}")
+        if local_rc != 0:
+            raise RuntimeError(
+                f"tar deploy failed reading {tree} (rc={local_rc}): {local_msg}"
+            )
 
 
 def deploy_to_vm(
@@ -92,6 +214,38 @@ def deploy_to_vm(
 
     Raises RuntimeError on failure.
     """
+    try:
+        _deploy_to_vm(
+            vm,
+            staging,
+            os_family=os_family,
+            userspace_only=userspace_only,
+            ram_osts=ram_osts,
+            ram_ost_size_gb=ram_ost_size_gb,
+            ram_mdt=ram_mdt,
+            zfs_staging=zfs_staging,
+            fstype=fstype,
+            ost_count=ost_count,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(
+            f"deploy to {vm.name}: {e}; {timeout_hint()}"
+        ) from None
+
+
+def _deploy_to_vm(
+    vm: VMInfo,
+    staging: Path,
+    *,
+    os_family: str,
+    userspace_only: bool,
+    ram_osts: int,
+    ram_ost_size_gb: int,
+    ram_mdt: bool,
+    zfs_staging: Path | None,
+    fstype: str | None,
+    ost_count: int | None,
+) -> None:
     if not staging.is_dir():
         raise RuntimeError(f"Staging directory not found: {staging}")
 
@@ -111,7 +265,7 @@ def deploy_to_vm(
 
     # depmod + ldconfig to pick up new modules and libraries.
     post_deploy_cmd = "ldconfig" if userspace_only else "depmod -a && ldconfig"
-    r = run_ssh(vm.ip, post_deploy_cmd, timeout=60)
+    r = run_ssh(vm.ip, post_deploy_cmd, timeout=step_timeout())
     if r.returncode != 0:
         raise RuntimeError(
             f"post-deploy ({post_deploy_cmd}) failed "
@@ -265,7 +419,7 @@ def verify_deployed_modules(vm: VMInfo, staging: Path) -> None:
         f'"$(modinfo -F srcversion {shlex.quote(n)} 2>/dev/null)"'
         for n in names
     )
-    r = run_ssh(vm.ip, script, timeout=120)
+    r = run_ssh(vm.ip, script, timeout=step_timeout())
     if r.returncode != 0:
         print(
             f"warning: could not verify deployed modules on {vm.name} "
@@ -323,7 +477,7 @@ def retire_stale_zfs(vm: VMInfo) -> None:
         "modprobe -r zfs 2>/dev/null; "
         "cat /sys/module/zfs/version 2>/dev/null || true"
     )
-    r = run_ssh(vm.ip, script, timeout=60)
+    r = run_ssh(vm.ip, script, timeout=step_timeout())
     still = (r.stdout or "").strip().splitlines()
     still = [ln for ln in still if ln and not ln.startswith("retiring")]
     if still:
@@ -392,7 +546,7 @@ def configure_test_disks(
         )
         + f"; rm -f {tmp}"
     )
-    r = run_ssh(ip, script, timeout=30)
+    r = run_ssh(ip, script, timeout=step_timeout())
     if r.returncode != 0:
         raise RuntimeError(
             f"Failed to configure test disks in {testdir}/cfg/local.sh: "
@@ -526,7 +680,7 @@ def configure_ram_osts(
         f"{snippet}\\n"
         f"# --- END RAM OST configuration ---\\n' >> {testdir}/cfg/local.sh"
     )
-    r = run_ssh(ip, script, timeout=120)
+    r = run_ssh(ip, script, timeout=step_timeout())
     if r.returncode != 0:
         raise RuntimeError(
             f"Failed to configure ram OSTs: {r.stderr.strip() or r.stdout.strip()}"
@@ -570,7 +724,7 @@ def prepare_ost_files(ip: str, keep: list[int], *, prune: bool) -> int:
         )
     elif not prune:
         return 0
-    r = run_ssh(ip, script, timeout=60)
+    r = run_ssh(ip, script, timeout=step_timeout())
     if r.returncode != 0:
         raise RuntimeError(
             f"Failed to prepare {OST_FILE_DIR} on {ip}: "
@@ -675,7 +829,7 @@ def configure_ost_count(
             + splice_local_sh_block(cfg, tmp, OST_COUNT_BEGIN, OST_COUNT_END)
             + f"; rm -f {tmp}"
         )
-    r = run_ssh(ip, script, timeout=30)
+    r = run_ssh(ip, script, timeout=step_timeout())
     if r.returncode != 0:
         raise RuntimeError(
             f"Failed to set the OST count in {cfg}: {r.stderr.strip()}"
@@ -704,7 +858,7 @@ def configure_fstype(ip: str, fstype: str, os_family: str = "rhel") -> None:
         f"FSTYPE={fstype}\\n"
         f"# --- END FSTYPE ---\\n' >> {testdir}/cfg/local.sh"
     )
-    r = run_ssh(ip, script, timeout=30)
+    r = run_ssh(ip, script, timeout=step_timeout())
     if r.returncode != 0:
         raise RuntimeError(
             f"Failed to set FSTYPE={fstype} in {testdir}/cfg/local.sh: "
@@ -770,33 +924,54 @@ def premount_cleanup_script(libdir: str) -> str:
     )
 
 
-def lustre_mount_vm(name: str, os_family: str, *, quiet: bool = False) -> int:
+def lustre_mount_vm(
+    name: str,
+    os_family: str,
+    *,
+    quiet: bool = False,
+    timeout: int | None = None,
+    zfs: bool = False,
+    ost_count: int | None = None,
+) -> int:
     """Run llmount.sh inside a VM. Returns exit code.
 
     ``quiet`` sends llmount's own stdout to stderr instead -- for
     ``deploy-lustre --json``, whose stdout belongs to the JSON
-    document.
+    document.  ``timeout`` defaults to llmount_timeout() for the VM's
+    targets.
     """
     try:
         vm = VMInfo.load(name)
     except VMNotFound as e:
         print(f"error: {e}", file=sys.stderr)
         return EXIT_NOT_FOUND
+    if timeout is None:
+        osts = vm.ost_disks if ost_count is None else ost_count
+        timeout = llmount_timeout(vm.mdt_disks + osts, zfs=zfs)
     libdir = lustre_libdir(os_family)
     out = sys.stderr if quiet else sys.stdout
     try:
         print(f"  Cleaning up previous Lustre state on {name}...", file=out)
-        run_ssh(vm.ip, premount_cleanup_script(libdir), timeout=60)
-        print(f"  Running llmount.sh on {name}...", file=out)
+        run_ssh(vm.ip, premount_cleanup_script(libdir), timeout=timeout)
+        print(f"  Running llmount.sh on {name} (up to {timeout}s)...", file=out)
         # Streamed: llmount.sh takes minutes, and captured its progress
         # would only appear once it was over.
         r = run_ssh(
             vm.ip,
             f"cd {libdir}/tests && LUSTRE={libdir} bash llmount.sh",
-            timeout=180,
+            timeout=timeout,
             stream=out,
         )
         return r.returncode
+    except subprocess.TimeoutExpired as e:
+        print(
+            f"error: Lustre mount failed: {e}\n"
+            f"  {name} may be left partly mounted.  Retry with a longer "
+            f"limit: ltvm llmount {name} --timeout <seconds> (or "
+            f"deploy-lustre --mount-timeout)",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
     except Exception as e:
         print(f"error: Lustre mount failed: {e}", file=sys.stderr)
         return EXIT_ERROR

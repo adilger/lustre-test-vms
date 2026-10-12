@@ -17,7 +17,13 @@ from typing import Any
 
 from . import vm_claim
 from .qemu_run import die, is_running, run
-from .vm_net import SSH_OPTS, run_ssh, sshpass_argv, sshpass_ssh_argv
+from .vm_net import (
+    SSH_KEEPALIVE_OPTS,
+    SSH_OPTS,
+    run_ssh,
+    sshpass_argv,
+    sshpass_ssh_argv,
+)
 from .vm_owner import resolve_owner_id
 from .vm_state import (
     DEFAULT_TARGET,
@@ -966,13 +972,15 @@ def _write_cluster_local_sh(
         )
         + "; rc=$?; rm -f $t; exit $rc"
     )
+    from ltvm_pkg.deploy import step_timeout
+
     try:
         r = subprocess.run(
-            sshpass_ssh_argv(node_ip, script),
+            sshpass_ssh_argv(node_ip, script, extra_opts=SSH_KEEPALIVE_OPTS),
             input=local_sh,
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=step_timeout(),
         )
     except subprocess.TimeoutExpired as e:
         # Don't propagate out of the parallel executor; the caller checks
@@ -1013,13 +1021,17 @@ def _write_cluster_hosts(
     node_name: str, node_ip: str, block: str
 ) -> tuple[str, int, str]:
     """Put the cluster's hosts block into one node's /etc/hosts."""
+    from ltvm_pkg.deploy import step_timeout
+
     try:
         r = subprocess.run(
-            sshpass_ssh_argv(node_ip, _GUEST_HOSTS_SCRIPT),
+            sshpass_ssh_argv(
+                node_ip, _GUEST_HOSTS_SCRIPT, extra_opts=SSH_KEEPALIVE_OPTS
+            ),
             input=block,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=step_timeout(),
         )
     except subprocess.TimeoutExpired as e:
         return node_name, 1, f"timed out after {e.timeout}s writing /etc/hosts"
@@ -1467,8 +1479,16 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
 
     if args.mount:
         print("=== Mounting Lustre filesystem ===")
+        timeout = getattr(args, "mount_timeout", None)
+        if timeout is None:
+            from ltvm_pkg.deploy import llmount_timeout
+
+            targets = sum(n.mdt_disks for n in cluster.mds_nodes()) + (
+                ost_count or sum(n.ost_disks for n in cluster.oss_nodes())
+            )
+            timeout = llmount_timeout(targets, zfs=fstype == "zfs")
         _run_llmount(
-            cluster, os_family, server_only=args.server_only, timeout=300
+            cluster, os_family, server_only=args.server_only, timeout=timeout
         )
         print("=== Lustre mounted ===")
 
@@ -1540,7 +1560,9 @@ def _run_llmount(
         die(
             f"{script} timed out after {e.timeout}s on {node.name}\n"
             f"  check `ssh {node.name} dmesg` and "
-            f"`ltvm cluster exec {cluster.name} mds 'lctl dl'`",
+            f"`ltvm cluster exec {cluster.name} mds 'lctl dl'`; if it was "
+            f"still making progress, rerun with a longer limit: "
+            f"`ltvm cluster llmount {cluster.name} --timeout <seconds>`",
             EXIT_TIMEOUT,
         )
     if r.returncode != 0:

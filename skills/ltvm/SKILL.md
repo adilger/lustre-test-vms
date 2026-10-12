@@ -128,6 +128,14 @@ does the same on every node, from the staging an earlier `cluster deploy`
 built. **The tree flag is never positional** -- `--lustre-tree <path>`
 (`cluster deploy` also accepts `--build`).
 
+On a loaded host the deploy's limits are about progress, not totals: the
+copy stops only after 10 minutes without moving a byte, and each guest
+step (depmod, ldconfig, writing cfg/local.sh) may take 10 minutes;
+`LTVM_DEPLOY_TIMEOUT=<seconds>` changes both. llmount.sh under `--mount`
+gets 3 minutes plus 1 per target, 3 per target on ZFS;
+`--mount-timeout <seconds>` overrides it, on `cluster deploy` too, and
+`ltvm llmount <vm> --timeout <seconds>` retries a mount that ran out.
+
 Do not use host `make` or `fullbuild` to produce something for a VM. The
 host kernel is not the VM kernel; `ltvm build lustre <target>
 --lustre-tree <tree>` builds inside the target's build container, which is

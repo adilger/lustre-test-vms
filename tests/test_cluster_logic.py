@@ -599,7 +599,7 @@ class TestClusterBlockKeepsTheStockLocalSh:
         """Run the script _write_cluster_local_sh sends, against ``cfg``."""
         sent: dict[str, str] = {}
 
-        def argv(ip: str, script: str) -> list[str]:
+        def argv(ip: str, script: str, **kw: object) -> list[str]:
             sent["script"] = script
             return ["true"]
 
@@ -721,7 +721,7 @@ class TestGuestHostsBlock:
         """Run the script _write_cluster_hosts sends, against ``hosts``."""
         sent: dict[str, str] = {}
 
-        def argv(ip: str, script: str) -> list[str]:
+        def argv(ip: str, script: str, **kw: object) -> list[str]:
             sent["script"] = script
             return ["true"]
 

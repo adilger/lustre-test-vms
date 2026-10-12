@@ -1729,6 +1729,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--mount", action="store_true", help="Mount filesystem after deploy"
     )
     sp.add_argument(
+        "--mount-timeout",
+        dest="mount_timeout",
+        type=int,
+        default=None,
+        metavar="SECONDS",
+        help="Time limit for llmount.sh under --mount (default: 3 "
+        "minutes plus 1 per target, 3 per target on ZFS)",
+    )
+    sp.add_argument(
         "--userspace-only",
         action="store_true",
         help="Deploy only userspace (tools, tests) -- skip kernel modules and depmod",
@@ -2176,6 +2185,15 @@ def build_parser() -> argparse.ArgumentParser:
     _cdpl_build.completer = complete_directories  # type: ignore[attr-defined]
     cdpl.add_argument(
         "--mount", action="store_true", help="Mount Lustre after deploying"
+    )
+    cdpl.add_argument(
+        "--mount-timeout",
+        dest="mount_timeout",
+        type=int,
+        default=None,
+        metavar="SECONDS",
+        help="Time limit for llmount.sh under --mount (default: 3 "
+        "minutes plus 1 per target, 3 per target on ZFS)",
     )
     cdpl.add_argument(
         "--server-only",
