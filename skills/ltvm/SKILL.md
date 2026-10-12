@@ -444,6 +444,15 @@ and later deploys keep the count until `--ost-count 0`.  Later deploys,
 `--userspace-only` included, keep the `FSTYPE` and the cluster block
 too; `--fstype zfs` with `--userspace-only` pins ZFS on a VM that has it.
 
+ZFS comes from the target's release (`--zfs`), another release
+(`--zfs-version 2.4.3`, any OpenZFS release tag), or your own OpenZFS
+tree with a fix in it (`--zfs-source ~/src/zfs`, a git checkout or an
+unpacked tree), on `build zfs`, `build lustre`, `deploy-lustre` and
+`cluster deploy` alike. A source build is versioned by its META version
+and a digest of its files, so an edit rebuilds and an unchanged tree
+does not; deploy ships the ZFS the Lustre build used. Where the shared
+artifacts are not yours, ZFS builds into `~/.cache/ltvm`.
+
 The rest -- devices and sizes -- are plain assignments and win over the
 environment. A VM deployed by an older ltvm takes the counts and
 `FSTYPE` from the environment only after its next deploy.

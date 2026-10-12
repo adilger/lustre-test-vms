@@ -558,6 +558,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="OpenZFS release to use (default: the target's zfs.version "
         "in targets.yaml).  Implies --zfs.",
     )
+    zfs_arg.add_argument(
+        "--zfs-source",
+        dest="zfs_source",
+        default=None,
+        metavar="DIR",
+        help="Build OpenZFS from this source tree (a git checkout, or an "
+        "unpacked tree) instead of a release, as version "
+        "<META version>-src-<digest of its files>.  Implies --zfs.",
+    )
 
     # Shared --force-compat flag for subcommands that gate on Lustre-tree
     # compatibility (build + deploy paths).  'refuse' status is bypassed
@@ -841,6 +850,15 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="VER",
         help="OpenZFS release to build (default: the target's "
         "zfs.version in targets.yaml)",
+    )
+    bzp.add_argument(
+        "--zfs-source",
+        dest="zfs_source",
+        default=None,
+        metavar="DIR",
+        help="Build OpenZFS from this source tree (a git checkout, or an "
+        "unpacked tree) instead of a release, as version "
+        "<META version>-src-<digest of its files>",
     )
     bzp.add_argument(
         "--jobs", type=int, default=None, help="Parallel jobs (default: nproc)"
@@ -1801,6 +1819,14 @@ def build_parser() -> argparse.ArgumentParser:
         "in targets.yaml).  Implies --zfs.",
     )
     sp.add_argument(
+        "--zfs-source",
+        dest="zfs_source",
+        default=None,
+        metavar="DIR",
+        help="Build OpenZFS from this source tree instead of a release, "
+        "and ship it.  Implies --zfs.",
+    )
+    sp.add_argument(
         "--configure",
         help="Extra configure arguments for the build, as for `build "
         "lustre` (e.g. --configure=--enable-crypto).  The build always "
@@ -2245,6 +2271,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="OpenZFS release to use (implies --zfs)",
     )
     _cdpl_zfsv.completer = complete_zfs_versions  # type: ignore[attr-defined]
+    cdpl.add_argument(
+        "--zfs-source",
+        dest="zfs_source",
+        default=None,
+        metavar="DIR",
+        help="Build OpenZFS from this source tree instead of a release, "
+        "and ship it (implies --zfs)",
+    )
     cdpl.add_argument(
         "--fstype",
         choices=["ldiskfs", "zfs"],

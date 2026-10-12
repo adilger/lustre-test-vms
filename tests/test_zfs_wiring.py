@@ -806,3 +806,49 @@ class TestZfsMmp:
 
     def test_ldiskfs_leaves_it(self, tmp_path: Path) -> None:
         assert not self._deploy(tmp_path)
+
+
+class TestZfsSourceWiring:
+    """--zfs-source reaches the ZFS build from every command that has it."""
+
+    def test_resolve_zfs_passes_the_tree(self, tmp_path: Path) -> None:
+        from ltvm_pkg.cli.build import _resolve_zfs
+        from ltvm_pkg.target_config import LustreMode
+
+        tc = MagicMock()
+        tc.lustre_mode = LustreMode.SERVER_LDISKFS
+        args = SimpleNamespace(
+            zfs=False, zfs_version=None, zfs_source=str(tmp_path), force=False
+        )
+        with patch(
+            "ltvm_pkg.zfs_build.ensure_zfs",
+            return_value=(tmp_path / "src", tmp_path / "staging", "v-src-x"),
+        ) as ensure:
+            src, ver, err = _resolve_zfs(tc, args, None, True)
+        assert err is None and ver == "v-src-x"
+        assert ensure.call_args.kwargs["source"] == tmp_path
+
+    def test_every_command_takes_it(self) -> None:
+        import importlib.machinery
+        import importlib.util
+
+        loader = importlib.machinery.SourceFileLoader("ltvm_main", "ltvm")
+        spec = importlib.util.spec_from_loader("ltvm_main", loader)
+        assert spec is not None
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+        parser = mod.build_parser()
+        for argv in (
+            ["build", "zfs", "rocky9"],
+            ["build", "lustre", "rocky9"],
+            ["deploy-lustre", "co1-x"],
+            ["cluster", "deploy", "co1"],
+        ):
+            ns = parser.parse_args([*argv, "--zfs-source", "/src/zfs"])
+            assert ns.zfs_source == "/src/zfs", argv
+
+    def test_deploy_builds_with_it(self) -> None:
+        src = Path("ltvm_pkg/cli/deploy.py").read_text()
+        assert 'build_cmd += ["--zfs-source", zfs_source]' in src
+        src = Path("ltvm_pkg/vm_cluster.py").read_text()
+        assert 'build_cmd += ["--zfs-source", zfs_source]' in src

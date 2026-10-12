@@ -972,3 +972,130 @@ class TestTarballCacheFallback:
             shared.chmod(0o755)
         uo.assert_not_called()
         assert got == shared / "zfs-2.4.0.tar.gz"
+
+
+# ── --zfs-source: a build of the user's own OpenZFS tree ──
+
+
+def _zfs_tree(root: Path, *, git: bool = True) -> Path:
+    import subprocess as sp
+
+    root.mkdir(parents=True)
+    (root / "META").write_text("Meta:          1\nVersion:       2.4.99\n")
+    (root / "module").mkdir()
+    (root / "module" / "arc.c").write_text("void arc_buf_destroy(void);\n")
+    (root / "autogen.sh").write_text("#!/bin/sh\n")
+    (root / "autogen.sh").chmod(0o755)
+    if git:
+        (root / ".gitignore").write_text("*.o\n")
+        sp.run(["git", "init", "-q", str(root)], check=True)
+    return root
+
+
+class TestZfsSource:
+    """A build of an OpenZFS tree with a fix in it, for a ticket that
+    needs one no release carries (LU-4009 wanted arc_buf_destroy
+    exported, which 2.4.0 does not)."""
+
+    def test_label_names_version_and_content(self, tmp_path: Path) -> None:
+        tree = _zfs_tree(tmp_path / "zfs")
+        label = zb.source_label(tree)
+        assert label.startswith("2.4.99-src-")
+        assert len(label) == len("2.4.99-src-") + 12
+        assert zb.source_label(tree) == label
+        (tree / "module" / "arc.c").write_text("/* fixed */\n")
+        assert zb.source_label(tree) != label
+
+    def test_build_output_in_the_tree_is_not_source(
+        self, tmp_path: Path
+    ) -> None:
+        tree = _zfs_tree(tmp_path / "zfs")
+        label = zb.source_label(tree)
+        (tree / "module" / "arc.o").write_bytes(b"\x7fELF")
+        assert zb.source_label(tree) == label
+        assert "module/arc.o" not in zb.source_files(tree)
+
+    def test_a_plain_directory_works_too(self, tmp_path: Path) -> None:
+        tree = _zfs_tree(tmp_path / "zfs", git=False)
+        assert zb.source_files(tree) == ["META", "autogen.sh", "module/arc.c"]
+
+    def test_not_a_zfs_tree(self, tmp_path: Path) -> None:
+        (tmp_path / "x").mkdir()
+        with pytest.raises(zb.ZfsBuildError, match="not an OpenZFS"):
+            zb.source_label(tmp_path / "x")
+
+    def test_rebuild_hint(self) -> None:
+        assert zb.rebuild_flag("2.4.0") == "--zfs-version 2.4.0"
+        assert "--zfs-source" in zb.rebuild_flag("2.4.99-src-0123456789ab")
+
+    def test_build_copies_the_tree_and_runs_autogen(
+        self, tmp_targets: Path, tmp_path: Path
+    ) -> None:
+        import subprocess as sp
+
+        real_run = sp.run
+        tree = _zfs_tree(tmp_path / "zfs")
+        label = zb.source_label(tree)
+        tc = _zfs_tc(tmp_targets)
+        _seed_kernel(tc)
+
+        def run(cmd, *a, **k):
+            if cmd[0] == "git":
+                return real_run(cmd, *a, **k)
+            return SimpleNamespace(returncode=0)
+
+        with (
+            patch.object(zb.subprocess, "run", side_effect=run),
+            patch.object(zb, "fetch_tarball") as fetch,
+            patch.object(
+                zb,
+                "run_podman_with_cleanup",
+                side_effect=_fake_podman_into_mounts,
+            ) as pm,
+        ):
+            out = zb.build_zfs(tc, source=tree)
+        fetch.assert_not_called()
+        assert out == zb.zfs_dir(tc, None, label)
+        src = out / "src"
+        assert (src / "module" / "arc.c").read_text().startswith("void")
+        assert not (src / ".git").exists()
+        cmd = pm.call_args.args[0]
+        assert cmd[-2:] == [
+            "-c",
+            "cd /zfs-src && ./autogen.sh && exec bash /zfs-build-inner.sh",
+        ]
+        meta = json.loads((out / "meta.json").read_text())
+        assert meta["zfs_version"] == label
+        assert meta["zfs_source"] == str(tree.resolve())
+        # What deploy checks before shipping it.
+        assert zb._incomplete(out, label) is None
+        assert zb.find_zfs_staging(tc, None, label, recorded=str(out)) == (
+            out / "staging"
+        )
+
+    def test_unchanged_tree_is_not_rebuilt(
+        self, tmp_targets: Path, tmp_path: Path
+    ) -> None:
+        import subprocess as sp
+
+        real_run = sp.run
+        tree = _zfs_tree(tmp_path / "zfs")
+        tc = _zfs_tc(tmp_targets)
+        _seed_kernel(tc)
+
+        def run(cmd, *a, **k):
+            if cmd[0] == "git":
+                return real_run(cmd, *a, **k)
+            return SimpleNamespace(returncode=0)
+
+        with (
+            patch.object(zb.subprocess, "run", side_effect=run),
+            patch.object(
+                zb,
+                "run_podman_with_cleanup",
+                side_effect=_fake_podman_into_mounts,
+            ) as pm,
+        ):
+            zb.ensure_zfs(tc, source=tree)
+            zb.ensure_zfs(tc, source=tree)
+        assert pm.call_count == 1

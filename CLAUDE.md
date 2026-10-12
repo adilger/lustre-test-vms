@@ -450,6 +450,21 @@ unpinned version takes its sum from the release's
 rocky8 pins 2.3.4 rather than 2.4.0: 2.4 dropped support
 for the 4.18 EL8 kernel.
 
+`--zfs-source DIR` (on `build zfs`, `build lustre`, `build
+all`, `deploy-lustre`, `cluster deploy`; implies `--zfs`)
+builds an OpenZFS tree of the user's instead of a release, for
+a fix no release has yet.  Its version is
+`zfs_build.source_label()`: the tree's META version and a
+digest of its files (in a git checkout, what git would commit,
+so build output left in the tree does not count), e.g.
+`2.4.99-src-1a2b3c4d5e6f`.  The files are copied into the
+artifact's `src/`, `./autogen.sh` runs first when there is no
+`configure` (outside zfs-build-inner.sh, whose bytes are in
+every ZFS artifact's input hash), and meta.json records
+`zfs_source`.  Everything after that -- the Lustre build's
+`zfs_dir`, deploy's `find_zfs_staging` -- is the release path
+unchanged.
+
 ### Artifact
 
 `kernels/<kver>/zfs/<version>/` holds `src/` (configured

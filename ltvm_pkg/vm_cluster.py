@@ -1308,7 +1308,7 @@ def _staged_zfs(
     from .lustre_build import read_staging_meta
     from .lustre_build import staging_path as _staging_path
     from .target_config import TargetConfig
-    from .zfs_build import ZfsBuildError, find_zfs_staging
+    from .zfs_build import ZfsBuildError, find_zfs_staging, rebuild_flag
 
     tc = TargetConfig(target, arch=arch, variant=variant)
     meta = read_staging_meta(
@@ -1337,7 +1337,7 @@ def _staged_zfs(
         die(
             f"{e}\n  Rebuild Lustre with it: ltvm build lustre {target} "
             f"--lustre-tree {build} --kernel {kernel_name} "
-            f"--zfs-version {staged_zfs} --force"
+            f"{rebuild_flag(staged_zfs)} --force"
         )
     print(f"    ZFS: {staged_zfs} ({target})")
     return zfs_staging
@@ -1423,7 +1423,16 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
     # last deploy ran it on.
     fstype = getattr(args, "fstype", None)
     zfs_version_arg = getattr(args, "zfs_version", None)
-    ship_zfs = bool(getattr(args, "zfs", False)) or bool(zfs_version_arg)
+    zfs_source = getattr(args, "zfs_source", None)
+    if zfs_source and zfs_version_arg:
+        die("pass --zfs-version or --zfs-source, not both")
+    if zfs_source:
+        zfs_source = str(Path(zfs_source).expanduser().resolve())
+    ship_zfs = (
+        bool(getattr(args, "zfs", False))
+        or bool(zfs_version_arg)
+        or bool(zfs_source)
+    )
     userspace_only = bool(getattr(args, "userspace_only", False))
     if ship_zfs and userspace_only:
         die(
@@ -1494,7 +1503,9 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
             build_cmd += [f"--configure={configure}"]
         if want_zfs:
             build_cmd += ["--zfs"]
-            if zfs_version_arg:
+            if zfs_source:
+                build_cmd += ["--zfs-source", zfs_source]
+            elif zfs_version_arg:
                 build_cmd += ["--zfs-version", zfs_version_arg]
         sudo_user = os.environ.get("SUDO_USER")
         if sudo_user:

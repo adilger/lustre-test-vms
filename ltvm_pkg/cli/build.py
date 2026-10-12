@@ -648,8 +648,11 @@ def _resolve_zfs(
     None)`` means "ZFS was not requested", which is the default: --zfs
     (or --zfs-version, which implies it) is what turns it on.
     """
-    want = bool(getattr(args, "zfs", False)) or bool(
-        getattr(args, "zfs_version", None)
+    source = getattr(args, "zfs_source", None)
+    want = (
+        bool(getattr(args, "zfs", False))
+        or bool(getattr(args, "zfs_version", None))
+        or bool(source)
     )
     if not want:
         return None, None, None
@@ -674,6 +677,7 @@ def _resolve_zfs(
                 getattr(args, "force", False) if force is None else force
             ),
             jobs=getattr(args, "jobs", None),
+            source=Path(source) if source else None,
         )
     except (ZfsBuildError, FileNotFoundError, ValueError) as e:
         return None, None, f"ZFS build failed: {e}"
@@ -701,12 +705,21 @@ def cmd_build_zfs(args: argparse.Namespace) -> int:
         ZfsBuildError,
         build_zfs,
         resolve_zfs_version,
+        source_label,
     )
 
     # No client-target gate here.  Building ZFS against a kernel is not
     # server-specific -- it is `--with-zfs` on a *Lustre* build that
     # needs --enable-server, and that gate lives in _resolve_zfs.
-    version = resolve_zfs_version(tc, getattr(args, "zfs_version", None))
+    source = getattr(args, "zfs_source", None)
+    try:
+        version = (
+            source_label(Path(source))
+            if source
+            else resolve_zfs_version(tc, getattr(args, "zfs_version", None))
+        )
+    except ZfsBuildError as e:
+        return _error(str(e), use_json)
     kernel = getattr(args, "kernel", None)
 
     if not use_json:
@@ -724,6 +737,7 @@ def cmd_build_zfs(args: argparse.Namespace) -> int:
             version=version,
             force=getattr(args, "force", False),
             jobs=getattr(args, "jobs", None),
+            source=Path(source) if source else None,
         )
     except (ZfsBuildError, FileNotFoundError, ValueError) as e:
         return _error(f"ZFS build failed: {e}", use_json)

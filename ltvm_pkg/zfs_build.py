@@ -231,6 +231,96 @@ def _shared_is_ours(shared_dir: Path, kdir: Path) -> bool:
     return True
 
 
+SOURCE_TAG = "-src-"
+
+
+def source_files(src: Path) -> list[str]:
+    """The files of an OpenZFS source tree, relative to it.
+
+    In a git checkout, what git would commit (tracked, and untracked
+    but not ignored), so build output left in the tree is not taken for
+    source; otherwise everything but ``.git``.
+    """
+    src = Path(src)
+    if (src / ".git").exists():
+        r = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(src),
+                "ls-files",
+                "-z",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+            ],
+            capture_output=True,
+        )
+        if r.returncode == 0:
+            names = r.stdout.decode(errors="surrogateescape").split("\0")
+            return sorted(n for n in names if n and os.path.lexists(src / n))
+    out = []
+    for dirpath, dirnames, filenames in os.walk(src):
+        dirnames[:] = [d for d in dirnames if d != ".git"]
+        rel = Path(dirpath).relative_to(src)
+        out += [str(rel / f) if str(rel) != "." else f for f in filenames]
+    return sorted(out)
+
+
+def source_label(src: Path) -> str:
+    """The version an OpenZFS source tree builds under.
+
+    Its META version and a digest of its files, so the same tree is
+    built once and any edit builds anew: ``2.4.99-src-1a2b3c4d5e6f``.
+    """
+    src = Path(src).expanduser().resolve()
+    if not (src / "META").is_file() or not (src / "module").is_dir():
+        raise ZfsBuildError(
+            f"--zfs-source {src} is not an OpenZFS source tree (no META "
+            f"or module/)"
+        )
+    base = "custom"
+    for line in (src / "META").read_text(errors="replace").splitlines():
+        key, _, val = line.partition(":")
+        if key.strip() == "Version" and val.strip():
+            base = val.strip()
+            break
+    h = hashlib.sha256()
+    for rel in source_files(src):
+        p = src / rel
+        h.update(rel.encode(errors="surrogateescape") + b"\0")
+        if p.is_symlink():
+            h.update(b"L" + os.readlink(p).encode(errors="surrogateescape"))
+        elif p.is_file():
+            h.update(b"F%o\0" % (p.stat().st_mode & 0o111))
+            with p.open("rb") as f:
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    h.update(chunk)
+        h.update(b"\0")
+    return f"{base}{SOURCE_TAG}{h.hexdigest()[:12]}"
+
+
+def _copy_source(src: Path, dest: Path) -> None:
+    """Copy an OpenZFS source tree's files into a fresh ``dest``."""
+    if dest.exists():
+        shutil.rmtree(dest)
+    dest.mkdir(parents=True)
+    for rel in source_files(src):
+        s, d = src / rel, dest / rel
+        d.parent.mkdir(parents=True, exist_ok=True)
+        if s.is_symlink():
+            os.symlink(os.readlink(s), d)
+        elif s.is_file():
+            shutil.copy2(s, d)
+
+
+def rebuild_flag(version: str) -> str:
+    """The build flag that makes ``version`` again, for hints."""
+    if SOURCE_TAG in version:
+        return "--zfs-source <the OpenZFS tree it was built from>"
+    return f"--zfs-version {version}"
+
+
 def resolve_zfs_version(tc: TargetConfig, override: str | None = None) -> str:
     """Pick the ZFS version: CLI override, then targets.yaml, then default."""
     if override:
@@ -548,14 +638,18 @@ def build_zfs(
     version: str | None = None,
     force: bool = False,
     jobs: int | None = None,
+    source: Path | None = None,
 ) -> Path:
     """Build ZFS against tc's kernel build-tree.
 
     Returns the artifact directory (holding ``src/`` and ``staging/``).
     Idempotent: skips the work when meta.json's input_hash matches and
     both consumers' outputs are present.
+
+    ``source`` builds an OpenZFS tree of the user's (a git checkout with
+    a fix, say) instead of a release, under source_label()'s version.
     """
-    ver = resolve_zfs_version(tc, version)
+    ver = source_label(source) if source else resolve_zfs_version(tc, version)
 
     if tc.os_family not in _SUPPORTED_OS_FAMILIES:
         raise ZfsBuildError(
@@ -627,7 +721,9 @@ def build_zfs(
             )
             return fresh
 
-    tarball = fetch_tarball(ver)
+    tarball = (
+        Path(source).expanduser().resolve() if source else fetch_tarball(ver)
+    )
     if not ours:
         print(
             f"  ZFS: {kdir} belongs to another user; building into {user_dir}",
@@ -710,7 +806,16 @@ def _locked_build(
         ):
             return out_dir
         _prepare_out_dir(tarball, ver, out_dir)
-        _run_build(tc, kernel, kver, ver, expected_hash, out_dir, jobs)
+        _run_build(
+            tc,
+            kernel,
+            kver,
+            ver,
+            expected_hash,
+            out_dir,
+            jobs,
+            source=str(tarball) if tarball.is_dir() else "",
+        )
     return out_dir
 
 
@@ -722,6 +827,7 @@ def _run_build(
     expected_hash: str,
     out_dir: Path,
     jobs: int | None,
+    source: str = "",
 ) -> None:
     """Run the container build into a prepared ``out_dir``; write meta."""
     src_dir = out_dir / "src"
@@ -755,8 +861,17 @@ def _run_build(
         "--entrypoint",
         "bash",
         tc.container_tag,
-        "/zfs-build-inner.sh",
     ]
+    if (src_dir / "configure").is_file():
+        cmd.append("/zfs-build-inner.sh")
+    else:
+        # A git checkout, not a release: generate configure first.
+        # Outside zfs-build-inner.sh, whose bytes are in every ZFS
+        # artifact's input hash.
+        cmd += [
+            "-c",
+            "cd /zfs-src && ./autogen.sh && exec bash /zfs-build-inner.sh",
+        ]
     r = run_podman_with_cleanup(cmd)
     if r.returncode != 0:
         why = build_timeout.explain(timeout, time.monotonic() - t0)
@@ -777,6 +892,7 @@ def _run_build(
         "kernel": kver,
         "zfs_version": ver,
         "input_hash": expected_hash,
+        **({"zfs_source": source} if source else {}),
         "build_date": datetime.now(timezone.utc).isoformat(),
         "build_seconds": elapsed,
         "modules": kmods,
@@ -813,7 +929,11 @@ def _no_more_writable_than(root: Path, like: Path) -> None:
 
 
 def _prepare_out_dir(tarball: Path, version: str, out_dir: Path) -> None:
-    """Unpack a fresh source tree and empty staging under ``out_dir``."""
+    """Unpack a fresh source tree and empty staging under ``out_dir``.
+
+    ``tarball`` is a release tarball, or for a --zfs-source build the
+    user's source directory, whose files are copied.
+    """
     staging_dir = out_dir / "staging"
     # Drop any stale meta before the build: if the build dies partway,
     # the next run must see a stale artifact rather than a meta.json
@@ -822,7 +942,10 @@ def _prepare_out_dir(tarball: Path, version: str, out_dir: Path) -> None:
     # Unpack fresh: the tree carries a configure cache keyed to the
     # kernel it was configured against, and reaching here at all means
     # something in the input hash moved.
-    _unpack(tarball, version, out_dir / "src", expected_sha256(version))
+    if tarball.is_dir():
+        _copy_source(tarball, out_dir / "src")
+    else:
+        _unpack(tarball, version, out_dir / "src", expected_sha256(version))
     if staging_dir.exists():
         shutil.rmtree(staging_dir)
     staging_dir.mkdir(parents=True, exist_ok=True)
@@ -835,12 +958,15 @@ def ensure_zfs(
     version: str | None = None,
     force: bool = False,
     jobs: int | None = None,
+    source: Path | None = None,
 ) -> tuple[Path, Path, str]:
     """Build ZFS if stale; return (src_dir, staging_dir, version)."""
-    ver = resolve_zfs_version(tc, version)
+    ver = source_label(source) if source else resolve_zfs_version(tc, version)
     out_dir = None if force else fresh_zfs_dir(tc, kernel, ver)
     if out_dir is None:
-        out_dir = build_zfs(tc, kernel, version=ver, force=force, jobs=jobs)
+        out_dir = build_zfs(
+            tc, kernel, version=ver, force=force, jobs=jobs, source=source
+        )
     return out_dir / "src", out_dir / "staging", ver
 
 

@@ -293,13 +293,27 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     # one case for `--zfs --fstype ldiskfs` is staging ZFS on a VM you
     # want to keep running ldiskfs for now.
     fstype = getattr(args, "fstype", None)
-    ship_zfs = bool(getattr(args, "zfs", False)) or bool(
-        getattr(args, "zfs_version", None)
+    zfs_source = getattr(args, "zfs_source", None)
+    if zfs_source and getattr(args, "zfs_version", None):
+        return _error("pass --zfs-version or --zfs-source, not both", use_json)
+    ship_zfs = (
+        bool(getattr(args, "zfs", False))
+        or bool(getattr(args, "zfs_version", None))
+        or bool(zfs_source)
     )
     want_zfs = ship_zfs or (fstype == "zfs" and not userspace_only)
     if want_zfs and fstype is None:
         fstype = "zfs"
     zfs_version_arg = getattr(args, "zfs_version", None)
+    if zfs_source:
+        from ltvm_pkg.zfs_build import ZfsBuildError, source_label
+
+        zfs_source = str(Path(zfs_source).expanduser().resolve())
+        try:
+            # The version a build from it records, to judge the staging.
+            zfs_version_arg = source_label(Path(zfs_source))
+        except ZfsBuildError as e:
+            return _error(str(e), use_json)
 
     # --userspace-only ships no modules, so it cannot install ZFS.  It
     # can still pin --fstype zfs on a VM that has ZFS already, which
@@ -562,7 +576,9 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                 build_cmd += [f"--configure={configure}"]
             if want_zfs:
                 build_cmd += ["--zfs"]
-                if zfs_version_arg:
+                if zfs_source:
+                    build_cmd += ["--zfs-source", zfs_source]
+                elif zfs_version_arg:
                     build_cmd += ["--zfs-version", zfs_version_arg]
             sudo_user = os.environ.get("SUDO_USER")
             if sudo_user:
@@ -617,7 +633,11 @@ def cmd_deploy(args: argparse.Namespace) -> int:
             else None
         )
         if staged_zfs_version and not userspace_only:
-            from ltvm_pkg.zfs_build import ZfsBuildError, find_zfs_staging
+            from ltvm_pkg.zfs_build import (
+                ZfsBuildError,
+                find_zfs_staging,
+                rebuild_flag,
+            )
 
             try:
                 zfs_staging = find_zfs_staging(
@@ -636,7 +656,7 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                     use_json,
                     hint=f"Rebuild Lustre with it: ltvm build lustre "
                     f"{target} --lustre-tree {build_path} --kernel "
-                    f"{deploy_kernel} --zfs-version {staged_zfs_version} "
+                    f"{deploy_kernel} {rebuild_flag(staged_zfs_version)} "
                     f"--force",
                 )
             if not use_json:
