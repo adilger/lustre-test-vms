@@ -156,6 +156,17 @@ def _os_family_for_vm(vm: VMInfo, context: str = "") -> str:
         return "rhel"
 
 
+# _seed_kdump_boot's ssh steps: the probe, an initramfs rebuild when the
+# image lacks one, and the kdump restart.  cluster create budgets a
+# node's create on their sum.
+KDUMP_PROBE_TIMEOUT = 30
+KDUMP_REGEN_TIMEOUT = 600
+KDUMP_RELOAD_TIMEOUT = 300
+KDUMP_SEED_BUDGET = (
+    KDUMP_PROBE_TIMEOUT + KDUMP_REGEN_TIMEOUT + KDUMP_RELOAD_TIMEOUT
+)
+
+
 def _seed_kdump_boot(vm: VMInfo) -> None:
     """Ensure /boot has vmlinuz + kdump initramfs for kexec-on-panic.
 
@@ -199,7 +210,7 @@ def _seed_kdump_boot(vm: VMInfo) -> None:
         probe = run_ssh(
             vm.ip,
             f"test -f /boot/vmlinuz-{kver} && test -f {initrd_path}",
-            timeout=30,
+            timeout=KDUMP_PROBE_TIMEOUT,
         )
     except Exception as e:  # noqa: BLE001 - best-effort step
         print(
@@ -245,7 +256,7 @@ def _seed_kdump_boot(vm: VMInfo) -> None:
         # with no initramfs and `vm crash-collect` later reported "no
         # vmcore found" with nothing pointing at the cause.
         try:
-            regen = run_ssh(vm.ip, regen_cmd, timeout=600)
+            regen = run_ssh(vm.ip, regen_cmd, timeout=KDUMP_REGEN_TIMEOUT)
         except Exception as e:  # noqa: BLE001 - best-effort step
             print(
                 f"warning: initramfs regen on '{vm.name}' did not "
@@ -268,7 +279,7 @@ def _seed_kdump_boot(vm: VMInfo) -> None:
     # which aborted `ltvm create` outright.  Allow more time and treat a
     # slow or failed reload as non-fatal.
     try:
-        run_ssh(vm.ip, reload_cmd, timeout=300)
+        run_ssh(vm.ip, reload_cmd, timeout=KDUMP_RELOAD_TIMEOUT)
     except Exception as e:  # noqa: BLE001 - best-effort step
         print(f"warning: kdump reload on '{vm.name}' did not complete: {e}")
 
@@ -1811,6 +1822,12 @@ def cmd_list(args: argparse.Namespace) -> None:
 
     host_cpus = os.cpu_count() or 1
     host_mem_mb = _host_total_mem_mb()
+    # What create and start admit against, which in a container is its
+    # cgroup's memory.max rather than the host's RAM.
+    from .qemu_run import guest_memory_budget
+
+    budget = guest_memory_budget()
+    mem_limit_mb = budget.limit_mb if budget else host_mem_mb
 
     if args.json:
         print(
@@ -1825,7 +1842,15 @@ def cmd_list(args: argparse.Namespace) -> None:
                         "vcpus_available": host_cpus,
                         "mem_used_mb": total_mem,
                         "mem_rss_mb": total_rss,
-                        "mem_available_mb": host_mem_mb,
+                        # The running VMs may commit this much in all;
+                        # mem_free_mb of it is left for new ones.
+                        "mem_available_mb": mem_limit_mb,
+                        "mem_free_mb": max(0, mem_limit_mb - total_mem),
+                        "mem_per_vm_max_mb": (
+                            budget.budget_mb if budget else host_mem_mb
+                        ),
+                        "mem_budget": budget.describe() if budget else "",
+                        "mem_host_mb": host_mem_mb,
                     },
                 }
             )
@@ -1869,8 +1894,9 @@ def cmd_list(args: argparse.Namespace) -> None:
         print(
             f"{running_count} running, {stopped_count} stopped | "
             f"vcpus: {total_vcpus}/{host_cpus} | "
-            f"mem: {total_mem}M/{host_mem_mb}M committed"
+            f"mem: {total_mem}M/{mem_limit_mb}M committed"
             f"{f' ({total_rss}M resident)' if total_rss else ''}"
+            f"{f' | budget: {budget.describe()}' if budget else ''}"
         )
 
 

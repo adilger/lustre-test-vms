@@ -163,43 +163,55 @@ def _memory_overcommit() -> float:
     return 1.0
 
 
-def _memory_shortfall(vm: VMInfo) -> _Shortfall | None:
-    """Why the host can't accommodate ``vm``'s RAM now, or None if it can.
+@dataclass(frozen=True)
+class MemoryBudget:
+    """What the VMs on this host may commit, as create and start count it."""
 
-    /proc/meminfo's MemAvailable alone is not a safe signal: QEMU
-    allocates guest RAM lazily, so a 4 GiB VM that just booted may
-    only show as using ~500 MiB.  A naive "free memory" check would
-    happily green-light a second 4 GiB VM and then OOM the host
-    minutes later when the first VM faulted in the rest of its pages.
+    total_mb: int  # MemTotal, or the cgroup's memory.max when smaller
+    source: str  # which of the two
+    reserve_mb: int
+    overcommit: float
 
-    Instead we sum the *committed* memory of all running VMs (each
-    VM's ``-m`` value) and add the new VM, comparing against the
-    host's physical RAM minus a reserve.  Conservative but predictable.
+    @property
+    def budget_mb(self) -> int:
+        """The most one VM may have."""
+        return self.total_mb - self.reserve_mb
 
-    A host that merges identical guest pages (KSM) holds far less than
-    that.  ``[memory] overcommit`` in /etc/ltvm.conf lets the running
-    VMs together commit that multiple of the budget; a single VM must
-    still fit the budget itself.
-    """
-    needed_mb = vm.mem
-    host_total_mb = _read_meminfo_mb("MemTotal")
-    if host_total_mb <= 0:
-        # Can't read /proc/meminfo (non-Linux test host?); skip the
-        # check rather than block legitimate launches.
+    @property
+    def limit_mb(self) -> int:
+        """The most the running VMs may have together."""
+        return int(self.budget_mb * self.overcommit)
+
+    def describe(self) -> str:
+        return (
+            f"{self.source} {self.total_mb} MiB - {self.reserve_mb} MiB reserve"
+        )
+
+
+def memory_budget(cgroup: str | None = None) -> MemoryBudget | None:
+    """The budget for guests in ``cgroup`` (None: this process's), or
+    None when the host's memory cannot be read."""
+    total_mb = _read_meminfo_mb("MemTotal")
+    if total_mb <= 0:
         return None
-    total_source = "MemTotal"
-    cgroup_mb = _cgroup_memory_limit_mb(relative=_guest_cgroup(vm))
-    if 0 < cgroup_mb < host_total_mb:
-        host_total_mb, total_source = cgroup_mb, "cgroup memory.max"
+    source = "MemTotal"
+    cgroup_mb = _cgroup_memory_limit_mb(relative=cgroup)
+    if 0 < cgroup_mb < total_mb:
+        total_mb, source = cgroup_mb, "cgroup memory.max"
+    reserve_mb = max(_HOST_MEM_RESERVE_FLOOR_MB, total_mb // 10)
+    return MemoryBudget(total_mb, source, reserve_mb, _memory_overcommit())
 
-    reserve_mb = max(_HOST_MEM_RESERVE_FLOOR_MB, host_total_mb // 10)
-    budget_mb = host_total_mb - reserve_mb
-    overcommit = _memory_overcommit()
-    limit_mb = int(budget_mb * overcommit)
 
+def guest_memory_budget() -> MemoryBudget | None:
+    """The budget a plain VM started now from this process is held to."""
+    return memory_budget(_guest_cgroup(VMInfo(name="ltvm-budget", ip="")))
+
+
+def running_vm_memory(skip: str = "") -> list[tuple[str, int]]:
+    """(name, MiB) of every running VM but ``skip``."""
     running: list[tuple[str, int]] = []
     for name in VMInfo.all_names():
-        if name == vm.name:
+        if name == skip:
             continue
         try:
             other = VMInfo.load(name)
@@ -223,7 +235,38 @@ def _memory_shortfall(vm: VMInfo) -> _Shortfall | None:
             continue
         if is_running(other):
             running.append((other.name, other.mem))
+    return running
 
+
+def _memory_shortfall(vm: VMInfo) -> _Shortfall | None:
+    """Why the host can't accommodate ``vm``'s RAM now, or None if it can.
+
+    /proc/meminfo's MemAvailable alone is not a safe signal: QEMU
+    allocates guest RAM lazily, so a 4 GiB VM that just booted may
+    only show as using ~500 MiB.  A naive "free memory" check would
+    happily green-light a second 4 GiB VM and then OOM the host
+    minutes later when the first VM faulted in the rest of its pages.
+
+    Instead we sum the *committed* memory of all running VMs (each
+    VM's ``-m`` value) and add the new VM, comparing against the
+    host's physical RAM minus a reserve.  Conservative but predictable.
+
+    A host that merges identical guest pages (KSM) holds far less than
+    that.  ``[memory] overcommit`` in /etc/ltvm.conf lets the running
+    VMs together commit that multiple of the budget; a single VM must
+    still fit the budget itself.
+    """
+    needed_mb = vm.mem
+    budget = memory_budget(_guest_cgroup(vm))
+    if budget is None:
+        # Can't read /proc/meminfo (non-Linux test host?); skip the
+        # check rather than block legitimate launches.
+        return None
+    host_total_mb, total_source = budget.total_mb, budget.source
+    reserve_mb, budget_mb = budget.reserve_mb, budget.budget_mb
+    overcommit, limit_mb = budget.overcommit, budget.limit_mb
+
+    running = running_vm_memory(skip=vm.name)
     committed_mb = sum(m for _, m in running)
     if needed_mb <= budget_mb and committed_mb + needed_mb <= limit_mb:
         return None

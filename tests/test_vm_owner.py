@@ -242,7 +242,7 @@ class TestClusterOwnerPropagation:
         with (
             patch("ltvm_pkg.vm_cluster._sudo_prefix", return_value=[]),
             patch(
-                "ltvm_pkg.vm_cluster.subprocess.run", return_value=completed
+                "ltvm_pkg.vm_cluster._run_prefixed", return_value=completed
             ) as run,
         ):
             vm_cluster._create_one_node(

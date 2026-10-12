@@ -974,6 +974,27 @@ def ssh_client_config_error(host: str) -> str | None:
     return _one_line(r.stderr or "") or f"`ssh -G` exited {r.returncode}"
 
 
+# A guest whose console is still printing at the deadline is booting
+# slowly, not stuck: wait on, up to this many times the budget.
+SSH_WAIT_STRETCH = 5
+# How recently the console must have grown to count as still booting.
+_CONSOLE_QUIET_SECONDS = 60
+
+
+def ssh_wait_cap(max_wait: int) -> int:
+    """The longest wait_for_ssh waits, given a VM whose console moves."""
+    return max_wait * SSH_WAIT_STRETCH
+
+
+def _console_size(vm: VMInfo | None) -> int:
+    if vm is None:
+        return -1
+    try:
+        return vm.log_path.stat().st_size
+    except OSError:
+        return -1
+
+
 def wait_for_ssh(
     ip: str, max_wait: int = 30, *, vm: VMInfo | None = None
 ) -> None:
@@ -985,6 +1006,11 @@ def wait_for_ssh(
     loop could actually wait up to 6*max_wait seconds while the error
     message claimed it gave up after `max_wait`.
 
+    Given *vm*, a guest whose serial console grew in the last minute is
+    still booting, so the wait goes on past `max_wait`, up to
+    ssh_wait_cap(): on a loaded host a boot runs past two minutes and is
+    fine, and failing it then made cluster create roll back every node.
+
     A FileNotFoundError here means sshpass/ssh aren't on PATH, which is
     a host-setup bug we want to surface immediately rather than masquerade
     as "SSH not ready".  So is an ssh that fails on this host before it
@@ -994,15 +1020,36 @@ def wait_for_ssh(
     # Announce the wait: this is the one step in create/start that can
     # take tens of seconds, and it is silent otherwise.  stderr, so
     # --json callers still get a clean stdout.
+    more = ", longer while its console shows it booting" if vm else ""
     print(
-        f"waiting for ssh on {ip} (up to {max_wait}s)...",
+        f"waiting for ssh on {ip} (up to {max_wait}s{more})...",
         file=sys.stderr,
         flush=True,
     )
     start = time.monotonic()
     deadline = start + max_wait
+    cap = start + ssh_wait_cap(max_wait)
+    console = _console_size(vm)
+    console_moved = start
+    stretched = False
     last = ""
-    while time.monotonic() < deadline:
+    while True:
+        now = time.monotonic()
+        if now >= deadline:
+            if not (
+                vm
+                and now < cap
+                and now - console_moved < _CONSOLE_QUIET_SECONDS
+            ):
+                break
+            if not stretched:
+                stretched = True
+                print(
+                    f"  {vm.name} is still booting (its console is moving); "
+                    f"waiting up to {ssh_wait_cap(max_wait)}s",
+                    file=sys.stderr,
+                    flush=True,
+                )
         try:
             r = run_ssh(ip, "true", timeout=5)
             if r.returncode == 0:
@@ -1027,6 +1074,9 @@ def wait_for_ssh(
                 f"QEMU for {vm.name} exited while waiting for ssh on {ip}; "
                 f"`ltvm vm console-log {vm.name}` shows why"
             )
+        size = _console_size(vm)
+        if size != console:
+            console, console_moved = size, time.monotonic()
         time.sleep(1)
     elapsed = int(time.monotonic() - start)
     detail = f"; last ssh error: {last}" if last else ""

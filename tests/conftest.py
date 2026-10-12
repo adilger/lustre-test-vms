@@ -366,3 +366,28 @@ def _neutralize_deployed_fstype() -> object:
     """
     with patch("ltvm_pkg.vm_cluster._deployed_fstype", return_value=None):
         yield
+
+
+@pytest.fixture(autouse=True)
+def _no_real_node_create() -> object:
+    """Fail a test whose cluster create reaches a real `ltvm create`.
+
+    cluster create runs each node's create as a child through
+    vm_cluster._run_prefixed; a test that gets that far patches it.
+    """
+
+    def refuse(cmd: object, *_a: object, **_k: object) -> None:
+        raise AssertionError(f"test ran a real child command: {cmd}")
+
+    with patch("ltvm_pkg.vm_cluster._run_prefixed", side_effect=refuse):
+        yield
+
+
+@pytest.fixture(autouse=True)
+def _neutralize_guest_memory_budget() -> object:
+    """Keep the host's RAM out of `list` and the cluster create preflight.
+
+    Tests that check either patch it with a budget of their own.
+    """
+    with patch("ltvm_pkg.qemu_run.guest_memory_budget", return_value=None):
+        yield

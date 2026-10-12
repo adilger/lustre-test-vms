@@ -2067,7 +2067,7 @@ class TestClusterNodeDiskArgs:
 
     def test_kernel_and_variant_reach_each_node(self) -> None:
         node = vm_cluster.parse_node_spec("oss:co9-oss:3")
-        with patch.object(vm_cluster.subprocess, "run") as run:
+        with patch.object(vm_cluster, "_run_prefixed") as run:
             run.return_value = MagicMock(returncode=0, stdout="", stderr="")
             vm_cluster._create_one_node(
                 node, vcpus=2, mem=None, kernel="5.14-rhel9.3", variant="mofed"
@@ -2078,7 +2078,7 @@ class TestClusterNodeDiskArgs:
 
     def test_defaults_leave_kernel_and_variant_to_create(self) -> None:
         node = vm_cluster.parse_node_spec("oss:co9-oss:3")
-        with patch.object(vm_cluster.subprocess, "run") as run:
+        with patch.object(vm_cluster, "_run_prefixed") as run:
             run.return_value = MagicMock(returncode=0, stdout="", stderr="")
             vm_cluster._create_one_node(node, vcpus=2, mem=None)
         argv = run.call_args.args[0]
@@ -2098,7 +2098,7 @@ class TestClusterNodeDiskArgs:
         from ltvm_pkg import vm_cluster
 
         node = vm_cluster.parse_node_spec("oss:co9-oss:3")
-        with patch.object(vm_cluster.subprocess, "run") as run:
+        with patch.object(vm_cluster, "_run_prefixed") as run:
             run.return_value = MagicMock(returncode=0, stdout="", stderr="")
             vm_cluster._create_one_node(node, vcpus=2, mem=None)
         argv = run.call_args.args[0]
@@ -2110,7 +2110,7 @@ class TestClusterNodeDiskArgs:
         from ltvm_pkg import vm_cluster
 
         node = vm_cluster.parse_node_spec("oss:co9-oss:3")
-        with patch.object(vm_cluster.subprocess, "run") as run:
+        with patch.object(vm_cluster, "_run_prefixed") as run:
             run.return_value = MagicMock(returncode=0, stdout="", stderr="")
             vm_cluster._create_one_node(
                 node, vcpus=2, mem=None, root_size="16G"
@@ -2122,7 +2122,7 @@ class TestClusterNodeDiskArgs:
         from ltvm_pkg import vm_cluster
 
         node = vm_cluster.parse_node_spec("oss:co9-oss:3")
-        with patch.object(vm_cluster.subprocess, "run") as run:
+        with patch.object(vm_cluster, "_run_prefixed") as run:
             run.return_value = MagicMock(returncode=0, stdout="", stderr="")
             vm_cluster._create_one_node(
                 node, vcpus=2, mem=None, kernel_args="slub_debug=FZPU quiet"
@@ -2133,7 +2133,7 @@ class TestClusterNodeDiskArgs:
         from ltvm_pkg import vm_cluster
 
         node = vm_cluster.parse_node_spec("oss:co9-oss:3")
-        with patch.object(vm_cluster.subprocess, "run") as run:
+        with patch.object(vm_cluster, "_run_prefixed") as run:
             run.return_value = MagicMock(returncode=0, stdout="", stderr="")
             vm_cluster._create_one_node(node, vcpus=2, mem=None)
         assert not any(
@@ -2144,7 +2144,7 @@ class TestClusterNodeDiskArgs:
         from ltvm_pkg import vm_cluster
 
         node = vm_cluster.parse_node_spec("oss:co9-oss:3")
-        with patch.object(vm_cluster.subprocess, "run") as run:
+        with patch.object(vm_cluster, "_run_prefixed") as run:
             run.return_value = MagicMock(returncode=0, stdout="", stderr="")
             vm_cluster._create_one_node(
                 node, vcpus=2, mem=None, wait_seconds=600
@@ -2160,7 +2160,7 @@ class TestClusterNodeDiskArgs:
         from ltvm_pkg import vm_cluster
 
         node = vm_cluster.parse_node_spec("oss:co9-oss:3")
-        with patch.object(vm_cluster.subprocess, "run") as run:
+        with patch.object(vm_cluster, "_run_prefixed") as run:
             run.return_value = MagicMock(returncode=0, stdout="", stderr="")
             vm_cluster._create_one_node(node, vcpus=2, mem=None)
         assert "--wait" not in run.call_args.args[0]
@@ -2190,7 +2190,7 @@ class TestClusterNodeDiskArgs:
         from ltvm_pkg import vm_cluster
 
         node = vm_cluster.parse_node_spec("oss:co9-oss:3")
-        with patch.object(vm_cluster.subprocess, "run") as run:
+        with patch.object(vm_cluster, "_run_prefixed") as run:
             run.return_value = MagicMock(returncode=0, stdout="", stderr="")
             vm_cluster._create_one_node(node, vcpus=2, mem=None)
         assert "--root-size" not in run.call_args.args[0]
@@ -2377,3 +2377,113 @@ class TestClusterCreateDryRun:
             "create", "coY", "mgs+mds:coY-a:1", "--dry-run", "--nope"
         )
         assert "--nope" in err
+
+
+# Taken before conftest's autouse patch refuses every call.
+_RUN_PREFIXED = vm_cluster._run_prefixed
+
+
+class TestNodeCreateProgress:
+    """Each node's create output is shown as it comes, not at the end."""
+
+    def test_lines_are_echoed_with_the_node_name(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        import sys
+
+        r = _RUN_PREFIXED(
+            [sys.executable, "-c", "print('creating'); print('up')"],
+            "co9-mds",
+            timeout=60,
+        )
+        assert r.returncode == 0
+        assert r.stdout == "creating\nup\n"
+        assert capsys.readouterr().out == (
+            "  co9-mds: creating\n  co9-mds: up\n"
+        )
+
+    def test_child_is_unbuffered(self) -> None:
+        import sys
+
+        r = _RUN_PREFIXED(
+            [
+                sys.executable,
+                "-c",
+                "import os; print(os.environ.get('PYTHONUNBUFFERED'))",
+            ],
+            "n",
+            timeout=60,
+        )
+        assert r.stdout.strip() == "1"
+
+    def test_timeout_kills_the_child(self) -> None:
+        import subprocess
+        import sys
+
+        with pytest.raises(subprocess.TimeoutExpired):
+            _RUN_PREFIXED(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                "n",
+                timeout=0.5,
+            )
+
+    def test_budget_covers_the_childs_own_limits(self) -> None:
+        """Regression: SSH_TIMEOUT + 270s killed a node that was up and
+        seeding kdump, whose restart alone may take 300s."""
+        from ltvm_pkg.vm_commands import KDUMP_SEED_BUDGET
+        from ltvm_pkg.vm_net import ssh_wait_cap
+        from ltvm_pkg.vm_state import SSH_TIMEOUT
+
+        assert vm_cluster._node_create_timeout() > (
+            ssh_wait_cap(SSH_TIMEOUT) + KDUMP_SEED_BUDGET
+        )
+
+
+class TestClusterMemoryPreflight:
+    """A cluster that cannot fit is refused before any node is made."""
+
+    _BUDGET = None
+
+    def _check(
+        self, mem: int | None, running: list, wait: int = 0, nodes: int = 5
+    ) -> None:
+        from ltvm_pkg.qemu_run import MemoryBudget
+
+        specs = [
+            vm_cluster.parse_node_spec(f"oss:co9-n{i}:1") for i in range(nodes)
+        ]
+        budget = MemoryBudget(27107, "cgroup memory.max", 2710, 1.0)
+        with (
+            patch("ltvm_pkg.qemu_run.guest_memory_budget", return_value=budget),
+            patch("ltvm_pkg.qemu_run.running_vm_memory", return_value=running),
+        ):
+            vm_cluster._require_cluster_memory(
+                specs, mem, {s.name: None for s in specs}, "rocky10", wait
+            )
+
+    def test_fits(self) -> None:
+        self._check(4096, [])
+
+    def test_running_vms_leave_too_little(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Regression: five 4096 MiB nodes beside a 6144 MiB guest made
+        four nodes, failed the fifth and rolled them all back."""
+        with pytest.raises(SystemExit):
+            self._check(4096, [("co3-zil-test", 6144)])
+        err = capsys.readouterr().err
+        assert "20480 MiB" in err
+        assert "24397 MiB (cgroup memory.max 27107 MiB" in err
+        assert "co3-zil-test 6144" in err
+
+    def test_wait_counts_only_the_cluster(self) -> None:
+        self._check(4096, [("co3-zil-test", 6144)], wait=600)
+
+    def test_too_big_even_idle(self) -> None:
+        with pytest.raises(SystemExit):
+            self._check(4096, [], wait=600, nodes=7)
+
+    def test_target_default_memory(self) -> None:
+        """rocky10's default_mem is 4096."""
+        with pytest.raises(SystemExit):
+            self._check(None, [("co3-zil-test", 6144)])

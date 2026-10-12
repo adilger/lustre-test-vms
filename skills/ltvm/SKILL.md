@@ -73,11 +73,14 @@ then `ltvm vm set <name> --vcpus 2 --mem 4096`, and the new size applies
 at the next start. Use it to shrink idle VMs on a crowded host rather
 than destroying them.
 
-Running guests may commit at most the host's RAM less a reserve.
-`create` and `start` refuse a VM that would go over it and list the
-guests using it; with `--wait SECONDS` they wait up to that long for
-the memory to free instead, and `cluster create --wait` gives every
-node the same wait. On a host other sessions share, where their guests
+Running guests may commit at most the host's RAM less a reserve (in a
+container, its cgroup's memory.max less the reserve). `ltvm list` shows
+that budget (`mem_available_mb`, and `mem_free_mb` left of it, in
+`--json`): size a cluster from it. `create` and `start` refuse a VM that
+would go over it and list the guests using it, and `cluster create`
+refuses a cluster whose nodes do not all fit before it makes any; with
+`--wait SECONDS` they wait up to that long for the memory to free
+instead, and `cluster create --wait` gives every node the same wait. On a host other sessions share, where their guests
 are not yours to stop, that is how to wait for room -- not a retry loop:
 
 ```bash
@@ -307,10 +310,11 @@ Start with a 16K client against 4K servers (as above); move the servers
 to 16K once that passes.  Distro userspace needs nothing special: EL
 aarch64 binaries are built with 64K segment alignment.
 
-Create and start wait up to 120 seconds for a guest to answer ssh, and
-stop sooner if its QEMU exits. A host busy enough to run out of that
-("SSH not ready after 120s") wants `LTVM_SSH_TIMEOUT=<seconds>` exported,
-not a retry. That error ends with the last thing ssh said: read it
+Create and start wait up to 120 seconds for a guest to answer ssh,
+longer (up to 600) while its console shows it still booting, and stop
+sooner if its QEMU exits. A host busy enough to run out of that ("SSH
+not ready after ...") wants `LTVM_SSH_TIMEOUT=<seconds>` exported, not a
+retry. That error ends with the last thing ssh said: read it
 before blaming a slow boot. An ssh that fails on the host itself, such
 as a config file with bad owner or permissions, stops the wait at once
 with "fails on this host, not in the guest"; `ltvm doctor` checks the

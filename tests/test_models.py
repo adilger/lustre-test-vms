@@ -965,3 +965,67 @@ class TestResolveOsArtifactsPerKernel:
         ):
             with pytest.raises(FileNotFoundError, match="build image"):
                 vm_state.resolve_os_artifacts("rocky9", kernel="6.1-rhel9.7")
+
+
+class TestWaitForSshStretch:
+    """A guest whose console keeps printing is booting, not stuck."""
+
+    def _run(
+        self, tmp_sockets: Path, grows_until: float, ready_at: float = 1e9
+    ) -> tuple[bool, float, str]:
+        from ltvm_pkg.vm_net import wait_for_ssh
+        from ltvm_pkg.vm_state import VMInfo
+
+        vm = VMInfo(name="co9-slow", ip="192.168.100.9", pid=4242)
+        vm.log_path.write_text("")
+        clock = _FakeClock()
+        start = clock.now
+
+        def probe(*_a: object, **_k: object) -> MagicMock:
+            if clock.now - start < grows_until:
+                with vm.log_path.open("a") as f:
+                    f.write("[  OK  ] Started something.\n")
+            if clock.now - start >= ready_at:
+                return _ssh_result(0, "")
+            return _ssh_result(255, "No route to host")
+
+        with (
+            patch("ltvm_pkg.vm_net.run_ssh", side_effect=probe),
+            patch("ltvm_pkg.vm_net.is_running", return_value=True),
+            patch(
+                "ltvm_pkg.vm_net.time.monotonic", side_effect=clock.monotonic
+            ),
+            patch("ltvm_pkg.vm_net.time.sleep", side_effect=clock.sleep),
+            patch("ltvm_pkg.vm_net.die", side_effect=SystemExit) as die,
+        ):
+            try:
+                wait_for_ssh(vm.ip, max_wait=120, vm=vm)
+                ok = True
+            except SystemExit:
+                ok = False
+        msg = die.call_args.args[0] if die.called else ""
+        return ok, clock.now - start, msg
+
+    def test_a_booting_guest_gets_more_time(self, tmp_sockets: Path) -> None:
+        """Regression: cluster create rolled back five Rocky 10 nodes at
+        120s while their consoles showed NetworkManager starting."""
+        ok, took, _ = self._run(tmp_sockets, grows_until=200, ready_at=230)
+        assert ok
+        assert took >= 230
+
+    def test_a_quiet_console_ends_the_wait(self, tmp_sockets: Path) -> None:
+        ok, took, msg = self._run(tmp_sockets, grows_until=30)
+        assert not ok
+        assert took < 130
+        assert "SSH not ready after" in msg
+
+    def test_the_stretch_has_a_cap(self, tmp_sockets: Path) -> None:
+        from ltvm_pkg.vm_net import ssh_wait_cap
+
+        ok, took, _ = self._run(tmp_sockets, grows_until=1e9)
+        assert not ok
+        assert ssh_wait_cap(120) <= took < ssh_wait_cap(120) + 15
+
+    def test_no_vm_no_stretch(self) -> None:
+        _, msg = _wait([_ssh_result(255, "No route to host")], max_wait=30)
+        assert "after 3" in msg

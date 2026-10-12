@@ -2346,3 +2346,39 @@ class TestRssMb:
 
         mb = _rss_mb(_os.getpid())
         assert mb is not None and mb >= 0
+
+
+class TestCmdListBudget:
+    """list reports the budget create enforces, not the host's RAM."""
+
+    def test_cgroup_budget(
+        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Regression: list said 54215 MiB available in a container whose
+        create refused past 24397 MiB."""
+        from ltvm_pkg.qemu_run import MemoryBudget
+
+        VMInfo(name="mem-d", ip="10.0.0.9", pid=42, vcpus=2, mem=6144).save()
+        budget = MemoryBudget(27107, "cgroup memory.max", 2710, 1.0)
+        with (
+            patch(
+                "ltvm_pkg.vm_commands.is_running",
+                side_effect=lambda vm: vm.pid > 0,
+            ),
+            patch("ltvm_pkg.vm_commands._rss_mb", return_value=900),
+            patch("ltvm_pkg.qemu_run.guest_memory_budget", return_value=budget),
+            patch(
+                "ltvm_pkg.vm_commands._host_total_mem_mb", return_value=64000
+            ),
+        ):
+            vm_commands.cmd_list(argparse.Namespace(json=True))
+            data = json.loads(capsys.readouterr().out)
+            vm_commands.cmd_list(argparse.Namespace(json=False))
+            text = capsys.readouterr().out
+        totals = data["totals"]
+        assert totals["mem_available_mb"] == 24397
+        assert totals["mem_free_mb"] == 24397 - 6144
+        assert totals["mem_host_mb"] == 64000
+        assert "cgroup memory.max 27107" in totals["mem_budget"]
+        assert "mem: 6144M/24397M committed" in text
+        assert "budget: cgroup memory.max 27107 MiB" in text

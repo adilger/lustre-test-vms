@@ -10,6 +10,7 @@ import re
 import shlex
 import subprocess
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,6 +22,7 @@ from .vm_net import (
     SSH_KEEPALIVE_OPTS,
     SSH_OPTS,
     run_ssh,
+    ssh_wait_cap,
     sshpass_argv,
     sshpass_ssh_argv,
 )
@@ -529,11 +531,8 @@ def _create_one_node(
         cmd += ["--wait", str(wait_seconds)]
 
     try:
-        r = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=_node_create_timeout() + wait_seconds,
+        r = _run_prefixed(
+            cmd, node.name, timeout=_node_create_timeout() + wait_seconds
         )
     except subprocess.TimeoutExpired as e:
         # See _write_cluster_local_sh: don't propagate out of the parallel
@@ -546,23 +545,66 @@ def _create_one_node(
     return node.name, r.returncode, combined.rstrip("\n")
 
 
-# Headroom over the inner `ltvm create`'s own wait-for-SSH budget:
-# cold boot, disk creation and first-boot work all happen outside it.
+def _run_prefixed(
+    cmd: list[str], name: str, *, timeout: float
+) -> subprocess.CompletedProcess[str]:
+    """Run a node's child command, echoing each line it writes as
+    ``  <name>: <line>`` as it comes, and return its whole output.
+
+    Captured to the end, a five-node create printed nothing for minutes
+    while the nodes booted, so a redirected log could not show which
+    one was slow.  Raises TimeoutExpired, having killed the child, past
+    ``timeout``.
+    """
+    env = dict(os.environ, PYTHONUNBUFFERED="1")
+    lines: list[str] = []
+    expired = threading.Event()
+    with subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        errors="replace",
+        env=env,
+    ) as proc:
+
+        def _expire() -> None:
+            expired.set()
+            proc.kill()
+
+        timer = threading.Timer(timeout, _expire)
+        timer.start()
+        try:
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                lines.append(line)
+                print(f"  {name}: {line.rstrip()}", flush=True)
+            rc = proc.wait()
+        finally:
+            timer.cancel()
+    if expired.is_set():
+        raise subprocess.TimeoutExpired(cmd, timeout, "".join(lines))
+    return subprocess.CompletedProcess(cmd, rc, "".join(lines), "")
+
+
+# Headroom over the inner `ltvm create`'s own budgets: disk creation
+# and launching QEMU happen outside them.
 _NODE_CREATE_HEADROOM = 270
 
 
 def _node_create_timeout() -> int:
     """Wall-clock budget for one node's child `ltvm create`.
 
-    Derived from SSH_TIMEOUT rather than hardcoded, because
-    LTVM_SSH_TIMEOUT exists precisely so an operator can raise the
-    wait-for-SSH budget for a TCG guest ("Cross-arch (TCG) boots are
-    5-20x slower", vm_state) -- and a fixed 300s here turned that
-    remedy into a guaranteed failure: every child was SIGKILLed at 300s
-    mid-boot and the cleanup loop then destroyed the whole cluster,
-    with "create timed out after 300s" as the only explanation.
+    A backstop over the child's own limits, which end it first: the
+    longest wait for SSH (ssh_wait_cap, which stretches SSH_TIMEOUT
+    while the guest's console moves) and the kdump seeding after it,
+    whose restart alone may take 300s on a loaded host.  A budget of
+    SSH_TIMEOUT + 270s killed nodes that were up and seeding kdump, and
+    the cleanup loop then destroyed the whole cluster.
     """
-    return max(300, SSH_TIMEOUT + _NODE_CREATE_HEADROOM)
+    from .vm_commands import KDUMP_SEED_BUDGET
+
+    return ssh_wait_cap(SSH_TIMEOUT) + KDUMP_SEED_BUDGET + _NODE_CREATE_HEADROOM
 
 
 def _node_targets(
@@ -648,6 +690,69 @@ def _print_cluster_plan(
         print(f"  cmdline: + {kernel_args}")
     print(f"  owner:   {owner_id}")
     print("Nothing was written.  Re-run without --dry-run to create it.")
+
+
+def _require_cluster_memory(
+    node_specs: list[ClusterNode],
+    mem: int | None,
+    node_targets: dict[str, str | None],
+    os_target: str | None,
+    wait_seconds: int,
+) -> None:
+    """Refuse a cluster whose nodes cannot all start, before any does.
+
+    Each node's create checks only its own memory, so a cluster too big
+    for the budget built the first nodes, failed the next and rolled
+    them all back.  With --wait the running VMs may yet stop, so only
+    a cluster too big for an idle host is refused.
+    """
+    from .qemu_run import guest_memory_budget, running_vm_memory
+    from .target_config import TargetConfig
+
+    budget = guest_memory_budget()
+    if budget is None:
+        return
+    sizes = {}
+    for node in node_specs:
+        if mem is not None:
+            sizes[node.name] = mem
+            continue
+        target = node_targets.get(node.name) or os_target or DEFAULT_TARGET
+        try:
+            sizes[node.name] = TargetConfig(target).default_mem
+        except (ValueError, FileNotFoundError):
+            return
+    need = sum(sizes.values())
+    running = [] if wait_seconds else running_vm_memory()
+    used = sum(m for _, m in running)
+    biggest = max(sizes.values(), default=0)
+    if biggest <= budget.budget_mb and used + need <= budget.limit_mb:
+        return
+    lines = [
+        f"not enough memory for the cluster's {len(node_specs)} nodes",
+        f"  requested:    {need} MiB ({', '.join(f'{n} {m}' for n, m in sizes.items())})",
+        f"  host budget:  {budget.limit_mb} MiB ({budget.describe()}"
+        + (
+            f", overcommit {budget.overcommit:g}"
+            if budget.overcommit != 1.0
+            else ""
+        )
+        + ")",
+    ]
+    if running:
+        lines.append(
+            f"  already used: {used} MiB across {len(running)} running VM(s): "
+            + ", ".join(
+                f"{n} {m}" for n, m in sorted(running, key=lambda x: -x[1])
+            )
+        )
+    lines.append(
+        "  stop VMs, pass a smaller --mem, or --wait SECONDS for running "
+        "VMs to stop"
+        if running
+        else "  pass a smaller --mem or create fewer nodes"
+    )
+    die("\n".join(lines))
 
 
 def cmd_cluster_create(args: argparse.Namespace) -> None:
@@ -776,7 +881,11 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
         )
         return
 
-    print(f"=== Creating cluster '{cluster_name}' ===")
+    _require_cluster_memory(
+        node_specs, mem, node_targets, os_target, wait_seconds
+    )
+
+    print(f"=== Creating cluster '{cluster_name}' ===", flush=True)
     if os_target:
         print(f"    Target: {os_target}{(' arch=' + arch) if arch else ''}")
     if kernel:

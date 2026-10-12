@@ -608,7 +608,20 @@ VMs' `-m` plus its own fit MemTotal less a reserve
 the tests point it at a file that does not exist) multiplies that budget
 for the sum, never for one VM.  It is 1.0 unless set, for hosts running
 KSM; a value below 1.0 or not a number warns once per process and counts
-as 1.0.
+as 1.0.  In a container MemTotal is the host's, so the budget is the
+cgroup's `memory.max` when that is smaller (`qemu_run.memory_budget`).
+`ltvm list` reports the same budget (`mem_available_mb`, `mem_free_mb`
+in `--json`), and `cluster create` checks all its nodes against it
+before it makes any (`_require_cluster_memory`).
+
+**Waiting for SSH:** create and start wait `LTVM_SSH_TIMEOUT` (120s)
+for the guest's sshd, and longer, up to five times that, while the
+guest's serial console is still growing: on a loaded host a boot runs
+past two minutes and is fine.  `cluster create` echoes each node's
+create output as it comes, prefixed with the node's name, and gives
+each node a backstop of that cap plus the kdump seeding budget
+(`KDUMP_SEED_BUDGET`) plus headroom, so it never kills a node that is
+up and seeding kdump.
 
 **Kernel arguments:** `--kernel-args 'slub_debug=FZPU page_owner=on'`
 is stored in the `.info` file as `KERNEL_ARGS` and appended after
