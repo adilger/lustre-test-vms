@@ -600,7 +600,11 @@ class TestBuildTimeout:
     a build stopped there says so instead of a bare rc=255."""
 
     def _build(
-        self, tmp_path: Path, returncode: int = 0, clock_step: float = 0.0
+        self,
+        tmp_path: Path,
+        returncode: int = 0,
+        clock_step: float = 0.0,
+        configure_failed: bool = True,
     ) -> tuple[list[str], Exception | None]:
         lustre, kernel = TestTreeClaim()._tree(tmp_path)
         cmds: list[list[str]] = []
@@ -626,7 +630,10 @@ class TestBuildTimeout:
                 side_effect=fake_podman,
             ),
             patch("ltvm_pkg.lustre_build._container_exists", return_value=True),
-            patch("ltvm_pkg.lustre_build._show_configure_log"),
+            patch(
+                "ltvm_pkg.lustre_build._show_configure_log",
+                return_value=configure_failed,
+            ),
             patch("ltvm_pkg.lustre_build._hit_clock_skew", return_value=False),
             patch("ltvm_pkg.lustre_build.time.time", side_effect=fake_time),
             patch("ltvm_pkg.target_config.TargetConfig") as mock_tc,
@@ -699,6 +706,21 @@ class TestBuildTimeout:
         assert isinstance(err, RuntimeError)
         assert str(err) == "Container build failed (rc=2)"
 
+    def test_podman_255_is_not_left_unexplained(self, tmp_path: Path) -> None:
+        """Four parallel builds died "rc=255" with nothing else said."""
+        _, err = self._build(
+            tmp_path, returncode=255, clock_step=1.0, configure_failed=False
+        )
+        assert isinstance(err, RuntimeError)
+        assert "rc=255" in str(err)
+        assert "podman's own status" in str(err)
+
+    def test_make_failure_after_configure_passed(self, tmp_path: Path) -> None:
+        _, err = self._build(
+            tmp_path, returncode=2, clock_step=1.0, configure_failed=False
+        )
+        assert str(err) == "Container build failed (rc=2)"
+
 
 class TestIncrementalRebuildGuard:
     """When per-kernel staging exists for this kernel, treat it as
@@ -764,6 +786,32 @@ class TestShowConfigureLog:
         cap: pytest.CaptureFixture[str] = capsys  # type: ignore[assignment]
         _show_configure_log(tmp_path)
         assert cap.readouterr().err == ""
+
+    def test_silent_when_configure_passed(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A make failure is not explained by a configure that passed."""
+        (tmp_path / "config.log").write_text(
+            "#define X 1\n\nconfigure: exit 0\n"
+        )
+        assert _show_configure_log(tmp_path) is False
+        assert capsys.readouterr().err == ""
+
+    def test_shown_when_configure_failed(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        (tmp_path / "config.log").write_text("no foo.h\nconfigure: exit 1\n")
+        assert _show_configure_log(tmp_path) is True
+        assert "no foo.h" in capsys.readouterr().err
+
+    def test_silent_when_log_predates_the_run(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        log = tmp_path / "config.log"
+        log.write_text("no foo.h\nconfigure: exit 1\n")
+        os.utime(log, (1000, 1000))
+        assert _show_configure_log(tmp_path, since=2000) is False
+        assert capsys.readouterr().err == ""
 
     def test_tail_shorter_than_file_length(
         self, tmp_path: Path, capsys: object

@@ -40,22 +40,32 @@ from .podman_run import run_podman_with_cleanup
 from .vm_state import DEFAULT_TARGET
 
 
-def _show_configure_log(lustre_tree: Path, tail_lines: int = 50) -> None:
-    """Print the tail of Lustre's config.log to stderr.
+def _show_configure_log(
+    lustre_tree: Path, since: float = 0.0, tail_lines: int = 50
+) -> bool:
+    """Print the tail of Lustre's config.log to stderr if configure failed.
 
     Autoconf itself says "check config.log for details" on failure.
     The log lives in the bind-mounted tree, so we can read it from the
     host after the container exits.  Emits a clear banner and 50 lines
-    of context; silently no-ops if config.log isn't there (configure
-    never ran) or can't be read.
+    of context.  Prints nothing, and returns False, unless the log was
+    written at or after *since* and ends in a non-zero "configure:
+    exit": a log from an earlier run, or from a configure that passed,
+    says nothing about why make failed.
     """
     log_path = lustre_tree / "config.log"
-    if not log_path.is_file():
-        return
     try:
+        if log_path.stat().st_mtime < since:
+            return False
         lines = log_path.read_text(errors="replace").splitlines()
     except OSError:
-        return
+        return False
+    status = next(
+        (ln for ln in reversed(lines) if ln.startswith("configure: exit ")),
+        None,
+    )
+    if status == "configure: exit 0":
+        return False
     tail = lines[-tail_lines:]
     print(
         f"\n--- last {len(tail)} lines of {log_path} ---",
@@ -64,6 +74,7 @@ def _show_configure_log(lustre_tree: Path, tail_lines: int = 50) -> None:
     for line in tail:
         print(line, file=sys.stderr)
     print(f"--- end {log_path} ---\n", file=sys.stderr)
+    return True
 
 
 # Written into <tree>/.git/info/exclude so the state files a build drops
@@ -1234,8 +1245,13 @@ fi""")
             )
             continue
         why = build_timeout.explain(timeout, time.time() - attempt_start)
-        if not why:
-            _show_configure_log(lustre_tree)
+        if not why and not _show_configure_log(lustre_tree, attempt_start):
+            if r.returncode == 255:
+                why = (
+                    "255 is podman's own status, not the build's: podman "
+                    "failed or the container was stopped from outside "
+                    "(see podman's messages above)"
+                )
         raise RuntimeError(
             f"Container build failed (rc={r.returncode})"
             + (f": {why}" if why else "")
