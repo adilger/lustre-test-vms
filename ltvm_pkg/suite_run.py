@@ -35,14 +35,13 @@ from typing import Any
 
 from . import vm_claim
 from .qemu_run import die, is_running
-from .vm_net import SSH_OPTS, sshpass_ssh_argv
+from .vm_net import SSH_OPTS, sshpass_argv, sshpass_ssh_argv
 from .vm_state import (
     EXIT_ERROR,
     EXIT_NOT_FOUND,
     EXIT_OK,
     EXIT_TIMEOUT,
     EXIT_UNREACHABLE,
-    ROOT_PASSWORD,
     ClusterInfo,
     ClusterNotFound,
     VMInfo,
@@ -427,9 +426,7 @@ def summarize(root: Path) -> dict[str, Any]:
 
 def rsync_argv(t: SuiteTarget, run_id: str, dest: Path) -> list[str]:
     ip = VMInfo.load(t.exec_node).ip
-    ssh = shlex.join(
-        ["sshpass", "-p", ROOT_PASSWORD, "ssh", *SSH_OPTS, *_SSH_EXTRA]
-    )
+    ssh = shlex.join([*sshpass_argv(), "ssh", *SSH_OPTS, *_SSH_EXTRA])
     return [
         "rsync",
         "-a",

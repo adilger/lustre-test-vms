@@ -17,13 +17,12 @@ from typing import Any
 
 from . import vm_claim
 from .qemu_run import die, is_running, run
-from .vm_net import SSH_OPTS, run_ssh, sshpass_ssh_argv
+from .vm_net import SSH_OPTS, run_ssh, sshpass_argv, sshpass_ssh_argv
 from .vm_owner import resolve_owner_id
 from .vm_state import (
     DEFAULT_TARGET,
     EXIT_TIMEOUT,
     EXIT_UNREACHABLE,
-    ROOT_PASSWORD,
     SOCKETS,
     SSH_TIMEOUT,
     ClusterInfo,
@@ -1738,9 +1737,7 @@ def cmd_cluster_ssh(args: argparse.Namespace) -> None:
 
     vm = VMInfo.load(matched.name)
     ssh_args = [
-        "sshpass",
-        "-p",
-        ROOT_PASSWORD,
+        *sshpass_argv(),
         "ssh",
         *SSH_OPTS,
         f"root@{vm.ip}",

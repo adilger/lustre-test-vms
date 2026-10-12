@@ -54,6 +54,28 @@ SSH_OPTS = [
 ]
 
 
+# Fails a dead guest's ssh in 30s, so a command's own timeout only has
+# to bound a command that is still running.
+SSH_KEEPALIVE_OPTS = [
+    "-o",
+    "ServerAliveInterval=10",
+    "-o",
+    "ServerAliveCountMax=3",
+]
+
+
+def sshpass_argv() -> list[str]:
+    """The ``sshpass`` prefix of an ssh or scp command line.
+
+    The password goes through the environment (``-e``), never argv:
+    argv is what ``ps`` shows and what a TimeoutExpired or
+    CalledProcessError prints, and agents put those in transcripts and
+    bug reports.
+    """
+    os.environ["SSHPASS"] = ROOT_PASSWORD
+    return ["sshpass", "-e"]
+
+
 def sshpass_ssh_argv(
     ip: str,
     command: str,
@@ -63,9 +85,7 @@ def sshpass_ssh_argv(
     """argv for `sshpass ssh [opts] root@<ip> <command>`."""
     opts = SSH_OPTS + (extra_opts or [])
     return [
-        "sshpass",
-        "-p",
-        ROOT_PASSWORD,
+        *sshpass_argv(),
         "ssh",
         *opts,
         f"root@{ip}",
@@ -86,9 +106,7 @@ def sshpass_scp_argv(
     """
     opts = SSH_OPTS + (extra_opts or [])
     return [
-        "sshpass",
-        "-p",
-        ROOT_PASSWORD,
+        *sshpass_argv(),
         "scp",
         *opts,
         src,
@@ -834,21 +852,45 @@ def run_ssh(
     ssh_cmd = sshpass_ssh_argv(
         ip,
         command,
-        extra_opts=[
-            "-o",
-            "ConnectTimeout=5",
-            "-o",
-            "ServerAliveInterval=10",
-            "-o",
-            "ServerAliveCountMax=3",
-        ],
+        extra_opts=["-o", "ConnectTimeout=5", *SSH_KEEPALIVE_OPTS],
     )
-    if stream is None:
-        return run(ssh_cmd, timeout=timeout)
-    # Our own buffered output has to land before the child's.
-    sys.stdout.flush()
-    sys.stderr.flush()
-    return run(ssh_cmd, timeout=timeout, capture_output=False, stdout=stream)
+    try:
+        if stream is None:
+            return run(ssh_cmd, timeout=timeout)
+        # Our own buffered output has to land before the child's.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        return run(
+            ssh_cmd, timeout=timeout, capture_output=False, stdout=stream
+        )
+    except subprocess.TimeoutExpired as e:
+        raise SshTimeout(ip, command, e.timeout, e.output, e.stderr) from None
+
+
+class SshTimeout(subprocess.TimeoutExpired):
+    """run_ssh's TimeoutExpired, which names the remote command only.
+
+    The full argv is dozens of ssh options, and callers print the
+    exception as it is.
+    """
+
+    def __init__(
+        self,
+        ip: str,
+        command: str,
+        timeout: float,
+        output: str | bytes | None = None,
+        stderr: str | bytes | None = None,
+    ) -> None:
+        shown = " ".join(command.split())
+        if len(shown) > 100:
+            shown = shown[:97] + "..."
+        super().__init__(
+            f"ssh root@{ip} {shown}", timeout, output=output, stderr=stderr
+        )
+
+    def __str__(self) -> str:
+        return f"`{self.cmd}` timed out after {self.timeout:g}s"
 
 
 def provision_vm_ssh(

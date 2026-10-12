@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -455,6 +458,78 @@ class TestSshRegistry:
         assert "Host co1-oss" in cfg
         assert "HostName 10.0.0.1" in cfg
         assert "HostName 10.0.0.2" in cfg
+
+
+# ── the guest password stays out of argv ─────────────────
+
+
+SENTINEL_PASSWORD = "pw-sentinel-7f3a9c"
+
+
+class TestPasswordNotInArgv:
+    """argv is what ps shows and what a TimeoutExpired prints; agents
+    pasted the guest password into bug reports from those."""
+
+    @pytest.fixture(autouse=True)
+    def _sentinel(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(vm_net, "ROOT_PASSWORD", SENTINEL_PASSWORD)
+        # setenv first, so teardown restores whatever was there before.
+        monkeypatch.setenv("SSHPASS", "")
+        monkeypatch.delenv("SSHPASS")
+
+    def test_ssh_argv(self) -> None:
+        argv = vm_net.sshpass_ssh_argv("10.0.0.5", "true")
+        assert argv[:2] == ["sshpass", "-e"]
+        assert SENTINEL_PASSWORD not in " ".join(argv)
+        assert os.environ["SSHPASS"] == SENTINEL_PASSWORD
+
+    def test_scp_argv(self) -> None:
+        argv = vm_net.sshpass_scp_argv("/a", "root@10.0.0.5:/b")
+        assert argv[:2] == ["sshpass", "-e"]
+        assert SENTINEL_PASSWORD not in " ".join(argv)
+
+    def test_suite_rsync_argv(self) -> None:
+        from ltvm_pkg import suite_run
+
+        t = MagicMock(exec_node="co1-c")
+        with patch.object(
+            suite_run.VMInfo, "load", return_value=MagicMock(ip="10.0.0.5")
+        ):
+            argv = suite_run.rsync_argv(t, "run1", Path("/tmp/x"))
+        assert "sshpass -e ssh" in " ".join(argv)
+        assert SENTINEL_PASSWORD not in " ".join(argv)
+
+    def test_timeout_message(self) -> None:
+        """What `error: ... {e}` printed was the whole sshpass argv."""
+
+        def fake_run(cmd: list[str], **kw: Any) -> None:
+            raise subprocess.TimeoutExpired(cmd, kw["timeout"])
+
+        with patch("ltvm_pkg.vm_net.run", side_effect=fake_run):
+            with pytest.raises(subprocess.TimeoutExpired) as exc:
+                vm_net.run_ssh("10.0.0.5", "depmod -a && ldconfig", timeout=60)
+        text = f"{exc.value} {exc.value!r} {exc.value.cmd}"
+        assert SENTINEL_PASSWORD not in text
+        assert str(exc.value) == (
+            "`ssh root@10.0.0.5 depmod -a && ldconfig` timed out after 60s"
+        )
+        assert exc.value.timeout == 60
+
+    def test_timeout_message_shortens_a_long_script(self) -> None:
+        err = vm_net.SshTimeout("10.0.0.5", "x " * 500, 5)
+        assert len(str(err)) < 160
+
+    def test_password_still_reaches_sshpass(self) -> None:
+        """sshpass -e reads SSHPASS from the environment it inherits."""
+        argv = vm_net.sshpass_ssh_argv("10.0.0.5", "true")
+        r = subprocess.run(
+            ["sh", "-c", 'printf %s "$SSHPASS"'],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert argv[1] == "-e"
+        assert r.stdout == SENTINEL_PASSWORD
 
 
 # ── run_ssh command structure ────────────────────────────
