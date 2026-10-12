@@ -321,6 +321,9 @@ def _deploy_to_vm(
     if zfs_staging is not None and not userspace_only:
         retire_stale_zfs(vm)
 
+    if (zfs_staging is not None and not userspace_only) or fstype == "zfs":
+        configure_zfs_mmp(vm)
+
     # Configure test framework's local.sh with VM disk topology
     if vm.mdt_disks or vm.ost_disks:
         configure_test_disks(
@@ -515,6 +518,34 @@ def verify_deployed_modules(vm: VMInfo, staging: Path) -> None:
             "  The VM is running different code than was just built, so "
             "test results will describe the older modules.  Check that "
             "the build actually succeeded, then redeploy.",
+            file=sys.stderr,
+        )
+
+
+ZFS_MMP_CONF = "/etc/modprobe.d/ltvm-zfs-mmp.conf"
+_ZFS_MMP_PARAM = "/sys/module/zfs/parameters/zfs_multihost_fail_intervals"
+
+
+def configure_zfs_mmp(vm: VMInfo) -> None:
+    """Keep ZFS from suspending a pool whose MMP writes run late.
+
+    mkfs.lustre turns multihost on for every pool it makes, and ZFS then
+    suspends a pool whose MMP writes have not landed in ten intervals,
+    which Lustre's failmode=panic turns into a kernel panic.  A guest on
+    a loaded host stalls that long: three servers of one cluster
+    panicked within 40 minutes.  zfs_multihost_fail_intervals=0 keeps
+    the MMP writes and the import check, and drops only the suspend.
+    In modprobe.d for the next load, and on the loaded module now.
+    """
+    script = (
+        f"echo 'options zfs zfs_multihost_fail_intervals=0' > {ZFS_MMP_CONF}"
+        f" && {{ [ ! -e {_ZFS_MMP_PARAM} ] || echo 0 > {_ZFS_MMP_PARAM}; }}"
+    )
+    r = run_ssh(vm.ip, script, timeout=step_timeout())
+    if r.returncode != 0:
+        print(
+            f"warning: could not turn off ZFS's MMP suspend on {vm.name} "
+            f"({(r.stderr or '').strip()}); a stalled guest may panic",
             file=sys.stderr,
         )
 

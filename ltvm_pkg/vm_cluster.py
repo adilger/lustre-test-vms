@@ -1017,7 +1017,11 @@ def _deploy_one_node(
     `lustre_tree` is the source tree the cluster's `--build` was
     pointed at; it determines where the per-tree staging dir lives.
     """
-    from ltvm_pkg.deploy import deploy_to_vm, require_zfs_modules
+    from ltvm_pkg.deploy import (
+        configure_zfs_mmp,
+        deploy_to_vm,
+        require_zfs_modules,
+    )
     from ltvm_pkg.lustre_build import staging_path as _staging_path
 
     vm = VMInfo.load(node_name)
@@ -1049,6 +1053,7 @@ def _deploy_one_node(
     try:
         if need_zfs:
             require_zfs_modules(vm)
+            configure_zfs_mmp(vm)
         # No fstype here: the cluster block written further down
         # (generate_local_sh) sets FSTYPE for every node, after anything
         # written here.

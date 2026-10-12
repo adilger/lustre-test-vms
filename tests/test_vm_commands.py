@@ -989,6 +989,39 @@ class TestCmdConsoleLog:
         assert out == [b"before", b"garbage \x80\xff here", b"after"]
 
 
+class TestConsoleLogEarlierBoots:
+    """A panic kdump rebooted out of sits a whole boot above the tail."""
+
+    def _log(self) -> bytes:
+        first = [b"[0.0] Linux version 6.12.0 (first)"] + [b"x"] * 10
+        first += [b"[4252.7] Kernel panic - not syncing: Pool 'lustre-ost3'"]
+        second = [b"[0.0] Linux version 6.12.0 (kdump)"] + [b"y"] * 80
+        return b"\n".join(first + second) + b"\n"
+
+    def test_note_names_the_earlier_panic(
+        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Regression: three ZFS servers panicked, and console-log showed
+        only the kdump boot after."""
+        vm = _seed_vm_files(tmp_vmdir, "boots")
+        vm.log_path.write_bytes(self._log())
+        vm_commands.cmd_console_log(argparse.Namespace(name="boots", lines=50))
+        err = capsys.readouterr().err
+        assert "holds 2 boots" in err
+        assert "line 12: [4252.7] Kernel panic - not syncing" in err
+        assert "--lines 93 shows them all" in err
+
+    def test_quiet_when_every_boot_is_shown(
+        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        vm = _seed_vm_files(tmp_vmdir, "boots2")
+        vm.log_path.write_bytes(self._log())
+        vm_commands.cmd_console_log(
+            argparse.Namespace(name="boots2", lines=200)
+        )
+        assert capsys.readouterr().err == ""
+
+
 # ── cmd_console_log --follow ─────────────────────────────
 
 

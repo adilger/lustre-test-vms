@@ -417,6 +417,14 @@ from the cluster record when no flag gives one, and
 `cluster llmount` refuses a first client without the
 cluster block rather than format a one-node filesystem.
 
+A ZFS deploy also writes `/etc/modprobe.d/ltvm-zfs-mmp.conf`
+(`zfs_multihost_fail_intervals=0`) and sets the loaded module's
+parameter to match (`deploy.configure_zfs_mmp`).  mkfs.lustre turns
+multihost on for every pool, and a guest stalled ten MMP intervals by
+host load had its pool suspended and, with failmode=panic, panicked.
+The setting keeps the MMP writes and import check and drops only the
+suspend.
+
 For ZFS the test framework takes `MDSDEV*`/`OSTDEV*` as
 the **vdevs** to build pools on and derives the dataset
 names itself (`$FSNAME-mdt1/mdt1`), so the `/dev/vd*`

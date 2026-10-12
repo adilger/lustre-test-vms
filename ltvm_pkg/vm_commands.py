@@ -1976,9 +1976,47 @@ def cmd_console_log(args: argparse.Namespace) -> None:
         for line in _tail_lines(raw, args.lines):
             sys.stdout.buffer.write(line + b"\n")
         sys.stdout.buffer.flush()
+        note = _earlier_boots_note(raw, args.lines)
+        if note:
+            print(note, file=sys.stderr)
         return
 
     _follow_console_log(vm, args.lines)
+
+
+_BOOT_BANNER = b"Linux version "
+_PANIC_MARKERS = (b"Kernel panic", b"LBUG", b"BUG: ", b"Oops: ")
+
+
+def _earlier_boots_note(raw: bytes, shown: int) -> str:
+    """Say so when the log holds boots the tail did not reach.
+
+    A panic that kdump rebooted out of stays in the same QEMU's log, a
+    whole boot above the 50 lines shown, and was found only by reading
+    the file by hand.
+    """
+    lines = raw.splitlines()
+    starts = [i for i, ln in enumerate(lines) if _BOOT_BANNER in ln]
+    first_shown = max(0, len(lines) - shown)
+    if len(starts) < 2 or starts[-1] <= 0 or first_shown <= starts[0]:
+        return ""
+    earlier = lines[: starts[-1]]
+    hits = [
+        (i + 1, ln)
+        for i, ln in enumerate(earlier)
+        if any(m in ln for m in _PANIC_MARKERS)
+    ]
+    note = (
+        f"note: this log holds {len(starts)} boots since QEMU started; the "
+        f"last began at line {starts[-1] + 1} of {len(lines)}"
+    )
+    if hits:
+        n, text = hits[0]
+        note += (
+            f"\n  an earlier boot logged at line {n}: "
+            f"{text.decode(errors='replace').strip()[:160]}"
+        )
+    return note + f"\n  --lines {len(lines)} shows them all"
 
 
 def _tail_lines(raw: bytes, count: int) -> list[bytes]:

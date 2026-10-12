@@ -755,3 +755,54 @@ class TestDeployStalenessOnZfsRequest:
     def test_deploy_rebuilds_on_version_mismatch(self) -> None:
         src = Path("ltvm_pkg/cli/deploy.py").read_text()
         assert "staged_zfs != zfs_version_arg" in src
+
+
+class TestZfsMmp:
+    """ZFS deploys turn off MMP's pool suspend, which panicked servers."""
+
+    def test_script_writes_modprobe_and_the_live_param(
+        self, tmp_path: Path
+    ) -> None:
+        import subprocess
+
+        param = tmp_path / "param"
+        param.write_text("10\n")
+        conf = tmp_path / "mmp.conf"
+        with patch.object(dp, "run_ssh") as ssh:
+            ssh.return_value = SimpleNamespace(returncode=0, stderr="")
+            dp.configure_zfs_mmp(_vm())
+        script = (
+            ssh.call_args.args[1]
+            .replace(dp.ZFS_MMP_CONF, str(conf))
+            .replace(dp._ZFS_MMP_PARAM, str(param))
+        )
+        subprocess.run(["bash", "-c", script], check=True)
+        assert conf.read_text() == (
+            "options zfs zfs_multihost_fail_intervals=0\n"
+        )
+        assert param.read_text() == "0\n"
+
+    def _deploy(self, tmp_path: Path, **kw: object) -> bool:
+        lustre = tmp_path / "lustre"
+        (lustre / "lib" / "modules").mkdir(parents=True, exist_ok=True)
+        with (
+            patch.object(dp, "_stream_tree"),
+            patch.object(dp, "verify_deployed_modules"),
+            patch.object(dp, "retire_stale_zfs"),
+            patch.object(dp, "configure_zfs_mmp") as mmp,
+            patch.object(dp, "run_ssh") as ssh,
+        ):
+            ssh.return_value = SimpleNamespace(
+                returncode=0, stdout="", stderr=""
+            )
+            dp.deploy_to_vm(_vm(), lustre, **kw)
+        return mmp.called
+
+    def test_zfs_deploy_sets_it(self, tmp_path: Path) -> None:
+        assert self._deploy(tmp_path, zfs_staging=tmp_path)
+
+    def test_userspace_only_zfs_sets_it(self, tmp_path: Path) -> None:
+        assert self._deploy(tmp_path, userspace_only=True, fstype="zfs")
+
+    def test_ldiskfs_leaves_it(self, tmp_path: Path) -> None:
+        assert not self._deploy(tmp_path)
