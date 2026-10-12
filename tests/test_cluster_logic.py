@@ -922,3 +922,41 @@ class TestDeployedFstype:
 
     def test_no_block_is_unknown(self) -> None:
         assert self._ask("FSTYPE=${FSTYPE:-zfs}\n") is None
+
+
+_ENSURE_PDSH = vm_cluster._ensure_pdsh
+
+
+class TestEnsurePdsh:
+    """cluster deploy installs pdsh on nodes whose image lacks it."""
+
+    def _run(self, os_family: str, rc: int = 0) -> tuple[tuple, str]:
+        with patch.object(
+            vm_cluster,
+            "run_ssh",
+            return_value=MagicMock(returncode=rc, stdout="", stderr="no"),
+        ) as ssh:
+            got = _ENSURE_PDSH("co2-mds", "10.0.0.2", os_family)
+        return got, ssh.call_args.args[1]
+
+    def test_rhel_falls_back_to_epel10(self) -> None:
+        """Regression: rocky10 images had no pdsh, and cluster deploy
+        --mount failed in llmount.sh with rc 127."""
+        got, script = self._run("rhel")
+        assert got == ("co2-mds", 0, "no")
+        assert script.startswith("rpm -q pdsh pdsh-rcmd-ssh")
+        assert "repo=epel-10&arch=$basearch" in script
+
+    def test_debian(self) -> None:
+        _, script = self._run("debian")
+        assert "apt-get install -y -q pdsh" in script
+
+    def test_failure_is_reported(self) -> None:
+        got, _ = self._run("rhel", rc=1)
+        assert got[1] == 1
+
+    def test_dockerfiles_install_it(self) -> None:
+        for target in ("rocky10", "mainline", "rocky10-16k"):
+            text = Path(f"targets/{target}/image.Dockerfile").read_text()
+            assert "repo=epel-10&arch=$basearch" in text, target
+            assert "pdsh pdsh-rcmd-ssh" in text, target

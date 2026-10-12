@@ -1124,6 +1124,45 @@ def _write_cluster_local_sh(
     return node_name, r.returncode, combined.rstrip("\n")
 
 
+# rocky10 images built before their Dockerfile took pdsh from epel-10
+# have none: the 10.1 base pins an EPEL branch without it.
+_EPEL10_METALINK = (
+    "https://mirrors.fedoraproject.org/metalink?repo=epel-10&arch=$basearch"
+)
+_PDSH_SCRIPTS = {
+    "rhel": (
+        "rpm -q pdsh pdsh-rcmd-ssh >/dev/null 2>&1 && exit 0; "
+        "dnf -y -q install pdsh pdsh-rcmd-ssh >/dev/null 2>&1 || "
+        f"dnf -y -q install --setopt=epel.metalink='{_EPEL10_METALINK}' "
+        "pdsh pdsh-rcmd-ssh"
+    ),
+    "debian": (
+        "command -v pdsh >/dev/null && exit 0; "
+        "DEBIAN_FRONTEND=noninteractive apt-get install -y -q pdsh"
+    ),
+}
+
+
+def _ensure_pdsh(
+    node_name: str, node_ip: str, os_family: str
+) -> tuple[str, int, str]:
+    """Install pdsh on a node that lacks it.
+
+    The cluster block sets PDSH to pdsh over ssh, and without it
+    llmount.sh fails every remote command with rc 127.
+    """
+    script = _PDSH_SCRIPTS.get(os_family, _PDSH_SCRIPTS["rhel"])
+    try:
+        r = run_ssh(node_ip, script, timeout=600)
+    except subprocess.TimeoutExpired as e:
+        return node_name, 1, f"timed out after {e.timeout}s installing pdsh"
+    return (
+        node_name,
+        r.returncode,
+        ((r.stdout or "") + (r.stderr or "")).strip(),
+    )
+
+
 GUEST_HOSTS_BEGIN = "# --- ltvm cluster"
 GUEST_HOSTS_END = "# --- END ltvm cluster"
 
@@ -1585,6 +1624,19 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
     failed_hosts = _distribute_cluster_hosts(cluster.name, nodes, node_ips)
     if failed_hosts:
         die(f"/etc/hosts update failed for: {', '.join(failed_hosts)}")
+    failed_pdsh = _parallel_cluster_op(
+        nodes,
+        lambda node: _ensure_pdsh(node.name, node_ips[node.name], os_family),
+        success_verb="pdsh ready",
+        failure_verb="pdsh install FAILED",
+    )
+    if failed_pdsh:
+        die(
+            f"pdsh is missing on {', '.join(failed_pdsh)} and could not be "
+            f"installed; the framework runs every remote command through "
+            f"it.  Rebuild the image (ltvm build image <target>) and "
+            f"recreate the cluster."
+        )
     failed_sh = _parallel_cluster_op(
         nodes,
         lambda node: _write_cluster_local_sh(

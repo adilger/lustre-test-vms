@@ -189,6 +189,38 @@ def _stream_tree(
             )
 
 
+# Images since 2026-10-06 carry this (targets/common/build-tools.sh):
+# auster by name without the tests directory on PATH, exec'd by full
+# path since it finds the tree from its own $0.  Older ones get it here.
+_AUSTER_WRAPPER = """#!/bin/sh
+for d in /usr/lib64/lustre/tests /usr/lib/lustre/tests; do
+\t[ -x "$d/auster" ] && exec "$d/auster" "$@"
+done
+echo "auster: Lustre tests are not installed" >&2
+exit 127
+"""
+AUSTER_WRAPPER_SCRIPT = (
+    "{ [ -e /usr/local/bin/auster ] || "
+    "{ mkdir -p /usr/local/bin && printf '%s' "
+    + shlex.quote(_AUSTER_WRAPPER)
+    + " > /usr/local/bin/auster && chmod 755 /usr/local/bin/auster; }; }"
+)
+
+
+def ensure_auster_wrapper(vm: VMInfo) -> None:
+    """Write the auster wrapper into an image from before it had one."""
+    try:
+        r = run_ssh(vm.ip, AUSTER_WRAPPER_SCRIPT, timeout=step_timeout())
+    except subprocess.TimeoutExpired:
+        r = None
+    if r is None or r.returncode != 0:
+        print(
+            f"warning: could not write /usr/local/bin/auster on {vm.name}; "
+            f"run auster from the Lustre tests directory there",
+            file=sys.stderr,
+        )
+
+
 def deploy_to_vm(
     vm: VMInfo,
     staging: Path,
@@ -280,6 +312,8 @@ def _deploy_to_vm(
             f"post-deploy ({post_deploy_cmd}) failed "
             f"(rc={r.returncode}): {r.stderr}"
         )
+
+    ensure_auster_wrapper(vm)
 
     if not userspace_only:
         verify_deployed_modules(vm, staging)

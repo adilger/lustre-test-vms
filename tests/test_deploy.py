@@ -383,7 +383,7 @@ class TestDeployToVm:
         stream.assert_called_once_with(vm, staging, exclude_modules=True)
         # post-deploy should be ldconfig only (no depmod); the first
         # reads cfg/local.sh, whose blocks the stream replaces
-        assert ssh_cmds[1:] == ["ldconfig"]
+        assert ssh_cmds[1:] == ["ldconfig", deploy.AUSTER_WRAPPER_SCRIPT]
         assert ssh_cmds[0].startswith("cat ")
 
     def test_full_deploy_runs_depmod(self, staging: Path) -> None:
@@ -401,7 +401,10 @@ class TestDeployToVm:
         ):
             deploy.deploy_to_vm(vm, staging)
         assert ssh_cmds[0] == deploy._UNLOAD_SCRIPT
-        assert ssh_cmds[2:] == ["depmod -a && ldconfig"]
+        assert ssh_cmds[2:] == [
+            "depmod -a && ldconfig",
+            deploy.AUSTER_WRAPPER_SCRIPT,
+        ]
 
     def test_a_lustre_that_will_not_unload_stops_the_deploy(
         self, staging: Path
@@ -2819,3 +2822,25 @@ class TestDeployKeepsBlocks:
         with patch("ltvm_pkg.deploy.configure_ram_osts"):
             _, restore = self._deploy(staging, ram_osts=2)
         assert restore.call_args.args[2] == {deploy.OST_COUNT_BEGIN}
+
+
+class TestAusterWrapper:
+    """Images from before the wrapper get it at deploy."""
+
+    def test_written_only_when_absent(self, tmp_path: Path) -> None:
+        script = deploy.AUSTER_WRAPPER_SCRIPT.replace(
+            "/usr/local/bin", str(tmp_path / "bin")
+        )
+        subprocess.run(["bash", "-c", script], check=True)
+        wrapper = tmp_path / "bin/auster"
+        body = wrapper.read_text()
+        assert body.startswith("#!/bin/sh\n")
+        assert '[ -x "$d/auster" ] && exec "$d/auster" "$@"' in body
+        assert wrapper.stat().st_mode & 0o111
+        wrapper.write_text("mine")
+        subprocess.run(["bash", "-c", script], check=True)
+        assert wrapper.read_text() == "mine"
+
+    def test_matches_the_images(self) -> None:
+        tools = Path("targets/common/build-tools.sh").read_text()
+        assert deploy._AUSTER_WRAPPER in tools

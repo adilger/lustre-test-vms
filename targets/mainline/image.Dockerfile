@@ -44,6 +44,14 @@ RUN ARCH=$(uname -m); SKIP_ARCH=/tmp/packages-skip-$ARCH.txt; \
     | xargs dnf -y --allowerasing install \
     && dnf clean all
 
+# pdsh is only in the epel-10 branch, not the epel-z-10.N branch a 10.1
+# base pins (see rocky10/packages-skip.txt).  Without it a node cannot
+# drive a multi-node test run, so take it from epel-10 directly.
+RUN dnf -y install \
+        --setopt=epel.metalink='https://mirrors.fedoraproject.org/metalink?repo=epel-10&arch=$basearch' \
+        pdsh pdsh-rcmd-ssh \
+    && dnf clean all
+
 # Copy shared setup scripts
 COPY common/build-e2fsprogs.sh /tmp/build-e2fsprogs.sh
 COPY common/build-tools.sh     /tmp/build-tools.sh

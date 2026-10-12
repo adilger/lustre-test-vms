@@ -836,6 +836,11 @@ its own /etc/krb5.keytab, password principals for the test users.  The
 guest-side work is `krb5-node.sh` and `krb5-kdc.sh` beside it, piped to
 `bash -s`.  rhel-family targets only (dnf, sssd-kcm's drop-in).
 
+The framework runs every remote command through pdsh.  The rocky10
+and mainline images take it from the epel-10 branch (their 10.1 base
+pins an EPEL branch without it), and `cluster deploy` installs it on a
+node whose older image lacks it (`_ensure_pdsh`).
+
 `cluster exec <role>` fans out across every node holding the role and
 exits non-zero if any node did; `cluster ssh <role>` opens a session on
 the first, since it execs a single interactive ssh.

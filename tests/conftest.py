@@ -391,3 +391,16 @@ def _neutralize_guest_memory_budget() -> object:
     """
     with patch("ltvm_pkg.qemu_run.guest_memory_budget", return_value=None):
         yield
+
+
+@pytest.fixture(autouse=True)
+def _neutralize_ensure_pdsh() -> object:
+    """Keep cluster deploy from installing pdsh over ssh on fake nodes.
+
+    tests/test_cluster_logic.py::TestEnsurePdsh covers it.
+    """
+    with patch(
+        "ltvm_pkg.vm_cluster._ensure_pdsh",
+        side_effect=lambda name, *a, **k: (name, 0, ""),
+    ):
+        yield
