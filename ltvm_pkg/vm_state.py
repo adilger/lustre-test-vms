@@ -932,6 +932,9 @@ class ClusterInfo:
     # The --ost-count the last `cluster deploy` was given, kept the same
     # way; 0 for one OST per OSS disk.
     ost_count: int = 0
+    # The backend the last `cluster deploy` ran it on; "" before that
+    # was recorded.
+    fstype: str = ""
 
     @property
     def path(self) -> Path:
@@ -954,6 +957,8 @@ class ClusterInfo:
             data["ip_family"] = self.ip_family
         if self.ost_count:
             data["ost_count"] = self.ost_count
+        if self.fstype:
+            data["fstype"] = self.fstype
         text = json.dumps(data, indent=2) + "\n"
         _atomic_write(self.path, text)
 
@@ -987,6 +992,7 @@ class ClusterInfo:
             owner_id=data.get("owner_id"),
             ip_family=data.get("ip_family", ""),
             ost_count=int(data.get("ost_count", 0) or 0),
+            fstype=str(data.get("fstype", "") or ""),
         )
 
     @staticmethod

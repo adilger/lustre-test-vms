@@ -294,7 +294,7 @@ def generate_local_sh(
     ``ost_count`` (--ost-count) replaces the count of OSS disks, and
     ``ost_files`` places the OSTs past those disks in files.
     """
-    from ltvm_pkg.deploy import env_count, ost_file_path
+    from ltvm_pkg.deploy import env_count, fstype_line, ost_file_path
 
     if fstype not in ("ldiskfs", "zfs"):
         raise ValueError(f"unsupported fstype: {fstype!r}")
@@ -419,7 +419,7 @@ def generate_local_sh(
         lines.append(f"CLIENTCOUNT=${{CLIENTCOUNT:-{len(client_list)}}}")
     lines.append("")
 
-    lines.append(f"FSTYPE={fstype}")
+    lines.append(fstype_line(fstype))
     lines.append("OSTSEQWIDTH=${OSTSEQWIDTH:-0x20000}")
     lines.append("")
 
@@ -897,15 +897,18 @@ def _deploy_one_node(
     os_family: str = "rhel",
     zfs_staging: Path | None = None,
     userspace_only: bool = False,
+    need_zfs: bool = False,
 ) -> tuple[str, int, str]:
     """Deploy Lustre to one cluster node.
+
+    ``need_zfs`` refuses a node that has no ZFS to run its targets on.
 
     Returns (node_name, returncode, output_message).
 
     `lustre_tree` is the source tree the cluster's `--build` was
     pointed at; it determines where the per-tree staging dir lives.
     """
-    from ltvm_pkg.deploy import deploy_to_vm
+    from ltvm_pkg.deploy import deploy_to_vm, require_zfs_modules
     from ltvm_pkg.lustre_build import staging_path as _staging_path
 
     vm = VMInfo.load(node_name)
@@ -935,6 +938,8 @@ def _deploy_one_node(
         variant=vm.variant,
     )
     try:
+        if need_zfs:
+            require_zfs_modules(vm)
         # No fstype here: the cluster block written further down
         # (generate_local_sh) sets FSTYPE for every node, after anything
         # written here.
@@ -948,6 +953,22 @@ def _deploy_one_node(
         return node_name, 0, "ok"
     except RuntimeError as e:
         return node_name, 1, str(e)
+
+
+def _deployed_fstype(cluster: ClusterInfo, os_family: str) -> str | None:
+    """The FSTYPE in the cluster block on a cluster deployed before its
+    record kept one, or None."""
+    from ltvm_pkg.deploy import read_kept_blocks
+
+    try:
+        ip = VMInfo.load(cluster.local_node().name).ip
+        block = read_kept_blocks(ip, os_family).get(CLUSTER_BLOCK_BEGIN, "")
+    except (VMNotFound, OSError, subprocess.SubprocessError):
+        return None
+    m = re.search(
+        r"^FSTYPE=(?:\$\{_ltvm_env_FSTYPE:-)?(ldiskfs|zfs)\b", block, re.M
+    )
+    return m.group(1) if m else None
 
 
 def _write_cluster_local_sh(
@@ -1245,23 +1266,25 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
     # the cluster cannot mount a ZFS target without ZFS on its nodes.
     # And --zfs on a deploy means "run on ZFS" unless --fstype says
     # otherwise -- same rule as single-node deploy-lustre.
+    # Without --fstype or --zfs the cluster stays on the backend its
+    # last deploy ran it on.
     fstype = getattr(args, "fstype", None)
     zfs_version_arg = getattr(args, "zfs_version", None)
-    want_zfs = (
-        bool(getattr(args, "zfs", False))
-        or bool(zfs_version_arg)
-        or fstype == "zfs"
-    )
-    if want_zfs and fstype is None:
-        fstype = "zfs"
-    if fstype is None:
-        fstype = "ldiskfs"
+    ship_zfs = bool(getattr(args, "zfs", False)) or bool(zfs_version_arg)
     userspace_only = bool(getattr(args, "userspace_only", False))
-    if want_zfs and userspace_only:
+    if ship_zfs and userspace_only:
         die(
             "--zfs and --userspace-only are incompatible: a "
-            "userspace-only deploy ships no kernel modules"
+            "userspace-only deploy ships no kernel modules (--fstype zfs "
+            "alone keeps a cluster that already has ZFS on it)"
         )
+    if ship_zfs and fstype is None:
+        fstype = "zfs"
+    if fstype is None:
+        fstype = cluster.fstype or _deployed_fstype(cluster, os_family)
+    if fstype is None:
+        fstype = "ldiskfs"
+    want_zfs = ship_zfs or (fstype == "zfs" and not userspace_only)
     ost_count_arg = getattr(args, "ost_count", None)
     if ost_count_arg is not None and ost_count_arg < 0:
         die("--ost-count must be 0 or more")
@@ -1375,6 +1398,11 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
                 os_family,
                 zfs_by_node.get(node.name),
                 userspace_only=userspace_only,
+                need_zfs=(
+                    userspace_only
+                    and fstype == "zfs"
+                    and (node.is_mgs or node.is_mds or node.is_oss)
+                ),
             ),
             success_verb="deployed",
             failure_verb="FAILED",
@@ -1466,15 +1494,20 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
 
     # Only once every node holds the new local.sh, so the record always
     # describes what the nodes run.
-    if cluster.ip_family != ip_family or cluster.ost_count != ost_count:
+    if (
+        cluster.ip_family != ip_family
+        or cluster.ost_count != ost_count
+        or cluster.fstype != fstype
+    ):
         cluster.ip_family = ip_family
         cluster.ost_count = ost_count
+        cluster.fstype = fstype
         try:
             cluster.save()
         except OSError as e:
             print(
                 f"    warning: cannot record ip_family={ip_family} "
-                f"ost_count={ost_count}: {e}"
+                f"ost_count={ost_count} fstype={fstype}: {e}"
             )
 
     if args.mount:
@@ -1493,6 +1526,26 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
         print("=== Lustre mounted ===")
 
     print(f"\n=== Cluster '{cluster.name}' deployed ===")
+
+
+def _require_cluster_block(cluster: ClusterInfo, os_family: str) -> None:
+    """Refuse to mount from a node whose cfg/local.sh does not describe
+    the cluster: llmount.sh would format a filesystem on that node alone
+    and report success."""
+    from .deploy import read_kept_blocks
+
+    node = cluster.local_node()
+    try:
+        blocks = read_kept_blocks(VMInfo.load(node.name).ip, os_family)
+    except subprocess.TimeoutExpired:
+        return
+    if CLUSTER_BLOCK_BEGIN not in blocks:
+        die(
+            f"{node.name}'s cfg/local.sh has no cluster configuration, so "
+            f"llmount.sh would format a single-node filesystem on it.  "
+            f"Write it first: ltvm cluster deploy {cluster.name} --build "
+            f"<lustre tree> --userspace-only"
+        )
 
 
 def _run_llmount(
@@ -1586,9 +1639,12 @@ def cmd_cluster_llmount(args: argparse.Namespace) -> None:
     from .vm_commands import _os_family_for_vm
 
     mgs_vm = VMInfo.load(cluster.mgs_node().name)
+    os_family = _os_family_for_vm(mgs_vm, "libdir")
+    if not args.cleanup:
+        _require_cluster_block(cluster, os_family)
     _run_llmount(
         cluster,
-        _os_family_for_vm(mgs_vm, "libdir"),
+        os_family,
         cleanup=args.cleanup,
         server_only=args.server_only,
         timeout=args.timeout,

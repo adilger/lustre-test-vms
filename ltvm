@@ -1805,8 +1805,9 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["ldiskfs", "zfs"],
         default=None,
         help="Pin FSTYPE in the VM's cfg/local.sh, which is what "
-        "llmount.sh and auster read (default: leave the file's "
-        "existing setting alone)",
+        "llmount.sh and auster read (default: keep what an earlier "
+        "deploy pinned).  FSTYPE in the environment still wins.  "
+        "With --userspace-only, zfs needs ZFS on the VM already.",
     )
     _dep_tflag = sp.add_argument(
         "--target",
@@ -2236,7 +2237,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--fstype",
         choices=["ldiskfs", "zfs"],
         default=None,
-        help="OSD backend written into the cluster's cfg/local.sh",
+        help="OSD backend written into the cluster's cfg/local.sh "
+        "(default: the backend of the last deploy, else ldiskfs)",
     )
     cdpl.add_argument(
         "--ip-family",

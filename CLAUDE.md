@@ -401,7 +401,21 @@ ZFS", so it implies `--fstype zfs`.  Pass `--fstype
 ldiskfs` alongside it to stage ZFS on a VM you want to
 keep running ldiskfs.  `--fstype` writes the setting into
 the VM's `cfg/local.sh`, which is what `llmount.sh`,
-`auster` and a bare `sanity.sh` all read.
+`auster` and a bare `sanity.sh` all read, as
+`FSTYPE=${_ltvm_env_FSTYPE:-zfs}`: FSTYPE in the
+environment still picks the backend, as it does for the
+counts.
+
+Every deploy streams the staging's stock `cfg/local.sh`
+over the VM's, so `deploy_to_vm` reads ltvm's OST count,
+FSTYPE and cluster blocks first and puts back those it did
+not rewrite (`read_kept_blocks`/`restore_kept_blocks`).
+That is what makes `--ost-count` and `--fstype` sticky,
+and keeps a cluster member's cluster block through a
+single-node deploy.  A `cluster deploy` takes its backend
+from the cluster record when no flag gives one, and
+`cluster llmount` refuses a first client without the
+cluster block rather than format a one-node filesystem.
 
 For ZFS the test framework takes `MDSDEV*`/`OSTDEV*` as
 the **vdevs** to build pools on and derives the dataset

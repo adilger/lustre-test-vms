@@ -287,7 +287,7 @@ class TestGenerateLocalSh:
         text = vm_cluster.generate_local_sh(c)
         assert "FSNAME=lustre" in text
         assert "NETTYPE=tcp" in text
-        assert "FSTYPE=ldiskfs" in text
+        assert "FSTYPE=${_ltvm_env_FSTYPE:-ldiskfs}" in text
         assert "MOUNT=/mnt/lustre" in text
         assert "MOUNT2=/mnt/lustre2" in text
         assert "DIR=${DIR:-$MOUNT}" in text
@@ -881,3 +881,44 @@ class TestClusterJsonOutput:
 
         monkeypatch.setattr(VMInfo, "load", staticmethod(boom))
         assert vm_cluster._node_state("whatever") == "corrupt"
+
+
+# Taken before conftest's autouse patch replaces it for every test.
+_DEPLOYED_FSTYPE = vm_cluster._deployed_fstype
+
+
+class TestDeployedFstype:
+    """The backend of a cluster deployed before its record kept one."""
+
+    def _ask(self, local_sh: str) -> str | None:
+        cluster = ClusterInfo(
+            name="co3", nodes=[{"name": "co3-c1", "roles": ["client"]}]
+        )
+        with (
+            patch.object(
+                vm_cluster.VMInfo, "load", return_value=MagicMock(ip="10.0.0.9")
+            ),
+            patch(
+                "ltvm_pkg.deploy.run_ssh",
+                return_value=MagicMock(returncode=0, stdout=local_sh),
+            ) as ssh,
+        ):
+            got = _DEPLOYED_FSTYPE(cluster, "rhel")
+        assert ssh.call_args.args[0] == "10.0.0.9"
+        return got
+
+    def _block(self, line: str) -> str:
+        return (
+            f"FSTYPE=${{FSTYPE:-ldiskfs}}\n{vm_cluster.CLUSTER_BLOCK_BEGIN} "
+            f"---\n{line}\n{vm_cluster.CLUSTER_BLOCK_END} ---\n"
+        )
+
+    def test_old_pinned_form(self) -> None:
+        assert self._ask(self._block("FSTYPE=zfs")) == "zfs"
+
+    def test_environment_form(self) -> None:
+        line = "FSTYPE=${_ltvm_env_FSTYPE:-ldiskfs}"
+        assert self._ask(self._block(line)) == "ldiskfs"
+
+    def test_no_block_is_unknown(self) -> None:
+        assert self._ask("FSTYPE=${FSTYPE:-zfs}\n") is None

@@ -1173,10 +1173,33 @@ class TestCmdClusterLlmountBehavior:
                 ),
             ),
             patch.object(vm_cluster, "run") as run,
+            patch(
+                "ltvm_pkg.deploy.read_kept_blocks",
+                return_value={vm_cluster.CLUSTER_BLOCK_BEGIN: "x"},
+            ) as kept,
         ):
             run.return_value = MagicMock(returncode=0)
             self.run = run
+            self.kept = kept
             yield
+
+    def test_refuses_without_the_cluster_block(self) -> None:
+        """Regression: with no cluster block in the first client's
+        cfg/local.sh, llmount.sh formatted a single-node filesystem on
+        that client and exited 0."""
+        self.kept.return_value = {}
+        with patch.object(vm_cluster, "_node_state", return_value="up"):
+            with pytest.raises(SystemExit) as exc:
+                vm_cluster.cmd_cluster_llmount(self._ns())
+        assert exc.value.code == EXIT_ERROR
+        assert self.kept.call_args.args[0] == "10.0.0.12"
+        assert not self.run.called
+
+    def test_cleanup_needs_no_cluster_block(self) -> None:
+        self.kept.return_value = {}
+        with patch.object(vm_cluster, "_node_state", return_value="up"):
+            vm_cluster.cmd_cluster_llmount(self._ns(cleanup=True))
+        assert "llmountcleanup.sh" in self._remote()
 
     def _ns(self, **kw: Any) -> argparse.Namespace:
         base = {"name": "co1", "cleanup": False, "server_only": False}
@@ -1656,6 +1679,130 @@ class TestCmdClusterDeployOstCount:
     def test_negative_refused(self, tmp_path: Path) -> None:
         with pytest.raises(SystemExit):
             self._deploy(self._cluster(), tmp_path, ost_count=-1)
+
+
+class TestCmdClusterDeployFstype:
+    """The backend outlives the deploy, as --ost-count does."""
+
+    def _deploy(
+        self, cluster: ClusterInfo, tree: Path, **flags: object
+    ) -> tuple[MagicMock, MagicMock, MagicMock]:
+        from ltvm_pkg.lustre_build import staging_path
+
+        class _TC:
+            os_family = "rhel"
+
+        staging_path(
+            str(tree), "rocky9", arch="x86_64", kernel="k", variant="base"
+        ).mkdir(parents=True, exist_ok=True)
+        node = MagicMock(
+            os_id="rocky9",
+            arch="x86_64",
+            variant="base",
+            kernel="/a/kernels/k/vmlinuz",
+            ip="10.0.0.5",
+            disk_size=500 << 20,
+        )
+        with (
+            patch.object(ClusterInfo, "load", return_value=cluster),
+            patch.object(ClusterInfo, "save"),
+            patch.object(vm_cluster.VMInfo, "load", return_value=node),
+            patch.object(vm_cluster, "_validate_lustre_source"),
+            patch("ltvm_pkg.target_config.TargetConfig", return_value=_TC()),
+            patch(
+                "ltvm_pkg.cli.deploy._refresh_staged_sources",
+                return_value=None,
+            ),
+            patch.object(
+                vm_cluster.subprocess,
+                "run",
+                return_value=MagicMock(returncode=0),
+            ) as run,
+            patch.object(
+                vm_cluster,
+                "_deploy_one_node",
+                side_effect=lambda name, *a, **k: (name, 0, ""),
+            ) as one,
+            patch.object(vm_cluster, "_staged_zfs", return_value=None),
+            patch.object(vm_cluster, "probe_mgs_lnet"),
+            patch.object(
+                vm_cluster, "generate_local_sh", return_value=""
+            ) as gen,
+            patch.object(
+                vm_cluster,
+                "_write_cluster_local_sh",
+                side_effect=lambda name, *a, **k: (name, 0, ""),
+            ),
+            patch.object(
+                vm_cluster, "_distribute_cluster_hosts", return_value=[]
+            ),
+        ):
+            vm_cluster.cmd_cluster_deploy(
+                argparse.Namespace(
+                    name="co3", lustre_source=str(tree), mount=False, **flags
+                )
+            )
+        return gen, one, run
+
+    def _cluster(self, fstype: str = "") -> ClusterInfo:
+        return ClusterInfo(
+            name="co3",
+            nodes=[
+                {"name": "co3-mds", "roles": ["mgs", "mds"], "mdt_disks": 1},
+                {"name": "co3-oss", "roles": ["oss"], "ost_disks": 2},
+                {"name": "co3-c1", "roles": ["client"]},
+            ],
+            fstype=fstype,
+        )
+
+    def test_zfs_is_recorded(self, tmp_path: Path) -> None:
+        cluster = self._cluster()
+        gen, _, _ = self._deploy(cluster, tmp_path, zfs=True)
+        assert gen.call_args.kwargs["fstype"] == "zfs"
+        assert cluster.fstype == "zfs"
+
+    def test_userspace_only_keeps_zfs(self, tmp_path: Path) -> None:
+        """Regression: a userspace-only redeploy of a ZFS cluster wrote
+        FSTYPE=ldiskfs into its cluster block."""
+        gen, one, run = self._deploy(
+            self._cluster("zfs"), tmp_path, userspace_only=True
+        )
+        assert gen.call_args.kwargs["fstype"] == "zfs"
+        run.assert_not_called()
+        need = {c.args[0]: c.kwargs["need_zfs"] for c in one.call_args_list}
+        assert need == {"co3-mds": True, "co3-oss": True, "co3-c1": False}
+
+    def test_a_full_redeploy_builds_zfs_again(self, tmp_path: Path) -> None:
+        _, one, run = self._deploy(self._cluster("zfs"), tmp_path)
+        assert "--zfs" in run.call_args.args[0]
+        assert not any(c.kwargs["need_zfs"] for c in one.call_args_list)
+
+    def test_fstype_overrides_the_record(self, tmp_path: Path) -> None:
+        cluster = self._cluster("zfs")
+        gen, _, run = self._deploy(cluster, tmp_path, fstype="ldiskfs")
+        assert gen.call_args.kwargs["fstype"] == "ldiskfs"
+        assert "--zfs" not in run.call_args.args[0]
+        assert cluster.fstype == "ldiskfs"
+
+    def test_unrecorded_asks_the_nodes(self, tmp_path: Path) -> None:
+        with patch.object(
+            vm_cluster, "_deployed_fstype", return_value="zfs"
+        ) as asked:
+            gen, _, _ = self._deploy(
+                self._cluster(), tmp_path, userspace_only=True
+            )
+        assert gen.call_args.kwargs["fstype"] == "zfs"
+        asked.assert_called_once()
+
+    def test_never_deployed_is_ldiskfs(self, tmp_path: Path) -> None:
+        gen, _, _ = self._deploy(self._cluster(), tmp_path)
+        assert gen.call_args.kwargs["fstype"] == "ldiskfs"
+
+    def test_zfs_flag_with_userspace_only_refused(self, tmp_path: Path) -> None:
+        with pytest.raises(SystemExit):
+            self._deploy(
+                self._cluster(), tmp_path, zfs=True, userspace_only=True
+            )
 
 
 class TestCmdClusterDeployUserspaceOnly:

@@ -293,22 +293,22 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     # one case for `--zfs --fstype ldiskfs` is staging ZFS on a VM you
     # want to keep running ldiskfs for now.
     fstype = getattr(args, "fstype", None)
-    want_zfs = (
-        bool(getattr(args, "zfs", False))
-        or bool(getattr(args, "zfs_version", None))
-        or fstype == "zfs"
+    ship_zfs = bool(getattr(args, "zfs", False)) or bool(
+        getattr(args, "zfs_version", None)
     )
+    want_zfs = ship_zfs or (fstype == "zfs" and not userspace_only)
     if want_zfs and fstype is None:
         fstype = "zfs"
     zfs_version_arg = getattr(args, "zfs_version", None)
 
-    # --userspace-only ships no modules, so it can neither install ZFS
-    # nor make a ZFS mount work.  Silently honouring only the --fstype
-    # half would leave the VM pinned to a backend it cannot mount.
-    if want_zfs and userspace_only:
+    # --userspace-only ships no modules, so it cannot install ZFS.  It
+    # can still pin --fstype zfs on a VM that has ZFS already, which
+    # deploy_to_vm checks.
+    if ship_zfs and userspace_only:
         return _error(
             "--zfs and --userspace-only are incompatible: a "
-            "userspace-only deploy ships no kernel modules",
+            "userspace-only deploy ships no kernel modules (--fstype zfs "
+            "alone keeps a VM that already has ZFS on it)",
             use_json,
         )
 

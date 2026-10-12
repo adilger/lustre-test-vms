@@ -418,10 +418,11 @@ piping a slow command through `grep`.
 The VM's shape is in `cfg/local.sh`: deploy appends blocks setting
 `MDSCOUNT`, `OSTCOUNT`, `MDSDEV*`/`OSTDEV*`, the sizes and `FSTYPE` (and
 on a cluster which node holds what) after the stock `${VAR:-default}`
-lines. The two counts still take the environment's value, as on a stock
-tree, so `MDSCOUNT=1` or `OSTCOUNT=1` runs fewer targets than the VM has
-(a larger one puts the extra OSTs in files under /tmp). Reformat with the
-same count:
+lines. The two counts and `FSTYPE` still take the environment's value,
+as on a stock tree, so `MDSCOUNT=1` or `OSTCOUNT=1` runs fewer targets
+than the VM has (a larger one puts the extra OSTs in files under /tmp),
+and `FSTYPE=ldiskfs` runs ldiskfs on a VM deployed with `--zfs`. Reformat
+with the same count:
 
 ```bash
 ssh co1-single 'cd /usr/lib64/lustre/tests && MDSCOUNT=1 bash llmount.sh'
@@ -431,11 +432,13 @@ ssh co1-single 'MDSCOUNT=1 ONLY=42a bash /usr/lib64/lustre/tests/sanity.sh'
 For more OSTs than disks -- sanity-ec wants 8 -- deploy with
 `deploy-lustre --ost-count 8` (or `cluster deploy --ost-count 8`): the
 OSTs past the disks are files in the root filesystem, sized to fit it,
-and later deploys keep the count until `--ost-count 0`.
+and later deploys keep the count until `--ost-count 0`.  Later deploys,
+`--userspace-only` included, keep the `FSTYPE` and the cluster block
+too; `--fstype zfs` with `--userspace-only` pins ZFS on a VM that has it.
 
-The rest -- devices, sizes, `FSTYPE` -- are plain assignments and win
-over the environment. A VM deployed by an older ltvm takes the counts
-from the environment only after its next deploy.
+The rest -- devices and sizes -- are plain assignments and win over the
+environment. A VM deployed by an older ltvm takes the counts and
+`FSTYPE` from the environment only after its next deploy.
 
 On a cluster the servers run parts of a suite (`rpc.sh`) from their own
 `local.sh`, without the client's environment. There, point `CONFIG` at a

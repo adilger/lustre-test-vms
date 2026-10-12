@@ -354,3 +354,15 @@ def make_fake_ko(modinfo: dict[str, str]) -> bytes:
             shstrtab,
         ]
     )
+
+
+@pytest.fixture(autouse=True)
+def _neutralize_deployed_fstype() -> object:
+    """Keep cluster deploy from reading a node's cfg/local.sh over ssh.
+
+    A cluster with no recorded fstype asks its first client which one
+    it was deployed with; the tests' clusters have no real nodes.
+    tests/test_cluster_logic.py::TestDeployedFstype covers the reader.
+    """
+    with patch("ltvm_pkg.vm_cluster._deployed_fstype", return_value=None):
+        yield
