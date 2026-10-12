@@ -639,6 +639,14 @@ Root's filesystem only: a whole `sync` on a Lustre client whose
 servers are gone would hang.  An unreachable guest is warned about and
 stopped anyway; `--force` skips the sync.
 
+**NMI:** an x86 guest boots with the NMI panic knobs set
+(`qemu_run.NMI_PANIC_ARGS`: `unknown_nmi_panic` and `sysctl.kernel.*`
+on the cmdline, which needs 5.8; create and start also write
+`/etc/sysctl.d/90-ltvm-nmi.conf` for rocky8's 4.18), so `ltvm vm nmi`
+panics a guest into kdump with no ssh, which is when it is needed.
+`vm nmi` still sets them over ssh for a guest booted before that, and
+refuses only when that fails and the QEMU's cmdline lacks them.
+
 **Kernel arguments:** `--kernel-args 'slub_debug=FZPU page_owner=on'`
 is stored in the `.info` file as `KERNEL_ARGS` and appended after
 ltvm's own parameters on every boot, so a parameter whose last

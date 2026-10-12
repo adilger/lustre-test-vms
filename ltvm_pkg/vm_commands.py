@@ -168,6 +168,38 @@ KDUMP_SEED_BUDGET = (
 )
 
 
+NMI_SYSCTL_CONF = "/etc/sysctl.d/90-ltvm-nmi.conf"
+_NMI_SYSCTLS = (
+    "kernel.panic_on_unrecovered_nmi",
+    "kernel.panic_on_io_nmi",
+    "kernel.unknown_nmi_panic",
+)
+
+
+def _set_nmi_panic(vm: VMInfo) -> None:
+    """Make an NMI from the host panic the guest, now and every boot.
+
+    The boot cmdline does it on kernels from 5.8 (qemu_run.NMI_PANIC_ARGS);
+    this drop-in does it on rocky8's 4.18, for every boot after this one.
+    Best effort, like the rest of the kdump setup.
+    """
+    if vm.arch not in ("", "x86_64"):
+        return
+    body = "".join(f"{k} = 1\\n" for k in _NMI_SYSCTLS)
+    try:
+        run_ssh(
+            vm.ip,
+            f"printf '{body}' > {NMI_SYSCTL_CONF} && "
+            f"sysctl -q -p {NMI_SYSCTL_CONF}",
+            timeout=KDUMP_PROBE_TIMEOUT,
+        )
+    except Exception as e:  # noqa: BLE001 - best-effort step
+        print(
+            f"warning: could not set the NMI panic sysctls on '{vm.name}': {e}",
+            file=sys.stderr,
+        )
+
+
 def _seed_kdump_boot(vm: VMInfo) -> None:
     """Ensure /boot has vmlinuz + kdump initramfs for kexec-on-panic.
 
@@ -184,6 +216,7 @@ def _seed_kdump_boot(vm: VMInfo) -> None:
             f"VM {vm.name!r} has no kver recorded; recreate the VM"
         )
     kver = vm.kver
+    _set_nmi_panic(vm)
 
     # Determine OS family from target config.  A blanket
     # `except Exception: pass` would silently fall back to "rhel" for
@@ -2324,29 +2357,41 @@ def cmd_nmi(args: argparse.Namespace) -> int:
     # Ensure the injected NMI causes a panic.  QEMU microVM delivers
     # inject-nmi as an ISA SERR NMI (PCI system error, reason 0xff), handled
     # by mem_parity_error() which only panics when panic_on_unrecovered_nmi=1.
-    # Set all three NMI-panic knobs to cover every kernel version.
+    # A guest booted by this ltvm has all three knobs set from boot (its
+    # cmdline, or the sysctl.d drop-in on 4.18), so a guest that no
+    # longer answers ssh -- the one an NMI is for -- still panics.  The
+    # ssh here only covers a guest booted before that.
+    booted_with = _booted_with_nmi_panic(vm)
+    err = ""
     try:
         r = run_ssh(
             vm.ip,
-            "sysctl -w kernel.panic_on_unrecovered_nmi=1 "
-            "kernel.panic_on_io_nmi=1 kernel.unknown_nmi_panic=1",
+            "sysctl -w " + " ".join(f"{k}=1" for k in _NMI_SYSCTLS),
             timeout=10,
         )
-    except Exception as e:
-        return _handler_error(
-            args, f"failed to set NMI panic sysctls on '{args.name}': {e}"
-        )
-    # Without these knobs the injected NMI arrives as an ISA SERR the
-    # guest logs and ignores, so a discarded rc here meant ltvm
-    # promised "expect panic + kdump reboot" and exited 0 while the
-    # user waited for a vmcore that was never coming.  The non-x86
-    # branch above already checks its rc.
-    if r.returncode != 0:
+        if r.returncode != 0:
+            err = (
+                f"rc={r.returncode}: "
+                f"{(r.stderr or '').strip() or '(no stderr)'}"
+            )
+    except Exception as e:  # noqa: BLE001 - the guest may be hung
+        err = str(e)
+    if err and not booted_with:
+        # Without these knobs the injected NMI arrives as an ISA SERR
+        # the guest logs and ignores: promising a panic here would leave
+        # the user waiting for a vmcore that was never coming.
         return _handler_error(
             args,
-            f"failed to set NMI panic sysctls on '{args.name}' "
-            f"(rc={r.returncode}): "
-            f"{(r.stderr or '').strip() or '(no stderr)'}",
+            f"failed to set NMI panic sysctls on '{args.name}' ({err}), "
+            f"and it was booted before ltvm set them at boot, so an NMI "
+            f"would be ignored.  `ltvm stop {args.name} && ltvm start "
+            f"{args.name}` boots it with them.",
+        )
+    if err:
+        print(
+            f"note: no ssh to '{args.name}' ({err}); its NMI panic "
+            f"settings were set at boot",
+            file=sys.stderr,
         )
     try:
         _qmp_nmi(vm.socket_path)
@@ -2356,6 +2401,23 @@ def cmd_nmi(args: argparse.Namespace) -> int:
         )
     print(f"NMI injected into '{args.name}' (expect panic + kdump reboot)")
     return EXIT_OK
+
+
+def _booted_with_nmi_panic(vm: VMInfo) -> bool:
+    """Whether the guest's running QEMU boots it with NMI_PANIC_ARGS.
+
+    A VM booted before ltvm put them on the cmdline relies on the ssh in
+    cmd_nmi.  4.18 ignores sysctl.* on the cmdline, but its drop-in was
+    written by the same ltvm, at the create or start that booted it.
+    """
+    from .qemu_run import NMI_PANIC_ARGS
+
+    try:
+        argv = Path(f"/proc/{vm.pid}/cmdline").read_bytes().split(b"\0")
+    except OSError:
+        return False
+    want = NMI_PANIC_ARGS.split()[1].encode()
+    return any(want in a for a in argv)
 
 
 def _elf_build_id(path: Path) -> str | None:

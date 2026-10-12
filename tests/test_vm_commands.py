@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -1420,6 +1421,11 @@ class TestSeedKdumpBoot:
         assert any("test -f /boot/vmlinuz-" in c for c in cmds)
         assert any("systemctl restart kdump" in c for c in cmds)
         assert not any("dracut" in c for c in cmds)
+        # NMI panic for every later boot too, for kernels older than
+        # sysctl.* on the cmdline.
+        nmi = next(c for c in cmds if vm_commands.NMI_SYSCTL_CONF in c)
+        assert "kernel.panic_on_unrecovered_nmi = 1" in nmi
+        assert f"sysctl -q -p {vm_commands.NMI_SYSCTL_CONF}" in nmi
 
     def test_fast_path_debian_uses_kdump_config(self, tmp_path: Path) -> None:
         vm = self._vm(tmp_path, os_id="ubuntu24")
@@ -2061,6 +2067,52 @@ class TestCmdNmi:
         # Must not attempt NMI injection after sysctl failure.
         mock_nmi.assert_not_called()
         assert "failed to set NMI panic sysctls" in capsys.readouterr().err
+
+    def test_hung_guest_booted_with_the_knobs_still_gets_its_nmi(
+        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Regression: a guest that stopped answering ssh could not be
+        captured, because the panic sysctls were set over ssh."""
+        _seed_vm_files(tmp_vmdir, "nmi-hung")
+        args = argparse.Namespace(name="nmi-hung", json=False)
+        with (
+            patch("ltvm_pkg.vm_commands.is_running", return_value=True),
+            patch(
+                "ltvm_pkg.vm_commands.run_ssh",
+                side_effect=subprocess.TimeoutExpired("ssh", 10),
+            ),
+            patch(
+                "ltvm_pkg.vm_commands._booted_with_nmi_panic",
+                return_value=True,
+            ),
+            patch("ltvm_pkg.vm_commands._qmp_nmi") as mock_nmi,
+        ):
+            rc = vm_commands.cmd_nmi(args)
+        assert rc == 0
+        mock_nmi.assert_called_once()
+        assert "set at boot" in capsys.readouterr().err
+
+    def test_booted_with_reads_the_qemu_cmdline(self) -> None:
+        import sys
+
+        from ltvm_pkg.qemu_run import NMI_PANIC_ARGS
+
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import time; time.sleep(30)",
+                f"-append console=ttyS0{NMI_PANIC_ARGS}",
+            ]
+        )
+        try:
+            vm = VMInfo(name="x", ip="10.0.0.1", pid=proc.pid)
+            assert vm_commands._booted_with_nmi_panic(vm)
+            vm.pid = os.getpid()
+            assert not vm_commands._booted_with_nmi_panic(vm)
+        finally:
+            proc.kill()
+            proc.wait()
 
     def test_nmi_injection_failure_reported(
         self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]

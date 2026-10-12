@@ -653,6 +653,19 @@ def launch_qemu(vm: VMInfo, *, wait_seconds: int = 0) -> None:
         time.sleep(min(_MEMORY_POLL_SECONDS, remaining))
 
 
+# An NMI injected from the host (`ltvm vm nmi`) panics into kdump with
+# no ssh needed, which is when it is wanted: the guest has stopped
+# answering.  QEMU delivers it as an ISA SERR NMI, which panics only
+# with panic_on_unrecovered_nmi; the other two cover other kernels.
+# sysctl.* on the cmdline needs 5.8 or later; the guest's sysctl.d
+# drop-in (vm_commands.NMI_SYSCTL_CONF) covers rocky8's 4.18.  x86 only:
+# the knobs are CONFIG_X86.
+NMI_PANIC_ARGS = (
+    " unknown_nmi_panic sysctl.kernel.panic_on_unrecovered_nmi=1"
+    " sysctl.kernel.panic_on_io_nmi=1"
+)
+
+
 def _start_qemu(vm: VMInfo) -> None:
     """Launch QEMU for ``vm``, under the launch lock, its memory admitted."""
     # aarch64 virt uses PL011 UART (ttyAMA0); x86 uses 8250 (ttyS0)
@@ -719,6 +732,8 @@ def _start_qemu(vm: VMInfo) -> None:
         f"{fc_nic_ip6s_fragment}"
         f"{fc_nic_ip6_prefixes_fragment}"
     )
+    if vm.arch in ("", "x86_64"):
+        boot_args += NMI_PANIC_ARGS
     # Last, so that a parameter whose last occurrence wins
     # (crashkernel=, panic=) takes the user's value.
     if vm.kernel_args:

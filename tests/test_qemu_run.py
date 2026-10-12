@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from ltvm_pkg import qemu_run
+from ltvm_pkg.qemu_run import NMI_PANIC_ARGS
 from ltvm_pkg.vm_state import VMInfo
 
 
@@ -388,7 +389,9 @@ class TestLaunchQemuCommand:
         h = _LaunchHarness()
         _run_launch(vm, h)
         append = h.qemu_args[h.qemu_args.index("-append") + 1]
-        assert append.endswith(" fc_nics=tcp crashkernel=1G kasan_multi_shot")
+        assert append.endswith(
+            f" fc_nics=tcp{NMI_PANIC_ARGS} crashkernel=1G kasan_multi_shot"
+        )
 
     def test_no_kernel_args_leaves_cmdline_as_before(
         self, tmp_vmdir: Path
@@ -397,7 +400,17 @@ class TestLaunchQemuCommand:
         h = _LaunchHarness()
         _run_launch(vm, h)
         append = h.qemu_args[h.qemu_args.index("-append") + 1]
-        assert append.endswith(" fc_name=co1-single")
+        assert append.endswith(f" fc_name=co1-single{NMI_PANIC_ARGS}")
+
+    def test_x86_boots_with_nmi_panic(self, tmp_vmdir: Path) -> None:
+        """An NMI from the host must panic a guest that no longer
+        answers ssh, so the knobs are set from boot."""
+        vm = _make_vm(tmp_vmdir)
+        h = _LaunchHarness()
+        _run_launch(vm, h)
+        append = h.qemu_args[h.qemu_args.index("-append") + 1]
+        assert " unknown_nmi_panic " in append
+        assert "sysctl.kernel.panic_on_unrecovered_nmi=1" in append
 
     def test_fc_nic_ips_carry_no_prefix(self, tmp_vmdir: Path) -> None:
         """fc_nic_ips= stays bare dotted quads.  An image older than
