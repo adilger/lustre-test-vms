@@ -365,8 +365,50 @@ class TestClassify:
             "alive": True,
             "started": 1000,
             "current": "== sanity test 42a: x ===",
+            "boots": {},
         }
         assert runs[1]["rc"] == "0" and not runs[1]["alive"]
+
+    def test_parse_probe_boot_ids(self) -> None:
+        out = (
+            "node\t2000\t5000\tb-now\n"
+            f"run\t{RID}\t\t1\t1000\t\tco2-c1=b-c1 co2-oss=b-oss \n"
+        )
+        assert suite_run.probe_boot_id(out) == "b-now"
+        runs = suite_run.parse_probe(out)[2]
+        assert runs[0]["boots"] == {"co2-c1": "b-c1", "co2-oss": "b-oss"}
+
+    def test_a_node_booted_just_before_the_run_did_not_crash(self) -> None:
+        """Regression: after `cluster start`, a clock step in the guest
+        made the run look older than the nodes, and status called two
+        healthy nodes crashed."""
+        run = dict(_run(alive=True), boots={"co2-oss": "b1", "co2-c2": "b2"})
+        s = suite_run.classify(
+            run,
+            9000,
+            {"co2-oss": 120, "co2-c2": 120},
+            {"co2-oss": "b1", "co2-c2": "b2"},
+        )
+        assert s.rebooted == [] and s.warnings() == []
+
+    def test_a_new_boot_id_is_a_crash(self) -> None:
+        run = dict(_run(), boots={"co2-oss": "b1", "co2-c2": "b2"})
+        s = suite_run.classify(
+            run,
+            2000,
+            {"co2-oss": 9000, "co2-c2": None},
+            {"co2-oss": "b1-new", "co2-c2": None},
+        )
+        assert s.rebooted == ["co2-oss"]
+        assert s.unreachable == ["co2-c2"]
+
+    def test_launch_records_boot_ids(self, tmp_path: Path) -> None:
+        cmd = suite_run.launch_command(RID, {"co2-c1": "b-c1", "co2-oss": "b2"})
+        d = f"/root/ltvm-suite/{RID}"
+        line = next(x for x in cmd.splitlines() if x.endswith("/boots"))
+        line = line.replace(d, str(tmp_path))
+        subprocess.run(["bash", "-c", line], check=True)
+        assert (tmp_path / "boots").read_text() == "co2-c1=b-c1\nco2-oss=b2\n"
 
     @pytest.mark.skipif(
         not Path("/proc/self/cmdline").exists(), reason="needs /proc"

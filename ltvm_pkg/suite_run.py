@@ -168,13 +168,24 @@ def run_script(
     return "\n".join(lines) + "\n"
 
 
-def launch_command(run_id: str) -> str:
+def launch_command(run_id: str, boots: dict[str, str] | None = None) -> str:
     """Install run.sh from stdin and start it detached.
+
+    ``boots`` is each node's boot_id as the run starts, kept in the run
+    so status can tell a node that rebooted under it.
 
     Returns once run.sh has written its pid, so a status straight after
     never finds a run that has not started yet.
     """
     d = run_dir(run_id)
+    keep = (
+        [
+            f"printf '%s\\n' {' '.join(shlex.quote(f'{n}={b}') for n, b in boots.items())}"
+            f" > {d}/boots"
+        ]
+        if boots
+        else []
+    )
     return "\n".join(
         [
             "set -e",
@@ -182,6 +193,7 @@ def launch_command(run_id: str) -> str:
             f"mkdir {d}",
             f"cat > {d}/run.sh",
             f"date +%s > {d}/started",
+            *keep,
             f"setsid nohup keyctl session - bash {d}/run.sh"
             f" > {d}/out 2>&1 < /dev/null &",
             "for ((i = 0; i < 100; i++)); do",
@@ -195,12 +207,14 @@ def launch_command(run_id: str) -> str:
 
 
 def probe_script(run_id: str | None) -> str:
-    """Shell that reports the node's clock and uptime, then one
+    """Shell that reports the node's clock, uptime and boot_id, then one
     tab-separated line per run: id, rc (empty until done), whether
-    run.sh is alive, start time, and the last `== test` line."""
+    run.sh is alive, start time, the last `== test` line, and the
+    nodes' boot_ids at the run's start."""
     ids = run_id if run_id else "*"
     return f"""\
-printf 'node\\t%s\\t%s\\n' "$(date +%s)" "$(cut -d. -f1 /proc/uptime)"
+printf 'node\\t%s\\t%s\\t%s\\n' "$(date +%s)" "$(cut -d. -f1 /proc/uptime)" \\
+	"$(cat {BOOT_ID} 2>/dev/null)"
 cd {SUITE_ROOT} 2>/dev/null || exit 0
 for id in {ids}; do
 	[[ -d $id ]] || continue
@@ -211,10 +225,14 @@ for id in {ids}; do
 		2>/dev/null && alive=1
 	cur=$(grep -a '^== ' "$id/out" 2>/dev/null | tail -1 | tr '\\t' ' ' |
 		cut -c1-100)
-	printf 'run\\t%s\\t%s\\t%s\\t%s\\t%s\\n' "$id" "${{rc#rc=}}" "$alive" \\
-		"$(cat "$id/started" 2>/dev/null)" "$cur"
+	printf 'run\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' "$id" "${{rc#rc=}}" \\
+		"$alive" "$(cat "$id/started" 2>/dev/null)" "$cur" \\
+		"$(tr '\\n' ' ' < "$id/boots" 2>/dev/null)"
 done
 """
+
+
+BOOT_ID = "/proc/sys/kernel/random/boot_id"
 
 
 def _int(text: str) -> int | None:
@@ -239,9 +257,23 @@ def parse_probe(text: str) -> tuple[int | None, int | None, list[dict]]:
                     "alive": f[3].strip() == "1",
                     "started": _int(f[4]),
                     "current": f[5].strip(),
+                    "boots": dict(
+                        w.split("=", 1)
+                        for w in (f[6] if len(f) > 6 else "").split()
+                        if "=" in w
+                    ),
                 }
             )
     return now, uptime, runs
+
+
+def probe_boot_id(text: str) -> str | None:
+    """The probed node's boot_id, from probe_script's output."""
+    for line in text.splitlines():
+        f = line.split("\t")
+        if f[0] == "node" and len(f) >= 4 and f[3].strip():
+            return f[3].strip()
+    return None
 
 
 @dataclass
@@ -273,13 +305,22 @@ class RunStatus:
 
 
 def classify(
-    run: dict, now: int | None, uptimes: dict[str, int | None]
+    run: dict,
+    now: int | None,
+    uptimes: dict[str, int | None],
+    boot_ids: dict[str, str | None] | None = None,
 ) -> RunStatus:
     """running / done / died for one probed run.
 
-    A node whose uptime is shorter than the run's age rebooted while the
-    run was going: nothing in a suite reboots a VM, so it crashed.  Not
-    reported for a finished run, which a later restart does not concern.
+    A node whose boot_id differs from the one the run recorded at its
+    start rebooted while the run was going: nothing in a suite reboots
+    a VM, so it crashed.  Not reported for a finished run, which a
+    later restart does not concern.
+
+    A run from before boot_ids were recorded falls back to comparing
+    each node's uptime with the run's age.  That age is the guest's own
+    clock, which a time sync can step after boot, and it reported nodes
+    booted just before the run as crashed.
     """
     started = run.get("started")
     age = now - started if now is not None and started is not None else None
@@ -290,7 +331,13 @@ def classify(
     else:
         state, rc = "died", None
     rebooted: list[str] = []
-    if state != "done" and age is not None:
+    recorded = run.get("boots") or {}
+    if state != "done" and recorded:
+        now_ids = boot_ids or {}
+        rebooted = [
+            n for n, b in recorded.items() if now_ids.get(n) and now_ids[n] != b
+        ]
+    elif state != "done" and age is not None:
         rebooted = [n for n, u in uptimes.items() if u is not None and u < age]
     return RunStatus(
         run_id=run["id"],
@@ -303,12 +350,30 @@ def classify(
     )
 
 
-def _uptime(node: str) -> int | None:
+def _uptime_and_boot(node: str) -> tuple[int | None, str | None]:
     try:
-        r = _ssh(node, "cut -d. -f1 /proc/uptime", timeout=30)
+        r = _ssh(node, f"cut -d. -f1 /proc/uptime; cat {BOOT_ID}", timeout=30)
     except Unreachable:
-        return None
-    return _int(r.stdout) if r.returncode == 0 else None
+        return None, None
+    if r.returncode != 0:
+        return None, None
+    lines = (r.stdout or "").split()
+    up = _int(lines[0]) if lines else None
+    return up, (lines[1] if len(lines) > 1 else None)
+
+
+def boot_ids(nodes: list[str]) -> dict[str, str]:
+    """Each node's boot_id, leaving out any that does not answer."""
+    out = {}
+    for n in nodes:
+        try:
+            r = _ssh(n, f"cat {BOOT_ID}", timeout=30)
+        except Unreachable:
+            continue
+        b = (r.stdout or "").strip()
+        if r.returncode == 0 and b:
+            out[n] = b
+    return out
 
 
 def query(t: SuiteTarget, run_id: str | None = None) -> list[RunStatus]:
@@ -321,11 +386,12 @@ def query(t: SuiteTarget, run_id: str | None = None) -> list[RunStatus]:
         )
     now, up, runs = parse_probe(r.stdout)
     uptimes: dict[str, int | None] = {t.exec_node: up}
+    ids: dict[str, str | None] = {t.exec_node: probe_boot_id(r.stdout)}
     if any(not run["rc"] for run in runs):
         for n in t.nodes:
             if n != t.exec_node:
-                uptimes[n] = _uptime(n)
-    return [classify(run, now, uptimes) for run in runs]
+                uptimes[n], ids[n] = _uptime_and_boot(n)
+    return [classify(run, now, uptimes, ids) for run in runs]
 
 
 # -- results.yml --------------------------------------------------------
@@ -592,7 +658,12 @@ def cmd_suite_run(args: argparse.Namespace) -> int:
         slow=args.slow,
     )
     try:
-        r = _ssh(t.exec_node, launch_command(run_id), stdin=script, timeout=60)
+        r = _ssh(
+            t.exec_node,
+            launch_command(run_id, boot_ids(t.nodes)),
+            stdin=script,
+            timeout=60,
+        )
     except Unreachable as e:
         die(str(e), EXIT_UNREACHABLE)
     if r.returncode != 0:
