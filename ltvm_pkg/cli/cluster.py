@@ -230,7 +230,11 @@ def cmd_cluster_stop(args: argparse.Namespace) -> int:
     vm_claim.require_all(nodes, "stop")
     from ltvm_pkg.cli.vm import cmd_vm_stop
 
-    return cmd_vm_stop(_qemu_ns(names=nodes, json=args.json))
+    return cmd_vm_stop(
+        _qemu_ns(
+            names=nodes, json=args.json, force=getattr(args, "force", False)
+        )
+    )
 
 
 def cmd_cluster_deploy(args: argparse.Namespace) -> int:

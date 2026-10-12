@@ -783,9 +783,55 @@ class TestCmdStop:
     def test_live_vm_is_killed(self, tmp_vmdir: Path) -> None:
         _seed_vm_files(tmp_vmdir, "live")
         args = argparse.Namespace(names=["live"])
-        with patch("ltvm_pkg.vm_commands.kill_qemu") as mock_kill:
+        with (
+            patch("ltvm_pkg.vm_commands.kill_qemu") as mock_kill,
+            patch("ltvm_pkg.vm_commands._sync_guests"),
+        ):
             vm_commands.cmd_stop(args)
         mock_kill.assert_called_once()
+
+    def _stop(self, tmp_vmdir: Path, rc: Any = 0, **kw: Any) -> list[str]:
+        for n in ("s1", "s2"):
+            VMInfo(name=n, ip=f"10.0.0.{len(n)}", pid=42).save()
+        order: list[str] = []
+
+        def ssh(ip: str, cmd: str, timeout: int = 0) -> MagicMock:
+            order.append(f"ssh {cmd}")
+            if isinstance(rc, BaseException):
+                raise rc
+            return MagicMock(returncode=rc, stderr="gone")
+
+        with (
+            patch("ltvm_pkg.vm_commands.is_running", return_value=True),
+            patch("ltvm_pkg.vm_commands.run_ssh", side_effect=ssh),
+            patch(
+                "ltvm_pkg.vm_commands.kill_qemu",
+                side_effect=lambda vm: order.append(f"kill {vm.name}"),
+            ),
+        ):
+            vm_commands.cmd_stop(argparse.Namespace(names=["s1", "s2"], **kw))
+        return order
+
+    def test_guests_sync_before_the_power_goes(self, tmp_vmdir: Path) -> None:
+        """Regression: files deployed just before a stop came back empty
+        after the next start."""
+        order = self._stop(tmp_vmdir)
+        assert order == [
+            "ssh sync -f /",
+            "ssh sync -f /",
+            "kill s1",
+            "kill s2",
+        ]
+
+    def test_force_skips_the_sync(self, tmp_vmdir: Path) -> None:
+        assert self._stop(tmp_vmdir, force=True) == ["kill s1", "kill s2"]
+
+    def test_unreachable_guest_is_stopped_anyway(
+        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        order = self._stop(tmp_vmdir, rc=subprocess.TimeoutExpired("ssh", 30))
+        assert order[-2:] == ["kill s1", "kill s2"]
+        assert "could not sync s1" in capsys.readouterr().err
 
 
 # ── cmd_list totals ──────────────────────────────────────
@@ -1630,8 +1676,32 @@ class TestWithVmStopped:
     """Context manager that stops a running VM for the duration of a
     block then restarts it.  No-op if the VM isn't running."""
 
+    @pytest.fixture(autouse=True)
+    def _no_sync(self) -> Any:
+        with patch("ltvm_pkg.vm_commands._sync_guests") as sync:
+            self.sync = sync
+            yield
+
     def _vm(self) -> VMInfo:
         return VMInfo(name="co1-wvs", ip="10.0.0.10")
+
+    def test_guest_is_synced_before_it_stops(self) -> None:
+        """A snapshot taken after a power cut missed the guest's
+        unflushed writes."""
+        vm = self._vm()
+        with (
+            patch("ltvm_pkg.vm_commands.is_running", return_value=True),
+            patch(
+                "ltvm_pkg.vm_commands.kill_qemu",
+                side_effect=lambda v: self.sync.assert_called_once_with([vm]),
+            ) as kill,
+            patch("ltvm_pkg.vm_commands.launch_qemu"),
+            patch("ltvm_pkg.vm_commands.provision_vm_ssh"),
+            patch("ltvm_pkg.vm_commands._seed_kdump_boot"),
+        ):
+            with vm_commands._with_vm_stopped(vm, "for test"):
+                pass
+        kill.assert_called_once()
 
     def test_noop_when_not_running(self) -> None:
         """If the VM is stopped, _with_vm_stopped does nothing."""

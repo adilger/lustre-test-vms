@@ -110,6 +110,7 @@ def _with_vm_stopped(
     was_running = is_running(vm)
     if was_running:
         print(f"stopping {vm.name} {reason}...")
+        _sync_guests([vm])
         kill_qemu(vm)
     try:
         yield
@@ -1494,7 +1495,51 @@ def cmd_start(args: argparse.Namespace) -> None:
         print(f"started {name}")
 
 
+# Root's filesystem only (syncfs): a whole-system sync on a Lustre
+# client whose servers are already gone would wait out the timeout.
+GUEST_SYNC_COMMAND = "sync -f /"
+GUEST_SYNC_TIMEOUT = 30
+
+
+def _sync_guest(vm: VMInfo) -> str:
+    """Flush the guest's root filesystem; "" or why it could not."""
+    try:
+        r = run_ssh(vm.ip, GUEST_SYNC_COMMAND, timeout=GUEST_SYNC_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return f"no answer in {GUEST_SYNC_TIMEOUT}s"
+    except OSError as e:
+        return str(e)
+    if r.returncode != 0:
+        return f"rc={r.returncode}: {(r.stderr or '').strip()}"
+    return ""
+
+
+def _sync_guests(vms: list[VMInfo]) -> None:
+    """Flush every running guest's writes before its power is cut.
+
+    kill_qemu ends QEMU, which flushes its own disk caches but not the
+    guest's page cache: files written just before a stop came back
+    empty or missing after the next start.  Best effort, in parallel; a
+    guest that cannot be reached is stopped anyway, with a warning.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    live = [vm for vm in vms if is_running(vm)]
+    if not live:
+        return
+    with ThreadPoolExecutor(max_workers=len(live)) as pool:
+        errors = list(pool.map(_sync_guest, live))
+    for vm, err in zip(live, errors):
+        if err:
+            print(
+                f"warning: could not sync {vm.name} before stopping it "
+                f"({err}); writes it had not flushed are lost",
+                file=sys.stderr,
+            )
+
+
 def cmd_stop(args: argparse.Namespace) -> None:
+    vms: list[VMInfo] = []
     for name in args.names:
         _validate_vm_name_for_lookup(name)
         try:
@@ -1506,8 +1551,12 @@ def cmd_stop(args: argparse.Namespace) -> None:
             continue
         _require_manageable(vm, "stop")
         _require_signalable(vm, "stop")
+        vms.append(vm)
+    if not getattr(args, "force", False):
+        _sync_guests(vms)
+    for vm in vms:
         kill_qemu(vm)
-        print(f"stopped {name}")
+        print(f"stopped {vm.name}")
 
 
 def _destroy_vm_artifacts(name: str) -> None:

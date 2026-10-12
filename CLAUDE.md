@@ -623,6 +623,14 @@ each node a backstop of that cap plus the kdump seeding budget
 (`KDUMP_SEED_BUDGET`) plus headroom, so it never kills a node that is
 up and seeding kdump.
 
+**Stopping:** `stop` ends QEMU (SIGTERM, then SIGKILL), which flushes
+QEMU's own caches but not the guest's page cache, so it first runs
+`sync -f /` in every running guest over ssh, in parallel
+(`_sync_guests`; also before a snapshot or restore stops the VM).
+Root's filesystem only: a whole `sync` on a Lustre client whose
+servers are gone would hang.  An unreachable guest is warned about and
+stopped anyway; `--force` skips the sync.
+
 **Kernel arguments:** `--kernel-args 'slub_debug=FZPU page_owner=on'`
 is stored in the `.info` file as `KERNEL_ARGS` and appended after
 ltvm's own parameters on every boot, so a parameter whose last

@@ -1412,6 +1412,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _stop_names = sp.add_argument("names", nargs="+", help="VM name(s)")
     _stop_names.completer = complete_vms  # type: ignore[attr-defined]
+    sp.add_argument(
+        "--force",
+        action="store_true",
+        help="Cut the power without first flushing the guest's root "
+        "filesystem over ssh (for a guest that no longer answers)",
+    )
     sp.set_defaults(func=cmd_vm_stop)
 
     # -- VM info: list --
@@ -2167,6 +2173,12 @@ def build_parser() -> argparse.ArgumentParser:
         "names", nargs="+", help="Cluster name(s)"
     )
     _cstopp_names.completer = complete_clusters  # type: ignore[attr-defined]
+    cstopp.add_argument(
+        "--force",
+        action="store_true",
+        help="Cut the power without first flushing each node's root "
+        "filesystem over ssh",
+    )
     cstopp.set_defaults(func=cmd_cluster_stop)
 
     cdpl = cluster_sub.add_parser(

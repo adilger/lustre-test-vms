@@ -63,6 +63,10 @@ Every VM command also answers under `vm` -- `ltvm vm create` is `ltvm
 create`, and the same for `destroy`, `start`, `stop`, `list`,
 `deploy-lustre`, `llmount`, `llumount` and `doctor`.
 
+`stop` (and `cluster stop`) flushes each guest's root filesystem over
+ssh before cutting its power, so files written just before survive;
+`--force` skips that for a guest that no longer answers.
+
 `--disk-size` sizes the MDT/OST scratch disks; `--root-size` sizes the
 VM's own OS disk (default 8G). Both are fixed at create time, so a VM
 that needs room for a debug build or a vmcore wants `--root-size 20G`
