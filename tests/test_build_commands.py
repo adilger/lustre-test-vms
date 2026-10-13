@@ -24,6 +24,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 import yaml
 
+from tests.host_marks import x86_host  # noqa: F401
+
 # Load the ltvm CLI entry point (no .py extension).
 _LTVM_PATH = str(Path(__file__).parent.parent / "ltvm")
 
@@ -1248,6 +1250,7 @@ class TestCmdStatusFormat:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("x86_host")
 class TestCmdCleanScoping:
     def test_arch_and_all_arches_mutually_exclusive(
         self,

@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -20,6 +21,7 @@ from ltvm_pkg.vm_state import (
     ClusterInfo,
     VMInfo,
 )
+from tests.host_marks import needs_proc
 
 # ── _validate_vm_name ────────────────────────────────────
 
@@ -769,6 +771,14 @@ class TestOrphanClusterRecord:
 
 class TestCmdStop:
     """cmd_stop is lenient about missing VMs."""
+
+    @pytest.fixture(autouse=True)
+    def _signalable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The fake pids here can be real root processes (pid 42 is a
+        kernel thread on Linux), which would ask for sudo."""
+        monkeypatch.setattr(
+            vm_commands, "_require_signalable", lambda vm, verb: None
+        )
 
     def test_missing_vm_not_an_error(
         self,
@@ -2092,6 +2102,7 @@ class TestCmdNmi:
         mock_nmi.assert_called_once()
         assert "set at boot" in capsys.readouterr().err
 
+    @needs_proc
     def test_booted_with_reads_the_qemu_cmdline(self) -> None:
         import sys
 
@@ -2106,6 +2117,13 @@ class TestCmdNmi:
             ]
         )
         try:
+            # The child's cmdline reads empty until it has exec'd, which
+            # a loaded host can take a moment to do.
+            cmdline = Path(f"/proc/{proc.pid}/cmdline")
+            for _ in range(100):
+                if b"-append" in cmdline.read_bytes():
+                    break
+                time.sleep(0.05)
             vm = VMInfo(name="x", ip="10.0.0.1", pid=proc.pid)
             assert vm_commands._booted_with_nmi_panic(vm)
             vm.pid = os.getpid()
@@ -2494,6 +2512,7 @@ class TestRssMb:
         # 0M would read as "this VM is free".
         assert _rss_mb(4194303) is None
 
+    @needs_proc
     def test_our_own_process_reports_something(self) -> None:
         import os as _os
 

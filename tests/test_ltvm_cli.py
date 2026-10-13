@@ -19,6 +19,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.host_marks import x86_host  # noqa: F401
+
 # ---------------------------------------------------------------------------
 # Load the ltvm module (no .py extension -- must use SourceFileLoader)
 # and the commands module where helpers now live after refactor.
@@ -1846,6 +1848,7 @@ class TestNoRootRequiredForReadCommands:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("x86_host")
 class TestCmdClean:
     def test_clean_wipes_target_arch_dir(
         self, capsys: pytest.CaptureFixture[str], tmp_targets: Path

@@ -283,6 +283,13 @@ class TestNetworkAlreadyConfigured:
 
 
 class TestCheckPrerequisites:
+    @pytest.fixture(autouse=True)
+    def _no_grub_check(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """GRUB's EFI modules are a directory on the host, not a tool."""
+        import ltvm_pkg.host_setup as hs
+
+        monkeypatch.setattr(hs, "_check_grub_efi_modules", lambda host: None)
+
     def _make_host(self, pkg_mgr: str) -> HostInfo:
         host = HostInfo.__new__(HostInfo)
         host.id = "rocky"

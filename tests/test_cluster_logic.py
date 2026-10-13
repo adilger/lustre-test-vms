@@ -11,6 +11,7 @@ import pytest
 from ltvm_pkg import deploy, vm_cluster
 from ltvm_pkg.deploy import ENV_SAVE_BEGIN
 from ltvm_pkg.vm_state import ClusterInfo
+from tests.host_marks import needs_gnu_sed
 
 # ── parse_node_spec ──────────────────────────────────────
 
@@ -712,6 +713,7 @@ class TestClusterBlockKeepsTheStockLocalSh:
         assert out.stdout.split() == ["1"]
 
 
+@needs_gnu_sed
 class TestGuestHostsBlock:
     """Every member's name goes into each member's /etc/hosts."""
 

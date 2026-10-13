@@ -16,6 +16,7 @@ import pytest
 
 from ltvm_pkg import deploy
 from ltvm_pkg.vm_state import VMInfo
+from tests.host_marks import needs_gnu_sed
 
 
 def _ok(stdout: str = "", stderr: str = "") -> MagicMock:
@@ -2432,6 +2433,7 @@ class TestConfigureOstCount:
         assert "/usr/lib64/" not in block
 
 
+@needs_gnu_sed
 class TestOstCountInLocalSh:
     """The block, run for real against a cfg/local.sh."""
 
