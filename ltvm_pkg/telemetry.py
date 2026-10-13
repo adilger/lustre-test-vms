@@ -110,6 +110,9 @@ def _config_file() -> Path:
 
 
 def _state_dir() -> Path:
+    shared = _site_state_dir()
+    if shared is not None:
+        return shared
     base = os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state"
     return Path(base) / "ltvm"
 
@@ -207,12 +210,16 @@ def _write_json_state(path: Path, data: dict[str, Any]) -> None:
     tempfile + replace because two ltvm processes can be running at
     once and a half-written file would read back as corrupt.
     """
+    shared = _site_state_dir() is not None
     try:
         _state_dir().mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(
             dir=str(_state_dir()), prefix=f".{path.name}."
         )
         try:
+            if shared:
+                # Every user who runs ltvm here reads it.
+                os.fchmod(fd, 0o644)
             with os.fdopen(fd, "w") as fh:
                 fh.write(json.dumps(data, indent=2) + "\n")
             os.replace(tmp, path)
@@ -225,7 +232,8 @@ def _write_json_state(path: Path, data: dict[str, Any]) -> None:
         return
     from .priv import chown_to_invoking_user
 
-    chown_to_invoking_user(_state_dir())
+    if not shared:
+        chown_to_invoking_user(_state_dir())
     chown_to_invoking_user(path)
 
 
@@ -252,6 +260,55 @@ def _site_disabled() -> bool:
         return False
 
 
+def _site_settings() -> dict[str, str]:
+    """The [telemetry] section of /etc/ltvm.conf, or nothing."""
+    site = _site_config()
+    if not site.is_file():
+        return {}
+    parser = configparser.ConfigParser()
+    try:
+        parser.read(site)
+        if not parser.has_section("telemetry"):
+            return {}
+        return dict(parser["telemetry"])
+    except (configparser.Error, OSError) as e:
+        log.debug("ignoring unreadable %s: %s", site, e)
+        return {}
+
+
+def _site_install_id() -> str | None:
+    """The install ID an admin set in /etc/ltvm.conf for the whole host.
+
+    For hosts whose ltvm runs start from a fresh home every time, such
+    as an agent service's containers, where each run would otherwise
+    mint an install of its own.  Only a version 4 UUID is taken: a
+    version 1 carries the host's MAC address.
+    """
+    raw = _site_settings().get("install_id", "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = uuid.UUID(raw)
+    except ValueError:
+        parsed = None
+    if parsed is None or parsed.version != 4:
+        log.debug("ignoring install_id in %s: not a uuid4", _site_config())
+        return None
+    return str(parsed)
+
+
+def _site_state_dir() -> Path | None:
+    """Where a site install keeps its schedule and counters, if set.
+
+    Only with a site install ID: one schedule shared by users who send
+    under different IDs would send each user's counts as someone else's.
+    """
+    raw = _site_settings().get("state_dir", "").strip()
+    if not raw or not os.path.isabs(raw) or _site_install_id() is None:
+        return None
+    return Path(raw)
+
+
 def is_enabled() -> bool:
     """Whether telemetry may run at all, cheapest check first."""
     if os.environ.get("LTVM_TELEMETRY", "").strip() in ("0", "no", "false"):
@@ -269,7 +326,14 @@ def install_id() -> str:
     which is the property we are specifically trying not to have.
     Deleting it yields a new install, which is also the user's escape
     hatch.
+
+    A site ID in /etc/ltvm.conf comes first and is never copied into
+    the user's config.  It is the same kind of ID, a random uuid4 an
+    admin generates once, so the property holds for it too.
     """
+    site = _site_install_id()
+    if site is not None:
+        return site
     cfg = _load_config()
     existing = cfg.get("install_id")
     if isinstance(existing, str) and existing:
@@ -744,8 +808,11 @@ def maybe_send() -> None:
         return
     cfg = _load_config()
     state = _load_state()
-    _maybe_show_notice(cfg)
-    uid = cfg.get("install_id") or install_id()
+    # A site ID was set by an admin who has read the notice, and its
+    # users may each start from an empty home.
+    if _site_install_id() is None:
+        _maybe_show_notice(cfg)
+    uid = install_id()
     if not _due_for_send(state, uid):
         return
     # Mark the attempt here rather than leaving it to the child.  The
@@ -769,10 +836,13 @@ def status() -> dict[str, Any]:
         reason = f"{_site_config()} (site-wide)"
     elif not cfg.get("enabled", True):
         reason = str(_config_file())
+    site_id = _site_install_id()
     return {
         "enabled": is_enabled(),
         "disabled_by": reason,
-        "install_id": cfg.get("install_id"),
+        "install_id": site_id or cfg.get("install_id"),
+        "install_id_from": str(_site_config()) if site_id else None,
+        "state_dir": str(_state_dir()),
         "last_send": state.get("last_send_iso"),
         "endpoint": ENDPOINT,
         "interval_days": SEND_INTERVAL.days,

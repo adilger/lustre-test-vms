@@ -471,9 +471,25 @@ Three ways to turn it off, in precedence order:
 The site-wide file can only ever disable, and a user cannot override
 it -- an opt-out someone could silently undo would not be one.
 
-Nothing is sent on the first run: ltvm prints the notice, starts the
-clock, and the first check-in is a week later. That week is the window
-in which opting out means nothing was ever sent.
+The first check-in goes out on the first run, alongside the notice.
+
+A host whose ltvm runs each start from an empty home (an agent service
+that gives every run a fresh container, say) would otherwise be a new
+install on every run. Its admin can give the host one install ID and
+one shared schedule in `/etc/ltvm.conf`:
+
+```ini
+[telemetry]
+# python3 -c 'import uuid; print(uuid.uuid4())', once
+install_id = <that uuid>
+# optional: last send time and counters, writable by every user here
+state_dir = /var/lib/ltvm-telemetry
+```
+
+The ID is used as it stands and never copied into a user's config, and
+with it set no notice is printed. Only a random (version 4) UUID is
+accepted. `state_dir` takes effect only alongside `install_id`; without
+it each user keeps their own schedule, as before.
 
 ## More
 

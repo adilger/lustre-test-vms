@@ -68,6 +68,9 @@ def cmd_telemetry(args: argparse.Namespace) -> int:
         if state["disabled_by"]:
             print(f"disabled by: {state['disabled_by']}")
         print(f"install ID: {state['install_id'] or '(not yet assigned)'}")
+        if state["install_id_from"]:
+            print(f"  shared:   set in {state['install_id_from']}")
+            print(f"  state:    {state['state_dir']}")
         print(f"last send:  {state['last_send'] or 'never'}")
         print(f"every:      {state['interval_days']} days")
         print(f"endpoint:   {state['endpoint']}")

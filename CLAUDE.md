@@ -660,6 +660,19 @@ cgroup's `memory.max` when that is smaller (`qemu_run.memory_budget`).
 in `--json`), and `cluster create` checks all its nodes against it
 before it makes any (`_require_cluster_memory`).
 
+**Telemetry site ID:** `[telemetry] install_id` in `/etc/ltvm.conf`, a
+uuid4 the admin generates once, is the install ID for every user on the
+host, ahead of the per-user one minted into `config.json`, and is never
+written there (`telemetry._site_install_id`; anything but a uuid4 is
+ignored, since a uuid1 carries the MAC).  With it set no notice prints,
+and `[telemetry] state_dir`, if absolute, holds `telemetry.json` and
+`counters.json` in place of `XDG_STATE_HOME`, written 0644 and with no
+chown of the directory, so users who start from an empty home every time
+(Patch Watcher's run containers) share one weekly schedule and one set
+of counters.  `state_dir` is ignored without the ID.  `ltvm telemetry
+status` names both.  `[telemetry] enabled = false` still overrides all of
+it.
+
 **Waiting for SSH:** create and start wait `LTVM_SSH_TIMEOUT` (120s)
 for the guest's sshd, and longer, up to five times that, while the
 guest's serial console is still growing: on a loaded host a boot runs

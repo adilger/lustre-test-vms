@@ -769,3 +769,90 @@ def test_legacy_counter_shape_is_repaired(_home: Path) -> None:
     )
     t.record(_Args("cmd_list"), 0)
     assert t._load_counters()["commands"]["list"] == {"ok": 1, "fail": 0}
+
+
+# ---------------------------------------------------------------------------
+# Site install ID
+# ---------------------------------------------------------------------------
+
+SITE_ID = "6f1c2e0a-3b4d-4c5e-8f60-718293a4b5c6"
+
+
+def _site(home: Path, body: str) -> None:
+    import ltvm_pkg.telemetry as t
+
+    t._site_config().write_text(f"[telemetry]\n{body}")
+
+
+def _fresh_home(home: Path, monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    """Another run's empty home, as an agent service gives each run."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / name / "cfg"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(home / name / "state"))
+
+
+def test_site_install_id_is_used_and_not_copied(_home: Path) -> None:
+    import ltvm_pkg.telemetry as t
+
+    _site(_home, f"install_id = {SITE_ID}\n")
+    assert t.install_id() == SITE_ID
+    assert t.preview()["install_id"] == SITE_ID
+    assert not t._config_file().exists()
+    assert t.status()["install_id"] == SITE_ID
+    assert t.status()["install_id_from"] == str(t._site_config())
+
+
+def test_site_install_id_must_be_a_random_uuid(_home: Path) -> None:
+    """A uuid1 carries the host's MAC, which is what the ID must not."""
+    import uuid as _uuid
+
+    import ltvm_pkg.telemetry as t
+
+    for bad in (str(_uuid.uuid1()), "not-a-uuid"):
+        _site(_home, f"install_id = {bad}\n")
+        assert t._site_install_id() is None
+        assert t.install_id() != bad
+    assert _uuid.UUID(t.install_id()).version == 4
+
+
+def test_site_install_id_shows_no_notice(
+    _home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import ltvm_pkg.telemetry as t
+
+    _site(_home, f"install_id = {SITE_ID}\n")
+    with patch.object(t, "_spawn_detached_send") as mock_spawn:
+        t.maybe_send()
+    mock_spawn.assert_called_once()
+    assert capsys.readouterr().err == ""
+    assert not t._config_file().exists()
+
+
+def test_site_state_dir_shares_one_schedule(
+    _home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Runs from fresh homes send once a week between them, not each."""
+    import ltvm_pkg.telemetry as t
+
+    shared = _home / "shared"
+    _site(_home, f"install_id = {SITE_ID}\nstate_dir = {shared}\n")
+    with patch.object(t, "_spawn_detached_send") as mock_spawn:
+        for run in ("run1", "run2", "run3"):
+            _fresh_home(_home, monkeypatch, run)
+            t.record(_Args("cmd_list"), 0)
+            t.maybe_send()
+    assert mock_spawn.call_count == 1
+    assert t._load_counters()["commands"]["list"] == {"ok": 3, "fail": 0}
+    assert (shared / "counters.json").stat().st_mode & 0o777 == 0o644
+    assert not (_home / "run2" / "state").exists()
+    assert t.status()["state_dir"] == str(shared)
+
+
+def test_site_state_dir_needs_the_site_id(_home: Path) -> None:
+    """One schedule for users sending under their own IDs would send
+    each user's counts as another's."""
+    import ltvm_pkg.telemetry as t
+
+    _site(_home, f"state_dir = {_home / 'shared'}\n")
+    t.record(_Args("cmd_list"), 0)
+    assert not (_home / "shared").exists()
+    assert t._counters_file().is_relative_to(_home / "state")
