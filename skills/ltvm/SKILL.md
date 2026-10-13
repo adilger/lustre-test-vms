@@ -99,6 +99,17 @@ on its own, and a refusal prints the ratio in force. It is off by
 default and it is the user's setting for the whole host: do not raise
 it to get past a refusal -- wait.
 
+`--numa-nodes N` gives the guest N simulated NUMA nodes, for testing
+Lustre CPTs (`cpu_npartitions`, `cpu_pattern`): the vCPUs, which N must
+divide, and the memory are split evenly, one socket per node. Unlike the
+disks it can change later, with `ltvm vm set <name> --numa-nodes N` on
+the stopped VM (0 for none):
+
+```bash
+ltvm create co1-numa --vcpus 4 --mem 4096 --numa-nodes 4
+ssh co1-numa numactl -H
+```
+
 `--kernel-args` adds kernel boot parameters, also fixed at create time.
 The target kernels have no KASAN, but they build in SLUB debugging (and
 the Rocky ones page owner tracking), off until booted with them:

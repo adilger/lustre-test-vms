@@ -592,6 +592,10 @@ class VMInfo:
     # after ltvm's own on every boot.  Empty on older .info files.
     kernel_args: str = ""
 
+    # Simulated NUMA nodes (--numa-nodes): the vCPUs and memory split
+    # evenly across this many nodes, one socket each.  0 is none.
+    numa_nodes: int = 0
+
     @property
     def info_path(self) -> Path:
         return SOCKETS / f"{self.name}.info"
@@ -689,6 +693,7 @@ class VMInfo:
             f"PASSTHROUGH_DRIVERS="
             f"{'|'.join(f'{bdf}={drv}' for bdf, drv in self.passthrough_drivers.items())}\n"
             f"KERNEL_ARGS={self.kernel_args}\n"
+            f"NUMA_NODES={self.numa_nodes}\n"
         )
         _atomic_write(self.info_path, text)
 
@@ -871,6 +876,7 @@ class VMInfo:
             nic_ip6s=nic_ip6s_list,
             passthrough_drivers=pt_drivers,
             kernel_args=vals.get("KERNEL_ARGS", ""),
+            numa_nodes=int(vals.get("NUMA_NODES") or 0),
         )
 
     @staticmethod

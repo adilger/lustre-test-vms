@@ -379,6 +379,49 @@ def is_running(vm: VMInfo) -> bool:
     return False
 
 
+def numa_problem(vcpus: int, mem: int, nodes: int) -> str | None:
+    """Why *nodes* NUMA nodes cannot split this VM, or None if they can."""
+    if nodes < 0:
+        return f"--numa-nodes must be >= 0 (got {nodes})"
+    if nodes <= 1:
+        return None
+    if vcpus % nodes:
+        return f"--numa-nodes {nodes} must divide the {vcpus} vCPUs evenly"
+    if mem // nodes < 128:
+        return f"{mem} MB is under 128 MB for each of {nodes} NUMA nodes"
+    return None
+
+
+def smp_args(vcpus: int, mem: int, nodes: int) -> list[str]:
+    """-smp, -m and, for a simulated NUMA layout, -numa arguments.
+
+    Each node is one socket with an equal share of the vCPUs and its own
+    memory backend; memory is split in whole 2 MB units, the last node
+    taking the remainder, so the backends add up to -m exactly.
+    """
+    if nodes <= 1:
+        return ["-smp", str(vcpus), "-m", str(mem)]
+    per_cpu = vcpus // nodes
+    per_mem = (mem // nodes) // 2 * 2
+    args = [
+        "-smp",
+        f"{vcpus},sockets={nodes},cores={per_cpu},threads=1",
+        "-m",
+        str(mem),
+    ]
+    for i in range(nodes):
+        size = per_mem if i < nodes - 1 else mem - per_mem * (nodes - 1)
+        first = i * per_cpu
+        cpus = f"{first}-{first + per_cpu - 1}" if per_cpu > 1 else f"{first}"
+        args += [
+            "-object",
+            f"memory-backend-ram,id=numa{i},size={size}M",
+            "-numa",
+            f"node,nodeid={i},cpus={cpus},memdev=numa{i}",
+        ]
+    return args
+
+
 def _pidfile_pid(vm: VMInfo) -> int:
     try:
         return int(vm.pid_path.read_text().strip())
@@ -906,10 +949,7 @@ def _start_qemu(vm: VMInfo) -> None:
         machine,
         "-cpu",
         cpu_model,
-        "-smp",
-        str(vm.vcpus),
-        "-m",
-        str(vm.mem),
+        *smp_args(vm.vcpus, vm.mem, vm.numa_nodes),
         "-kernel",
         str(kernel),
         "-append",

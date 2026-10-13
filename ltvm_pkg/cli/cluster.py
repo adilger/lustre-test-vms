@@ -179,6 +179,7 @@ def cmd_cluster_create(args: argparse.Namespace) -> int:
             root_size=args.root_size,
             nic=list(args.nic or []),
             kernel_args=args.kernel_args,
+            numa_nodes=args.numa_nodes,
             owner_id=args.owner_id,
             dry_run=args.dry_run,
             wait=args.wait,
