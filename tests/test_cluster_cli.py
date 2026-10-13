@@ -234,6 +234,22 @@ class TestCmdClusterDispatch:
         for m in self.mocks.values():
             assert not m.called
 
+    @pytest.mark.parametrize(
+        ("argv", "handler"),
+        [
+            (("status", "co1"), "cmd_cluster_status"),
+            (("list",), "cmd_cluster_list"),
+            (("destroy", "co1"), "cmd_cluster_destroy"),
+            (("exec", "co1", "oss", "lctl dl"), "cmd_cluster_exec"),
+        ],
+    )
+    def test_json_reaches_the_handler(
+        self, argv: tuple[str, ...], handler: str
+    ) -> None:
+        """--json must reach the handler, which decides its output on it."""
+        assert cmd_cluster(_ns(*argv, json_out=True)) == EXIT_OK
+        assert self.mocks[handler].call_args.args[0].json is True
+
     def test_handler_systemexit_propagates_returncode(self) -> None:
         """A handler that calls die(...) (SystemExit) must yield its rc."""
         self.mocks["cmd_cluster_status"].side_effect = SystemExit(7)

@@ -45,6 +45,8 @@ def _call(fn: Any, ns: argparse.Namespace, use_json: bool) -> int:
     answered a typo with a Python traceback.  Mirrors _vm_call's
     VMNotFound handling in cli/vm.py.
     """
+    # The handlers read args.json, which _qemu_ns does not carry over.
+    ns.json = use_json
     try:
         fn(ns)
         return EXIT_OK
