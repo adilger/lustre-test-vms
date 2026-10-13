@@ -376,7 +376,8 @@ ltvm build all rocky9 --lustre-tree ~/lustre-release --force-compat
 
 A server series comes from `which_patch` when it is listed there.
 Otherwise it is chosen the way Lustre's configure chooses it: by
-version for vanilla kernels (`vanilla_ldiskfs_series`), by base
+version for vanilla and Debian kernels (`vanilla_ldiskfs_series`;
+configure has no Debian case), by base
 version and ABI for Ubuntu ones (`ubuntu_ldiskfs_series`), by
 filename for the rest.  When a kernel build-tree exists, the series is
 then applied in order to a scratch copy of the files it touches, as

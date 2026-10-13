@@ -89,6 +89,7 @@ with `ltvm target list --all-kernels`.
 | ubuntu2604* | x86_64 | client only | 7.0-ubuntu2604 | no -- build locally |
 | ubuntu2604-server* | aarch64 | server (ldiskfs) + client | 7.0.0-14-ubuntu26 | no -- build locally |
 
+| debian13* | x86_64 | server (ldiskfs) + client | 6.12-debian13 | no -- build locally |
 `rocky9-64k` is rocky9 with `CONFIG_ARM64_64K_PAGES`, for testing
 Lustre against a 64K page size.  It is aarch64-only: on an x86_64 host
 it cross-builds, and `ltvm target list` hides it behind
@@ -128,6 +129,13 @@ Top-level:
 ltvm install                    One-time host setup (sudo)
 ltvm update                     git fast-forward ltvm itself
 ltvm build      <action> ...    Build artifacts (see below)
+`debian13` (experimental) is Debian 13 as an ldiskfs server, built
+from Debian's patched kernel source (linux-source 6.12.107, pinned:
+the ldiskfs series stops applying at 6.12.111) with defconfig plus
+`ubuntu2604-server`'s options rather than Debian's own config.
+Lustre's configure has no Debian case, so it builds the vanilla
+`ldiskfs-6.12-ml` series.
+
 ltvm target     <action> ...    Target OS management (see below)
 ltvm vm         <action> ...    VM inspection / crash / snapshot (see below);
                                 also accepts every VM command below, so

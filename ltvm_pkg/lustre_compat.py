@@ -846,10 +846,11 @@ def validate_target(
         # vanilla kernel).
         kver_mm = _kver_majmin(series) or _kver_majmin(kver)
         stems = parse_ldiskfs_series(lustre_tree)
-        if tc.is_upstream:
+        if tc.is_upstream or getattr(tc, "os_name", None) == "debian":
             # A vanilla kernel is never in which_patch and its series is
             # chosen by version range, not filename -- ask the ladder
-            # ported from Lustre's own configure.
+            # ported from Lustre's own configure.  configure has no
+            # Debian case, so a Debian kernel climbs the same ladder.
             match_stem = vanilla_ldiskfs_series(kver)
             if match_stem is not None and match_stem not in stems:
                 return ValidationResult(

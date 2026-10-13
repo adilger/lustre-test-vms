@@ -1,0 +1,16 @@
+# packages-os.txt -- Debian 13 specific packages
+#
+# These are passed straight through (not via package-map.txt) and
+# are installed on top of the translated common/packages-*.txt lists.
+
+# /sbin/init: Debian keeps it out of the systemd package, and the VM
+# boots no initramfs to find another
+systemd-sysv
+
+# Debian kdump tooling (RHEL uses kexec-tools + crash from base)
+kdump-tools
+initramfs-tools
+
+# C++ compiler (rhel ships gcc-c++ in the dev container; some
+# Lustre test programs need a g++ in the VM as well)
+g++

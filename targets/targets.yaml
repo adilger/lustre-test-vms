@@ -456,7 +456,7 @@ targets:
     kernels:
       available:
       - 7.0.0-14-ubuntu26
-      config:
+      config: &ubuntu2604_server_config
         <<: *ubuntu2604_config
         # 7.0.0-14-lustre: configure reads the ABI from the 2nd field
         CONFIG_LOCALVERSION: '"-14-lustre"'
@@ -487,4 +487,31 @@ targets:
     os_family: debian
     os_name: ubuntu
     os_version: '26.04'
+    status: experimental
+  # Debian 13 as an ldiskfs server.  Debian's linux-source package is
+  # its patched source; the config is defconfig plus ubuntu2604-server's
+  # options, not Debian's own.  Lustre's configure has no Debian case,
+  # so the kernel gets the vanilla ldiskfs-6.12-ml series.  Pinned to
+  # 6.12.107: from 6.12.111 that series' ext4-filename-encode.patch no
+  # longer applies.
+  debian13:
+    container_image: docker.io/library/debian:13
+    kernel_deb_source: linux-source-6.12=6.12.107-1
+    kernels:
+      available:
+      - 6.12-debian13
+      config:
+        <<: *ubuntu2604_server_config
+        CONFIG_LOCALVERSION: '"-lustre"'
+        # ko2iblnd (Lustre configures --with-o2ib=yes) and SoftRoCE
+        CONFIG_INFINIBAND: m
+        CONFIG_INFINIBAND_USER_ACCESS: m
+        CONFIG_INFINIBAND_ADDR_TRANS: y
+        CONFIG_RDMA_RXE: m
+      default: 6.12-debian13
+    lustre:
+      mode: server_ldiskfs
+    os_family: debian
+    os_name: debian
+    os_version: '13'
     status: experimental

@@ -651,6 +651,44 @@ class TestValidateTarget:
         assert r.matched_in == "ldiskfs_series"
         assert "ldiskfs-6.8.0-90-ubuntu24" in r.message
 
+    def test_debian_takes_the_vanilla_series(self, tmp_path: Path) -> None:
+        """configure has no Debian case: a Debian kernel gets the
+        series a vanilla kernel of its version would."""
+        tree = _make_tree(
+            tmp_path,
+            which_patch=_WP_ABSENT,
+            changelog=_CL_PRIMARY,
+            target_ins={},
+            ldiskfs_series=["ldiskfs-6.6-ml", "ldiskfs-6.12-ml"],
+        )
+        tc = _FakeTC(
+            "6.12-debian13",
+            LustreMode.SERVER_LDISKFS,
+            kernel_deb_source="linux-source-6.12=6.12.107-1",
+        )
+        tc.os_name = "debian"
+        r = validate_target(tc, tree)
+        assert r.status == "ok"
+        assert "ldiskfs-6.12-ml" in r.message
+
+    def test_debian_without_its_series_refuses(self, tmp_path: Path) -> None:
+        tree = _make_tree(
+            tmp_path,
+            which_patch=_WP_ABSENT,
+            changelog=_CL_PRIMARY,
+            target_ins={},
+            ldiskfs_series=["ldiskfs-6.6-ml"],
+        )
+        tc = _FakeTC(
+            "6.12-debian13",
+            LustreMode.SERVER_LDISKFS,
+            kernel_deb_source="linux-source-6.12=6.12.107-1",
+        )
+        tc.os_name = "debian"
+        r = validate_target(tc, tree)
+        assert r.status == "refuse"
+        assert "ldiskfs-6.12-ml" in r.message
+
     def test_ldiskfs_series_no_match(self, tmp_path: Path) -> None:
         """ubuntu server_ldiskfs: no ldiskfs series file matches the
         kernel -> refuse."""
