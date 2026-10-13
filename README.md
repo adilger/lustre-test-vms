@@ -87,6 +87,7 @@ with `ltvm target list --all-kernels`.
 | rocky10-16k* | aarch64 | server (ldiskfs) + client | 6.12-rhel10.2 | no -- build locally |
 | mainline* | x86_64 | server (ldiskfs) + client | see below | no -- build locally |
 | ubuntu2604* | x86_64 | client only | 7.0-ubuntu2604 | no -- build locally |
+| ubuntu2604-server* | aarch64 | server (ldiskfs) + client | 7.0.0-14-ubuntu26 | no -- build locally |
 
 `rocky9-64k` is rocky9 with `CONFIG_ARM64_64K_PAGES`, for testing
 Lustre against a 64K page size.  It is aarch64-only: on an x86_64 host
@@ -104,6 +105,14 @@ Apple Silicon has only the 4K and 16K translation granules, so
 `ubuntu2604` (experimental) is Ubuntu 26.04 with a kernel configured
 for nested KVM, nftables, cgroup-BPF and ext4/XFS project quota: a
 guest for testing services that run their own VMs and firewalls.
+
+`ubuntu2604-server` (experimental) is Ubuntu 26.04 as an ldiskfs
+server, on the kernel Lustre's `ldiskfs-7.0.0-14-ubuntu26` series is
+for: the source is pinned to linux-source 7.0.0-14.14, the kernel is
+named 7.0.0-14-lustre, and its build-tree carries the
+`UTS_UBUNTU_RELEASE_ABI` line Ubuntu's packaging writes.  Lustre's
+configure goes by that line and the ABI to pick an Ubuntu series;
+without them it would build the vanilla `ldiskfs-7.0-ml` instead.
 
 `mainline` (experimental) builds Lustre against vanilla kernel.org
 kernels rather than a distro SRPM.  Its `--kernel` takes a release

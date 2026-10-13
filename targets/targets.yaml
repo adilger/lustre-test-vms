@@ -344,7 +344,7 @@ targets:
     kernels:
       available:
       - 7.0-ubuntu2604
-      config:
+      config: &ubuntu2604_config
         CONFIG_PVH: y
         # Nested KVM, bridges, tun/tap
         CONFIG_VIRTUALIZATION: y
@@ -431,6 +431,59 @@ targets:
       default: 7.0-ubuntu2604
     lustre:
       mode: client
+    os_family: debian
+    os_name: ubuntu
+    os_version: '26.04'
+    status: experimental
+  # Ubuntu 26.04 as an ldiskfs server, on the kernel Lustre's
+  # ldiskfs-7.0.0-14-ubuntu26 series targets.  Lustre's configure
+  # picks an Ubuntu series from the release string's base version and
+  # ABI ("7.0.0-14-...") and only when utsrelease.h carries
+  # UTS_UBUNTU_RELEASE_ABI; without it the kernel reads as vanilla and
+  # gets ldiskfs-7.0-ml.  So the source is pinned to that exact upload
+  # (still in the resolute release pocket), CONFIG_LOCALVERSION names
+  # the kernel 7.0.0-14-lustre, and the kernel build adds the ABI line
+  # Ubuntu's own packaging would (kernel_build._mark_ubuntu_abi).  lustre_compat's
+  # ubuntu_ldiskfs_series() is a port of configure's Ubuntu ladder.
+  #
+  # aarch64: it runs natively on Apple Silicon.  The Dockerfiles are
+  # ubuntu2604's (symlinks); the kernel config is ubuntu2604's plus
+  # what a server and its test suites need on top of defconfig.
+  ubuntu2604-server:
+    arch: aarch64
+    container_image: docker.io/library/ubuntu:26.04
+    kernel_deb_source: linux-source-7.0.0=7.0.0-14.14
+    kernels:
+      available:
+      - 7.0.0-14-ubuntu26
+      config:
+        <<: *ubuntu2604_config
+        # 7.0.0-14-lustre: configure reads the ABI from the 2nd field
+        CONFIG_LOCALVERSION: '"-14-lustre"'
+        CONFIG_LOCALVERSION_AUTO: n
+        # dm-flakey: the test framework mounts every target through it
+        CONFIG_MD: y
+        CONFIG_BLK_DEV_DM: m
+        CONFIG_DM_FLAKEY: m
+        CONFIG_DM_DELAY: m
+        CONFIG_DM_SNAPSHOT: m
+        CONFIG_BLK_DEV_LOOP: m
+        CONFIG_EXT4_FS_POSIX_ACL: y
+        CONFIG_EXT4_FS_SECURITY: y
+        CONFIG_FS_ENCRYPTION: y
+        # libcfs finds kallsyms_lookup_name through a kprobe: without
+        # it every Lustre module fails to load with -EOPNOTSUPP
+        CONFIG_KPROBES: y
+        CONFIG_KRETPROBES: y
+        # what Ubuntu's generic config has and the test suites use
+        CONFIG_CRYPTO_CRC32C: y
+        CONFIG_ENCRYPTED_KEYS: y
+        CONFIG_NFSD: m
+        CONFIG_SCSI_DEBUG: m
+        CONFIG_BLK_DEV_NULL_BLK: m
+      default: 7.0.0-14-ubuntu26
+    lustre:
+      mode: server_ldiskfs
     os_family: debian
     os_name: ubuntu
     os_version: '26.04'
