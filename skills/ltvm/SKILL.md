@@ -362,13 +362,19 @@ id=$(ltvm suite run co1-single sanity)          # returns at once
 ltvm suite run co1-single sanity --only '39r 42a'
 ltvm suite run co2 sanity-sec --env SHARED_KEY=true --wait  # cluster
 ltvm suite status co1-single [$id]   # running / done rc=N / died
-ltvm suite collect co1-single $id    # logs to ./ltvm-suite/..., summary
+ltvm suite collect co1-single $id    # logs back, and the summary
 ```
 
 A cluster runs it from its first client.  `--wait` collects at the end
 and exits non-zero on any failure; `status` flags a node that rebooted
 during the run (a crash: look in `/var/crash`).  One suite at a time per
 VM or cluster; `run` refuses a second.
+
+Collected logs go to `~/.local/state/ltvm/suite/<target>/<run-id>/`
+(`$XDG_STATE_HOME` when set), not the directory you run from; `run` and
+`collect` print the path, and `status` shows `collected to <dir>` once a
+run has been collected.  `--results-dir DIR` on `collect` or `run --wait`
+puts them elsewhere.
 
 For a single subtest by hand:
 

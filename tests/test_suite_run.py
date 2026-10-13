@@ -547,6 +547,7 @@ def _run_args(**kw: Any) -> argparse.Namespace:
         no_reformat=False,
         wait=False,
         timeout=None,
+        results_dir=None,
         json=False,
     )
     base.update(kw)
@@ -696,7 +697,9 @@ class TestCmdRun:
         monkeypatch.setattr(
             suite_run.vm_claim, "require_all", lambda vms, verb: None
         )
-        monkeypatch.chdir(tmp_path)
+        cwd = tmp_path / "some-git-tree"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
         states = iter(
             [
                 [],  # the busy check before launch
@@ -709,7 +712,10 @@ class TestCmdRun:
         )
         monkeypatch.setattr(suite_run.time, "sleep", lambda s: None)
 
+        dests: list[Path] = []
+
         def fake_collect(t: Any, run_id: str, dest: Path) -> None:
+            dests.append(dest)
             logs = dest / "logs" / "x"
             logs.mkdir(parents=True)
             shutil.copy(FIXTURE, logs / "results.yml")
@@ -721,6 +727,139 @@ class TestCmdRun:
         assert "== t 1 ==" in out
         assert "6 pass, 1 fail, 2 skip" in out
         assert "FAIL sanity test_39r (12s): atime not updated on disk" in out
+        # The working tree is left alone; the place is said at both ends.
+        assert list(cwd.iterdir()) == []
+        (dest,) = dests
+        assert dest.parent == suite_run.results_root() / "co1-single"
+        assert out.count(str(dest)) == 2
+        assert f"results will be collected to {dest}" in out
+
+    def test_wait_with_results_dir(
+        self,
+        vm_target: suite_run.SuiteTarget,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        import json
+
+        monkeypatch.setattr(suite_run, "_ssh", FakeGuest())
+        monkeypatch.setattr(
+            suite_run.vm_claim, "require_all", lambda vms, verb: None
+        )
+        states = iter([[], [suite_run.RunStatus(RID, "done", rc=0)]])
+        monkeypatch.setattr(
+            suite_run, "query", lambda t, rid=None: next(states)
+        )
+        dests: list[Path] = []
+        monkeypatch.setattr(
+            suite_run, "collect", lambda t, rid, dest: dests.append(dest)
+        )
+        mine = tmp_path / "mine"
+        rc = suite_run.cmd_suite_run(
+            _run_args(wait=True, results_dir=str(mine), json=True)
+        )
+        assert rc == 0
+        assert dests == [mine]
+        cap = capsys.readouterr()
+        assert json.loads(cap.out)["dest"] == str(mine)
+        assert f"results will be collected to {mine}" in cap.err
+
+    def test_results_dir_needs_wait(self, tmp_path: Path) -> None:
+        with pytest.raises(SystemExit):
+            suite_run.cmd_suite_run(_run_args(results_dir=str(tmp_path)))
+
+    def test_an_unwritable_results_dir_stops_the_run_before_it_starts(
+        self,
+        vm_target: suite_run.SuiteTarget,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        guest = FakeGuest()
+        monkeypatch.setattr(suite_run, "_ssh", guest)
+        monkeypatch.setattr(
+            suite_run.vm_claim, "require_all", lambda vms, verb: None
+        )
+        a_file = tmp_path / "file"
+        a_file.write_text("")
+        with pytest.raises(SystemExit):
+            suite_run.cmd_suite_run(
+                _run_args(wait=True, results_dir=str(a_file / "sub"))
+            )
+        assert not any("keyctl" in c for _, c, _ in guest.calls)
+
+    def test_without_wait_names_where_collect_puts_results(
+        self,
+        vm_target: suite_run.SuiteTarget,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        import json
+
+        monkeypatch.setattr(suite_run, "_ssh", FakeGuest())
+        monkeypatch.setattr(
+            suite_run.vm_claim, "require_all", lambda vms, verb: None
+        )
+        assert suite_run.cmd_suite_run(_run_args(json=True)) == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["results_dir"] == str(
+            suite_run.default_dest("co1-single", data["run_id"])
+        )
+
+
+class TestResultsPlace:
+    def test_under_xdg_state_home(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "st"))
+        assert suite_run.default_dest("co2", RID) == (
+            tmp_path / "st" / "ltvm" / "suite" / "co2" / RID
+        )
+
+    def test_default_state_home(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert suite_run.results_root() == (
+            tmp_path / ".local" / "state" / "ltvm" / "suite"
+        )
+
+    def test_never_the_working_directory(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        assert tmp_path not in suite_run.default_dest("co2", RID).parents
+
+    def test_explicit_dir_is_made_absolute(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        assert suite_run.results_dest("out", "co2", RID) == tmp_path / "out"
+        assert suite_run.results_dest(None, "co2", RID) == (
+            suite_run.default_dest("co2", RID)
+        )
+
+    def test_collected_dir_finds_new_then_old(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        assert suite_run.collected_dir("co2", RID) is None
+        old = tmp_path / "ltvm-suite" / "co2" / RID
+        old.mkdir(parents=True)
+        assert suite_run.collected_dir("co2", RID) == old
+        new = suite_run.default_dest("co2", RID)
+        new.mkdir(parents=True)
+        assert suite_run.collected_dir("co2", RID) == new
+
+    def test_collected_dir_with_the_working_directory_gone(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        gone = tmp_path / "gone"
+        gone.mkdir()
+        monkeypatch.chdir(gone)
+        gone.rmdir()
+        assert suite_run.collected_dir("co2", RID) is None
 
 
 class TestCmdStatus:
@@ -745,6 +884,46 @@ class TestCmdStatus:
         b = next(x for x in out.splitlines() if x.startswith("sanity-b"))
         assert "died" in b
         assert "co1-single rebooted" in out and "/var/crash" in out
+        assert "collected to" not in out
+
+    def test_names_where_runs_were_collected(
+        self,
+        vm_target: suite_run.SuiteTarget,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The new place, and a run collected to the old one."""
+        import json
+
+        monkeypatch.chdir(tmp_path)
+        new = suite_run.default_dest("co1-single", "sanity-a")
+        new.mkdir(parents=True)
+        old = tmp_path / "ltvm-suite" / "co1-single" / "sanity-b"
+        old.mkdir(parents=True)
+        probe = (
+            "node\t4000\t5000\n"
+            "run\tsanity-a\t0\t0\t1000\t\n"
+            "run\tsanity-b\t0\t0\t2000\t\n"
+            "run\tsanity-c\t0\t0\t3000\t\n"
+        )
+        monkeypatch.setattr(suite_run, "_ssh", FakeGuest(probe))
+        args = argparse.Namespace(target="co1-single", run_id=None, json=False)
+        assert suite_run.cmd_suite_status(args) == 0
+        out = capsys.readouterr().out
+        assert f"collected to {new}" in out
+        assert f"collected to {old}" in out
+        assert out.count("collected to") == 2
+        args.json = True
+        assert suite_run.cmd_suite_status(args) == 0
+        data = json.loads(capsys.readouterr().out)
+        dirs = {r["run_id"]: r["results_dir"] for r in data["runs"]}
+        assert dirs == {
+            "sanity-a": str(new),
+            "sanity-b": str(old),
+            "sanity-c": None,
+        }
+        assert data["results_root"] == str(new.parent)
 
     def test_unknown_run(
         self, vm_target: suite_run.SuiteTarget, monkeypatch: pytest.MonkeyPatch
@@ -785,16 +964,52 @@ class TestCmdCollect:
         dest = tmp_path / "out"
         rc = suite_run.cmd_suite_collect(
             argparse.Namespace(
-                target="co1-single", run_id=RID, dest=str(dest), json=True
+                target="co1-single",
+                run_id=RID,
+                results_dir=str(dest),
+                json=True,
             )
         )
         assert rc == 0
         assert seen[0][0] == "rsync"
-        data = json.loads(capsys.readouterr().out)
+        cap = capsys.readouterr()
+        data = json.loads(cap.out)
         assert data["status"]["state"] == "done"
         assert data["counts"] == {"PASS": 6, "FAIL": 1, "SKIP": 2}
         assert data["failures"][0]["name"] == "test_39r"
         assert data["dest"] == str(dest)
+        assert f"collecting {RID} to {dest}" in cap.err
+
+    def test_default_is_the_state_dir_not_the_working_tree(
+        self,
+        vm_target: suite_run.SuiteTarget,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        monkeypatch.setattr(
+            suite_run,
+            "_ssh",
+            FakeGuest(f"node\t2000\t5000\nrun\t{RID}\t0\t0\t1000\t\n"),
+        )
+        dests: list[Path] = []
+        monkeypatch.setattr(
+            suite_run, "collect", lambda t, rid, dest: dests.append(dest)
+        )
+        cwd = tmp_path / "repo"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
+        rc = suite_run.cmd_suite_collect(
+            argparse.Namespace(
+                target="co1-single", run_id=RID, results_dir=None, json=False
+            )
+        )
+        assert rc == 0
+        assert dests == [suite_run.default_dest("co1-single", RID)]
+        assert list(cwd.iterdir()) == []
+        out = capsys.readouterr().out
+        assert out.splitlines()[0] == f"collecting {RID} to {dests[0]}"
+        assert f"results in {dests[0]}" in out
 
 
 def test_cli_maps_a_missing_target_to_not_found(

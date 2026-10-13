@@ -17,6 +17,11 @@ The run lives in the guest under /root/ltvm-suite/<run-id>/: run.sh, its
 pid, the start time, auster's output and logs, and a `done` file holding
 auster's exit status.  On a cluster everything happens on the node the
 cluster's local.sh treats as local (ClusterInfo.local_node()).
+
+Collected results come back to ltvm's state directory on the host,
+``$XDG_STATE_HOME/ltvm/suite/<target>/<run-id>/``, unless the caller names
+another with --results-dir.  They once went under the working directory,
+which put test logs into whatever git tree the caller stood in.
 """
 
 from __future__ import annotations
@@ -521,8 +526,60 @@ def collect(t: SuiteTarget, run_id: str, dest: Path) -> None:
         )
 
 
+def results_root() -> Path:
+    """Where collected runs go: ltvm's state directory, keyed below it by
+    target and run id, never the caller's working tree."""
+    base = os.environ.get("XDG_STATE_HOME") or str(
+        Path.home() / ".local" / "state"
+    )
+    return Path(base) / "ltvm" / "suite"
+
+
 def default_dest(target: str, run_id: str) -> Path:
+    return results_root() / target / run_id
+
+
+def legacy_dest(target: str, run_id: str) -> Path:
+    """Where a collect before results_root() put a run: under the
+    directory it was started from."""
     return Path.cwd() / "ltvm-suite" / target / run_id
+
+
+def results_dest(explicit: str | None, target: str, run_id: str) -> Path:
+    """The --results-dir given, made absolute, else default_dest()."""
+    if explicit:
+        return Path(os.path.abspath(os.path.expanduser(explicit)))
+    return default_dest(target, run_id)
+
+
+def collected_dir(target: str, run_id: str) -> Path | None:
+    """Where this run's results were collected to, if anywhere ltvm
+    knows to look: the default place, then the old one."""
+    places = [default_dest(target, run_id)]
+    try:
+        places.append(legacy_dest(target, run_id))
+    except OSError:
+        pass  # the working directory is gone
+    for d in places:
+        if d.is_dir():
+            return d
+    return None
+
+
+def check_dest(dest: Path) -> None:
+    """Fail now, not after the suite, when *dest* cannot be written."""
+    d = dest
+    while not d.exists():
+        d = d.parent
+    if not d.is_dir():
+        die(f"results dir {dest}: {d} is not a directory")
+    if not os.access(d, os.W_OK | os.X_OK):
+        die(f"results dir {dest}: {d} is not writable")
+
+
+def _note(msg: str, use_json: bool) -> None:
+    """A progress line: stdout, or stderr when stdout carries JSON."""
+    print(msg, file=sys.stderr if use_json else sys.stdout, flush=True)
 
 
 def print_summary(
@@ -623,6 +680,12 @@ def cmd_suite_run(args: argparse.Namespace) -> int:
     check_name("suite", args.suite)
     if args.timeout is not None and not args.wait:
         die("--timeout only applies with --wait")
+    results_dir = getattr(args, "results_dir", None)
+    if results_dir and not args.wait:
+        die(
+            "--results-dir only applies with --wait; without it, give "
+            "it to `ltvm suite collect`"
+        )
     only = " ".join(args.only) if args.only else None
     env = list(args.env or [])
     env_assignments(env)
@@ -648,6 +711,9 @@ def cmd_suite_run(args: argparse.Namespace) -> int:
     libdir = lustre_libdir(os_family)
     _ensure_layout(t, exec_vm, os_family, libdir)
     run_id = time.strftime(f"{args.suite}-%Y%m%d-%H%M%S")
+    dest = results_dest(results_dir, t.name, run_id)
+    if args.wait:
+        check_dest(dest)
     script = run_script(
         run_id,
         libdir,
@@ -677,6 +743,7 @@ def cmd_suite_run(args: argparse.Namespace) -> int:
                     "target": t.name,
                     "node": t.exec_node,
                     "dir": run_dir(run_id),
+                    "results_dir": str(dest),
                 }
             )
         else:
@@ -684,17 +751,23 @@ def cmd_suite_run(args: argparse.Namespace) -> int:
             print(
                 f"started on {t.exec_node}:{run_dir(run_id)}; "
                 f"`ltvm suite status {t.name} {run_id}`, then "
-                f"`ltvm suite collect {t.name} {run_id}`",
+                f"`ltvm suite collect {t.name} {run_id}`, which puts "
+                f"the results in {dest}",
                 file=sys.stderr,
             )
         return EXIT_OK
     if not args.json:
         print(f"{run_id} started on {t.exec_node}", flush=True)
-    return _wait_and_collect(t, run_id, args.timeout, args.json)
+    _note(f"results will be collected to {dest}", args.json)
+    return _wait_and_collect(t, run_id, args.timeout, args.json, dest)
 
 
 def _wait_and_collect(
-    t: SuiteTarget, run_id: str, timeout: int | None, use_json: bool
+    t: SuiteTarget,
+    run_id: str,
+    timeout: int | None,
+    use_json: bool,
+    dest: Path,
 ) -> int:
     start = time.monotonic()
     lost_since: float | None = None
@@ -737,7 +810,6 @@ def _wait_and_collect(
             return EXIT_TIMEOUT
         time.sleep(POLL_SECONDS)
 
-    dest = default_dest(t.name, run_id)
     collect(t, run_id, dest)
     summary = summarize(dest)
     if use_json:
@@ -770,12 +842,24 @@ def cmd_suite_status(args: argparse.Namespace) -> int:
         die(str(e), EXIT_UNREACHABLE)
     if args.run_id and not found:
         die(f"no run {args.run_id} on {t.exec_node}", EXIT_NOT_FOUND)
+    collected = {s.run_id: collected_dir(t.name, s.run_id) for s in found}
     if args.json:
         _emit(
             {
                 "target": t.name,
                 "node": t.exec_node,
-                "runs": [asdict(s) for s in found],
+                "results_root": str(results_root() / t.name),
+                "runs": [
+                    {
+                        **asdict(s),
+                        "results_dir": (
+                            str(collected[s.run_id])
+                            if collected[s.run_id]
+                            else None
+                        ),
+                    }
+                    for s in found
+                ],
             }
         )
         return EXIT_OK
@@ -789,6 +873,8 @@ def cmd_suite_status(args: argparse.Namespace) -> int:
         print(line)
         for w in s.warnings():
             print(f"  warning: {w}")
+        if collected[s.run_id]:
+            print(f"  collected to {collected[s.run_id]}")
     return EXIT_OK
 
 
@@ -803,11 +889,9 @@ def cmd_suite_collect(args: argparse.Namespace) -> int:
     if not found:
         die(f"no run {args.run_id} on {t.exec_node}", EXIT_NOT_FOUND)
     status = found[0]
-    dest = (
-        Path(os.path.expanduser(args.dest))
-        if args.dest
-        else default_dest(t.name, args.run_id)
-    )
+    dest = results_dest(args.results_dir, t.name, args.run_id)
+    check_dest(dest)
+    _note(f"collecting {args.run_id} to {dest}", args.json)
     collect(t, args.run_id, dest)
     summary = summarize(dest)
     if args.json:

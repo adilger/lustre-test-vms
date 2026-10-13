@@ -931,7 +931,21 @@ first, `auster -k -v -r -H`, launched under `setsid nohup keyctl session
 is alive, "done" once it wrote `done`, "died" otherwise; a node whose
 uptime is shorter than the run's age crashed under it.  `collect`
 rsyncs the run dir back without `*.debug_log.*` and parses results.yml
-line by line (a killed suite leaves invalid YAML).  Out of scope on
+line by line (a killed suite leaves invalid YAML).
+
+Collected results go to ltvm's state directory, beside telemetry and the
+update cache: `$XDG_STATE_HOME/ltvm/suite/<target>/<run-id>/`
+(`~/.local/state/...` when it is unset; `suite_run.results_root()`).
+They used to go to `./ltvm-suite/` under the working directory, which
+put one agent's test logs into an unrelated git repository.
+`--results-dir DIR` (on `collect`, where `--dest` is its old spelling,
+and on `run --wait`) puts one run's results in DIR instead.  `run`
+names the place when it starts and the summary names it again at the
+end; `run --wait` checks it is writable before launching, not after the
+suite.  `status` prints `collected to <dir>` for a run found in the new
+place, or in `./ltvm-suite/` under the working directory for one
+collected before the move; nothing migrates or prunes them.  Out of
+scope on
 purpose: splitting a suite across VMs, queues, and rebuilding a crashed
 VM.
 

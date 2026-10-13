@@ -295,6 +295,27 @@ _SUITE_ARGS: dict[str, list[str]] = {
 }
 
 
+def test_suite_collect_dest_is_an_alias_of_results_dir() -> None:
+    p = ltvm.build_parser()
+    for flag in ("--dest", "--results-dir"):
+        args = p.parse_args(
+            ["suite", "collect", "co1-single", "sanity-x", flag, "/r"]
+        )
+        assert args.results_dir == "/r"
+    args = p.parse_args(
+        [
+            "suite",
+            "run",
+            "co1-single",
+            "sanity",
+            "--wait",
+            "--results-dir",
+            "/r",
+        ]
+    )
+    assert args.results_dir == "/r"
+
+
 def _suite_parser_choices() -> list[str]:
     p = ltvm.build_parser()
     for action in p._subparsers._actions:

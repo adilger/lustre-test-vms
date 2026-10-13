@@ -2501,6 +2501,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="With --wait, stop waiting after SECONDS (the suite keeps "
         "running)",
     )
+    _srp_results = srp.add_argument(
+        "--results-dir",
+        dest="results_dir",
+        default=None,
+        metavar="DIR",
+        help="With --wait, collect the logs into DIR (default: "
+        "$XDG_STATE_HOME/ltvm/suite/<target>/<run-id>, "
+        "~/.local/state if unset)",
+    )
+    _srp_results.completer = complete_directories  # type: ignore[attr-defined]
     srp.set_defaults(func=cmd_suite_run)
 
     ssp = suite_sub.add_parser(
@@ -2522,10 +2532,14 @@ def build_parser() -> argparse.ArgumentParser:
     _suite_target(scp)
     scp.add_argument("run_id", help="Run id, as `suite run` printed it")
     _scp_dest = scp.add_argument(
+        "--results-dir",
         "--dest",
+        dest="results_dir",
         default=None,
         metavar="DIR",
-        help="Where to put the logs (default: ./ltvm-suite/<target>/<run-id>)",
+        help="Where to put the logs (default: "
+        "$XDG_STATE_HOME/ltvm/suite/<target>/<run-id>, "
+        "~/.local/state if unset)",
     )
     _scp_dest.completer = complete_directories  # type: ignore[attr-defined]
     scp.set_defaults(func=cmd_suite_collect)
