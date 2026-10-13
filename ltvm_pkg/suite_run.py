@@ -18,10 +18,10 @@ pid, the start time, auster's output and logs, and a `done` file holding
 auster's exit status.  On a cluster everything happens on the node the
 cluster's local.sh treats as local (ClusterInfo.local_node()).
 
-Collected results come back to ltvm's state directory on the host,
-``$XDG_STATE_HOME/ltvm/suite/<target>/<run-id>/``, unless the caller names
-another with --results-dir.  They once went under the working directory,
-which put test logs into whatever git tree the caller stood in.
+Collected results come back to ./ltvm-suite/<target>/<run-id>/ under the
+caller's working directory, unless the caller names another place with
+--results-dir.  `status` also finds runs collected to ltvm's state
+directory, ``$XDG_STATE_HOME/ltvm/suite/``, briefly the default.
 """
 
 from __future__ import annotations
@@ -526,9 +526,24 @@ def collect(t: SuiteTarget, run_id: str, dest: Path) -> None:
         )
 
 
+def _cwd_root() -> Path | None:
+    try:
+        return Path.cwd() / "ltvm-suite"
+    except OSError:
+        return None  # the working directory is gone
+
+
 def results_root() -> Path:
-    """Where collected runs go: ltvm's state directory, keyed below it by
-    target and run id, never the caller's working tree."""
+    """Where collected runs go by default: ./ltvm-suite under the working
+    directory, keyed below it by target and run id."""
+    root = _cwd_root()
+    if root is None:
+        die("the working directory is gone; cd elsewhere or give --results-dir")
+    return root
+
+
+def state_root() -> Path:
+    """ltvm's state directory, where collects put runs for a while."""
     base = os.environ.get("XDG_STATE_HOME") or str(
         Path.home() / ".local" / "state"
     )
@@ -537,12 +552,6 @@ def results_root() -> Path:
 
 def default_dest(target: str, run_id: str) -> Path:
     return results_root() / target / run_id
-
-
-def legacy_dest(target: str, run_id: str) -> Path:
-    """Where a collect before results_root() put a run: under the
-    directory it was started from."""
-    return Path.cwd() / "ltvm-suite" / target / run_id
 
 
 def results_dest(explicit: str | None, target: str, run_id: str) -> Path:
@@ -554,15 +563,10 @@ def results_dest(explicit: str | None, target: str, run_id: str) -> Path:
 
 def collected_dir(target: str, run_id: str) -> Path | None:
     """Where this run's results were collected to, if anywhere ltvm
-    knows to look: the default place, then the old one."""
-    places = [default_dest(target, run_id)]
-    try:
-        places.append(legacy_dest(target, run_id))
-    except OSError:
-        pass  # the working directory is gone
-    for d in places:
-        if d.is_dir():
-            return d
+    knows to look: the working directory, then the state directory."""
+    for root in (_cwd_root(), state_root()):
+        if root is not None and (root / target / run_id).is_dir():
+            return root / target / run_id
     return None
 
 
@@ -843,12 +847,13 @@ def cmd_suite_status(args: argparse.Namespace) -> int:
     if args.run_id and not found:
         die(f"no run {args.run_id} on {t.exec_node}", EXIT_NOT_FOUND)
     collected = {s.run_id: collected_dir(t.name, s.run_id) for s in found}
+    root = _cwd_root()
     if args.json:
         _emit(
             {
                 "target": t.name,
                 "node": t.exec_node,
-                "results_root": str(results_root() / t.name),
+                "results_root": str(root / t.name) if root else None,
                 "runs": [
                     {
                         **asdict(s),

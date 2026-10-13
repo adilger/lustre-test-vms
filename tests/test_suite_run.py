@@ -699,7 +699,7 @@ class TestCmdRun:
         monkeypatch.setattr(
             suite_run.vm_claim, "require_all", lambda vms, verb: None
         )
-        cwd = tmp_path / "some-git-tree"
+        cwd = tmp_path / "work"
         cwd.mkdir()
         monkeypatch.chdir(cwd)
         states = iter(
@@ -729,10 +729,10 @@ class TestCmdRun:
         assert "== t 1 ==" in out
         assert "6 pass, 1 fail, 2 skip" in out
         assert "FAIL sanity test_39r (12s): atime not updated on disk" in out
-        # The working tree is left alone; the place is said at both ends.
-        assert list(cwd.iterdir()) == []
+        # Under the working directory, named in full at both ends.
         (dest,) = dests
-        assert dest.parent == suite_run.results_root() / "co1-single"
+        assert dest.parent == cwd / "ltvm-suite" / "co1-single"
+        assert dest.is_absolute()
         assert out.count(str(dest)) == 2
         assert f"results will be collected to {dest}" in out
 
@@ -810,28 +810,25 @@ class TestCmdRun:
 
 
 class TestResultsPlace:
-    def test_under_xdg_state_home(
+    def test_default_is_under_the_working_directory(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "st"))
+        monkeypatch.chdir(tmp_path)
         assert suite_run.default_dest("co2", RID) == (
-            tmp_path / "st" / "ltvm" / "suite" / "co2" / RID
+            tmp_path / "ltvm-suite" / "co2" / RID
         )
 
-    def test_default_state_home(
+    def test_state_root(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "st"))
+        assert suite_run.state_root() == tmp_path / "st" / "ltvm" / "suite"
+        monkeypatch.delenv("XDG_STATE_HOME")
         monkeypatch.setenv("HOME", str(tmp_path))
-        assert suite_run.results_root() == (
+        assert suite_run.state_root() == (
             tmp_path / ".local" / "state" / "ltvm" / "suite"
         )
-
-    def test_never_the_working_directory(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        monkeypatch.chdir(tmp_path)
-        assert tmp_path not in suite_run.default_dest("co2", RID).parents
 
     def test_explicit_dir_is_made_absolute(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -842,26 +839,36 @@ class TestResultsPlace:
             suite_run.default_dest("co2", RID)
         )
 
-    def test_collected_dir_finds_new_then_old(
+    def test_collected_dir_finds_the_working_directory_then_state(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "st"))
+        cwd = tmp_path / "work"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
         assert suite_run.collected_dir("co2", RID) is None
-        old = tmp_path / "ltvm-suite" / "co2" / RID
-        old.mkdir(parents=True)
-        assert suite_run.collected_dir("co2", RID) == old
-        new = suite_run.default_dest("co2", RID)
-        new.mkdir(parents=True)
-        assert suite_run.collected_dir("co2", RID) == new
+        state = suite_run.state_root() / "co2" / RID
+        state.mkdir(parents=True)
+        assert suite_run.collected_dir("co2", RID) == state
+        here = cwd / "ltvm-suite" / "co2" / RID
+        here.mkdir(parents=True)
+        assert suite_run.collected_dir("co2", RID) == here
 
-    def test_collected_dir_with_the_working_directory_gone(
+    def test_with_the_working_directory_gone(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "st"))
         gone = tmp_path / "gone"
         gone.mkdir()
         monkeypatch.chdir(gone)
         gone.rmdir()
         assert suite_run.collected_dir("co2", RID) is None
+        state = suite_run.state_root() / "co2" / RID
+        state.mkdir(parents=True)
+        assert suite_run.collected_dir("co2", RID) == state
+        with pytest.raises(SystemExit):
+            suite_run.default_dest("co2", RID)
+        assert suite_run.results_dest("/r", "co2", RID) == Path("/r")
 
 
 class TestCmdStatus:
@@ -895,13 +902,17 @@ class TestCmdStatus:
         tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        """The new place, and a run collected to the old one."""
+        """The working directory, and the state directory a run was
+        collected to while it was the default."""
         import json
 
-        monkeypatch.chdir(tmp_path)
-        new = suite_run.default_dest("co1-single", "sanity-a")
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "st"))
+        cwd = tmp_path / "work"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
+        new = cwd / "ltvm-suite" / "co1-single" / "sanity-a"
         new.mkdir(parents=True)
-        old = tmp_path / "ltvm-suite" / "co1-single" / "sanity-b"
+        old = suite_run.state_root() / "co1-single" / "sanity-b"
         old.mkdir(parents=True)
         probe = (
             "node\t4000\t5000\n"
@@ -982,7 +993,7 @@ class TestCmdCollect:
         assert data["dest"] == str(dest)
         assert f"collecting {RID} to {dest}" in cap.err
 
-    def test_default_is_the_state_dir_not_the_working_tree(
+    def test_default_is_the_working_directory(
         self,
         vm_target: suite_run.SuiteTarget,
         monkeypatch: pytest.MonkeyPatch,
@@ -998,7 +1009,7 @@ class TestCmdCollect:
         monkeypatch.setattr(
             suite_run, "collect", lambda t, rid, dest: dests.append(dest)
         )
-        cwd = tmp_path / "repo"
+        cwd = tmp_path / "work"
         cwd.mkdir()
         monkeypatch.chdir(cwd)
         rc = suite_run.cmd_suite_collect(
@@ -1007,8 +1018,7 @@ class TestCmdCollect:
             )
         )
         assert rc == 0
-        assert dests == [suite_run.default_dest("co1-single", RID)]
-        assert list(cwd.iterdir()) == []
+        assert dests == [cwd / "ltvm-suite" / "co1-single" / RID]
         out = capsys.readouterr().out
         assert out.splitlines()[0] == f"collecting {RID} to {dests[0]}"
         assert f"results in {dests[0]}" in out

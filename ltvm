@@ -2538,8 +2538,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="DIR",
         help="With --wait, collect the logs into DIR (default: "
-        "$XDG_STATE_HOME/ltvm/suite/<target>/<run-id>, "
-        "~/.local/state if unset)",
+        "./ltvm-suite/<target>/<run-id>)",
     )
     _srp_results.completer = complete_directories  # type: ignore[attr-defined]
     srp.set_defaults(func=cmd_suite_run)
@@ -2568,9 +2567,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="results_dir",
         default=None,
         metavar="DIR",
-        help="Where to put the logs (default: "
-        "$XDG_STATE_HOME/ltvm/suite/<target>/<run-id>, "
-        "~/.local/state if unset)",
+        help="Where to put the logs (default: ./ltvm-suite/<target>/<run-id>)",
     )
     _scp_dest.completer = complete_directories  # type: ignore[attr-defined]
     scp.set_defaults(func=cmd_suite_collect)
