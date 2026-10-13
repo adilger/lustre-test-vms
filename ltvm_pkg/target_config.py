@@ -767,7 +767,7 @@ class TargetConfig:
 
     @property
     def configure_args(self) -> list[str]:
-        """Extra configure args specific to this target (e.g. --with-o2ib=no)."""
+        """Extra configure args specific to this target (e.g. --enable-gss=yes)."""
         v = self._data.get("configure_args", [])
         return list(v)
 

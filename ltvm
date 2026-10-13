@@ -817,7 +817,7 @@ def build_parser() -> argparse.ArgumentParser:
     blp.add_argument(
         "--configure",
         help="Extra configure arguments (quoted string), e.g. "
-        "--configure --with-o2ib=yes.  The = form works too.",
+        "--configure --with-o2ib=no.  The = form works too.",
     )
     blp.add_argument(
         "--jobs", type=int, default=None, help="Parallel jobs (default: nproc)"
@@ -2666,7 +2666,7 @@ def _reconcile_target_args(args: argparse.Namespace) -> int | None:
 # almost always starts with "-".  argparse reads a space-separated
 # "-value" as the next option and fails with "expected one argument",
 # which made the documented, obvious invocation
-# `--configure --with-o2ib=yes` an error.
+# `--configure --with-o2ib=no` an error.
 _DASH_VALUED_OPTIONS = frozenset({"--configure"})
 
 
@@ -2696,7 +2696,7 @@ def _known_option_strings(parser: argparse.ArgumentParser) -> set[str]:
 def _join_dash_valued_options(
     argv: list[str], known_options: set[str]
 ) -> list[str]:
-    """Rewrite `--configure --with-o2ib=yes` to the `=` form.
+    """Rewrite `--configure --with-o2ib=no` to the `=` form.
 
     Only when the value looks like a flag and is not an ltvm option of
     its own: `--configure --jobs 4` stays an error, because that is a
