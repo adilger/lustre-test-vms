@@ -236,9 +236,9 @@ targets:
     zfs:
       version: 2.4.0
   ubuntu2404:
-    # --with-o2ib=no is NOT needed here: it has been hard-coded in the
-    # base configure line (lustre_build.py) for every target since
-    # 9653316.
+    # --with-o2ib=yes is the base configure default (lustre_build.py).
+    # Add --with-o2ib=no to configure_args if this kernel lacks
+    # CONFIG_INFINIBAND.
     container_image: docker.io/library/ubuntu:24.04
     kernel_deb_source: linux-source-6.8.0
     kernels:
