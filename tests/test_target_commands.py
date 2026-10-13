@@ -997,6 +997,12 @@ class TestCmdValidateOutput:
 
 
 class TestCmdTargetExport:
+    @pytest.fixture(autouse=True)
+    def _no_sudo_prompt(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from ltvm_pkg import priv
+
+        monkeypatch.setattr(priv, "sudo_prime", lambda reason: None)
+
     """cmd_target_export wraps image_export.export_image with the
     standard CLI surface (root check, target lookup, output-path
     defaulting, error mapping).  All disk work is mocked -- the

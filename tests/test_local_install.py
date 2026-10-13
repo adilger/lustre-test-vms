@@ -14,6 +14,26 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.host_marks import x86_host  # noqa: F401
+
+
+@pytest.fixture(autouse=True)
+def _no_sudo(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never reach sudo, which prompts or fails without a terminal.
+
+    The tar pipeline unpacks into each test's own root, so it runs as
+    the user; anything else that would elevate (rm, depmod, rmmod)
+    reports success without running -- it could name host paths.
+    """
+    from ltvm_pkg import local_install
+
+    monkeypatch.setattr(local_install, "_sudo_argv", lambda cmd: cmd)
+    monkeypatch.setattr(
+        local_install,
+        "sudo_run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, "", ""),
+    )
+
 
 def _has_gnu_tar() -> bool:
     import shutil as _shutil
@@ -142,6 +162,7 @@ class TestReadImageStamp:
 # ======================================================================
 
 
+@pytest.mark.usefixtures("x86_host")
 class TestOsReleaseFallback:
     def _osr(self, tmp_path: Path, text: str) -> Path:
         p = tmp_path / "os-release"
@@ -1100,7 +1121,9 @@ class TestMakeCommandBehaviour:
 
         manifest = {
             "schema": li.MANIFEST_SCHEMA,
-            "files": ["usr/sbin/mount.lustre"],
+            # Not a real path: an installed mount.lustre (as on a Lustre
+            # host) is still there after the stubbed rm, and fails this.
+            "files": ["usr/sbin/ltvm-test-no-such-file"],
             "dirs": [],
             "kernel_version": "5.14.0",
         }

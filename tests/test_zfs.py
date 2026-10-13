@@ -29,6 +29,9 @@ import yaml
 
 from ltvm_pkg import zfs_build as zb
 from tests.conftest import _make_config, _write_targets_yaml
+from tests.host_marks import x86_host  # noqa: F401
+
+pytestmark = pytest.mark.usefixtures("x86_host")
 
 # ── helpers ──────────────────────────────────────────────
 

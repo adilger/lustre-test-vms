@@ -1030,6 +1030,15 @@ payload can be searched and the answer is the same on every machine.
 Better still where it fits: assert the output does not *change* when the
 identity does (`test_payload_does_not_depend_on_the_machine_name`).
 
+The suite also runs on macOS on Apple Silicon, so a test that assumes a
+Linux x86_64 host says so with
+[tests/host_marks.py](tests/host_marks.py): the `x86_host` fixture for
+the x86_64 default targets, `needs_gnu_sed` for guest-side shell run on
+the host, `needs_proc` for /proc.  No test may reach the real `sudo`,
+which prompts in a terminal and fails without one: stub
+`_vm_privileges`, `sudo_prime` or `sudo_run` where the code under test
+elevates.
+
 `tests/conftest.py` holds the autouse isolation that keeps the suite out
 of the developer's real state: XDG config and state, `LTVM_TELEMETRY=0`,
 and `LTVM_COMPLETION_ROOT`.  Add to it rather than patching per test

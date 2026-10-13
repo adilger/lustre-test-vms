@@ -201,6 +201,8 @@ class TestVmSubcommandsDispatch:
         fn_name = subcmd.replace("-", "_")
         patches = [
             patch("ltvm_pkg.cli._require_root", return_value=None),
+            patch("ltvm_pkg.cli.vm._vm_privileges", return_value=None),
+            patch("ltvm_pkg.cli.setup._vm_privileges", return_value=None),
             patch(f"ltvm_pkg.vm_commands.cmd_{fn_name}"),
         ]
         with contextlib.ExitStack() as stack:

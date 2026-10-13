@@ -17,6 +17,7 @@ import pytest
 
 from ltvm_pkg import suite_run
 from ltvm_pkg.vm_state import ClusterInfo, ClusterNotFound, VMNotFound
+from tests.host_marks import needs_gnu_sed
 
 FIXTURE = Path(__file__).parent / "fixtures" / "suite" / "results.yml"
 RID = "sanity-20261008-120000"
@@ -98,6 +99,7 @@ class TestRunScript:
             suite_run.env_assignments(["1X=y"])
 
     @pytest.mark.skipif(not shutil.which("bash"), reason="needs bash")
+    @needs_gnu_sed
     def test_script_runs_the_recipe(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

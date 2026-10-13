@@ -9,6 +9,15 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _grub_efi_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The host-tool checks look for GRUB's x86_64-efi modules."""
+    import ltvm_pkg.image_export as ie
+
+    monkeypatch.setattr(ie, "GRUB_EFI_DIR", tmp_path)
+
+
 # What _check_host_tools returns on a Debian-family host.
 _TOOLS = {"grub_install": "grub-install", "grub_mkimage": "grub-mkimage"}
 
