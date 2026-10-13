@@ -22,7 +22,14 @@ from .deploy import configure_test_disks, premount_cleanup_script
 from .host_setup import is_macos
 from .paths import load_meta_safe
 from .priv import SudoUnavailable, chmod_regular, sudo_prime, sudo_run
-from .qemu_run import die, is_running, kill_qemu, launch_qemu, run
+from .qemu_run import (
+    die,
+    is_running,
+    kill_qemu,
+    launch_qemu,
+    numa_problem,
+    run,
+)
 from .vm_net import (
     HOSTS_FILE,
     _real_user_ssh_dir,
@@ -613,6 +620,7 @@ _RESOURCE_FLAGS = {
     "disk_size": "--disk-size",
     "root_size": "--root-size",
     "kernel_args": "--kernel-args",
+    "numa_nodes": "--numa-nodes",
 }
 
 # Size flags are typed as "500M" and stored as bytes, so they have to be
@@ -814,7 +822,11 @@ def _allocate_and_persist_vm(
             # umbrella, after we've actually bound each BDF to vfio-pci.
             passthrough_drivers={},
             kernel_args=getattr(args, "kernel_args", ""),
+            numa_nodes=getattr(args, "numa_nodes", 0) or 0,
         )
+        problem = numa_problem(vm.vcpus, vm.mem, vm.numa_nodes)
+        if problem:
+            die(problem)
 
         if _create_disks(vm, image):
             _chown_disks_to_sudo_user(vm)
@@ -886,6 +898,7 @@ def _print_create_plan(
         "mac": mac,
         "extra_nics": list(extra_nic_types),
         "kernel_args": getattr(args, "kernel_args", ""),
+        "numa_nodes": getattr(args, "numa_nodes", 0) or 0,
         "owner_id": getattr(args, "owner_id", None),
     }
     if args.json:
@@ -903,6 +916,8 @@ def _print_create_plan(
     print(f"           {kernel}")
     print(f"  image:   {image}")
     print(f"  cpu/mem: {args.vcpus} vcpus, {args.mem} MB")
+    if getattr(args, "numa_nodes", 0):
+        print(f"  numa:    {args.numa_nodes} nodes")
     print(
         f"  disks:   {args.mdt_disks} MDT + {args.ost_disks} OST "
         f"@ {size_mb}M each"
@@ -1349,6 +1364,8 @@ def cmd_create(args: argparse.Namespace) -> None:
     except ValueError as e:
         die(str(e))
     args.kernel_args = _validate_kernel_args(getattr(args, "kernel_args", None))
+    if (getattr(args, "numa_nodes", 0) or 0) < 0:
+        die(f"--numa-nodes must be >= 0 (got {args.numa_nodes})")
 
     dry_run = getattr(args, "dry_run", False)
     info_path = SOCKETS / f"{name}.info"
@@ -2875,8 +2892,9 @@ def cmd_set(args: argparse.Namespace) -> None:
     recreating it.  The VM must be stopped: a running QEMU would keep
     its old size, and `list` would then report values it isn't using.
     """
-    if args.vcpus is None and args.mem is None:
-        die("nothing to set: give --vcpus and/or --mem")
+    numa = getattr(args, "numa_nodes", None)
+    if args.vcpus is None and args.mem is None and numa is None:
+        die("nothing to set: give --vcpus, --mem and/or --numa-nodes")
     if args.vcpus is not None and args.vcpus <= 0:
         die(f"--vcpus must be > 0 (got {args.vcpus})")
     if args.mem is not None and args.mem <= 0:
@@ -2894,6 +2912,12 @@ def cmd_set(args: argparse.Namespace) -> None:
     if args.mem is not None and args.mem != vm.mem:
         changes.append(f"mem {vm.mem}M -> {args.mem}M")
         vm.mem = args.mem
+    if numa is not None and numa != vm.numa_nodes:
+        changes.append(f"numa nodes {vm.numa_nodes} -> {numa}")
+        vm.numa_nodes = numa
+    problem = numa_problem(vm.vcpus, vm.mem, vm.numa_nodes)
+    if problem:
+        die(problem)
     if not changes:
         print(f"{vm.name}: no change")
         return

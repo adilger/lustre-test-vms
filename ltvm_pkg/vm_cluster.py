@@ -461,6 +461,7 @@ def _create_one_node(
     kernel_args: str = "",
     owner_id: str | None = None,
     wait_seconds: int = 0,
+    numa_nodes: int = 0,
     kernel: str | None = None,
     variant: str = "base",
 ) -> tuple[str, int, str]:
@@ -527,6 +528,8 @@ def _create_one_node(
     if kernel_args:
         # One argv word, so a value starting with '-' is not an option.
         cmd += [f"--kernel-args={kernel_args}"]
+    if numa_nodes:
+        cmd += ["--numa-nodes", str(numa_nodes)]
     if wait_seconds:
         cmd += ["--wait", str(wait_seconds)]
 
@@ -853,6 +856,7 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
     nics: list[str] = list(getattr(args, "nic", None) or [])
     kernel_args = _validate_kernel_args(getattr(args, "kernel_args", None))
     wait_seconds: int = getattr(args, "wait", 0)
+    numa_nodes: int = getattr(args, "numa_nodes", 0) or 0
     try:
         owner_id = resolve_owner_id(getattr(args, "owner_id", None))
     except ValueError as e:
@@ -913,6 +917,7 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
                 kernel_args,
                 owner_id,
                 wait_seconds=wait_seconds,
+                numa_nodes=numa_nodes,
                 kernel=None if node_targets[node.name] else kernel,
                 variant="base" if node_targets[node.name] else variant,
             ): node

@@ -1331,6 +1331,19 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     _vm_create_args.add_argument(
+        "--numa-nodes",
+        dest="numa_nodes",
+        type=int,
+        default=0,
+        metavar="N",
+        help=(
+            "Simulate N NUMA nodes: the vCPUs (which N must divide) and "
+            "memory split evenly, one socket per node -- for testing "
+            "Lustre CPTs.  0 (the default) is none; `ltvm vm set` "
+            "changes it on a stopped VM."
+        ),
+    )
+    _vm_create_args.add_argument(
         "--kernel-args",
         dest="kernel_args",
         default=None,
@@ -1635,13 +1648,22 @@ def build_parser() -> argparse.ArgumentParser:
     vsetp = vm_sub.add_parser(
         "set",
         parents=[common],
-        help="Change the vCPUs or memory of a stopped VM (next start)",
+        help="Change the vCPUs, memory or NUMA nodes of a stopped VM "
+        "(next start)",
     )
     _vsetp_name = vsetp.add_argument("name", help="VM name")
     _vsetp_name.completer = complete_vms  # type: ignore[attr-defined]
     vsetp.add_argument("--vcpus", type=int, default=None, help="New vCPU count")
     vsetp.add_argument(
         "--mem", type=int, default=None, help="New memory size in MB"
+    )
+    vsetp.add_argument(
+        "--numa-nodes",
+        dest="numa_nodes",
+        type=int,
+        default=None,
+        metavar="N",
+        help="New simulated NUMA node count (0 for none)",
     )
     vsetp.set_defaults(func=cmd_vm_set)
 
@@ -2121,6 +2143,15 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="TYPE[:ARG]",
         help="Extra NIC applied to every node; repeat for multiple. "
         "Same types as `ltvm create --nic`.",
+    )
+    ccp.add_argument(
+        "--numa-nodes",
+        dest="numa_nodes",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Simulated NUMA nodes on every node, as "
+        "`ltvm create --numa-nodes`",
     )
     ccp.add_argument(
         "--kernel-args",

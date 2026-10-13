@@ -662,6 +662,14 @@ panics a guest into kdump with no ssh, which is when it is needed.
 `vm nmi` still sets them over ssh for a guest booted before that, and
 refuses only when that fails and the QEMU's cmdline lacks them.
 
+**NUMA:** `--numa-nodes N` (`create`, `cluster create`, `vm set`) is
+`NUMA_NODES` in the `.info` file, and `qemu_run.smp_args()` turns it into
+`-smp V,sockets=N,cores=V/N`, one `memory-backend-ram` and one `-numa
+node` per node at every start: equal vCPUs (N must divide them) and
+memory in 2 MB units, the last node taking the remainder so the backends
+sum to `-m`.  For Lustre CPT testing; works under KVM and HVF, x86_64 and
+aarch64.
+
 **Kernel arguments:** `--kernel-args 'slub_debug=FZPU page_owner=on'`
 is stored in the `.info` file as `KERNEL_ARGS` and appended after
 ltvm's own parameters on every boot, so a parameter whose last
