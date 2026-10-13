@@ -20,6 +20,8 @@ libyaml
 json-c
 
 # Test framework dependencies
+# python3-pyyaml: sanity-lnet compares lnetctl exports with yaml.safe_load
+python3-pyyaml
 attr
 acl
 bc

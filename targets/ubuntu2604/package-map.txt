@@ -31,6 +31,7 @@ openmpi           openmpi-bin
 openmpi-devel     libopenmpi-dev
 libaio            libaio1t64
 libyaml           libyaml-0-2
+python3-pyyaml    python3-yaml
 json-c            libjson-c5
 pdsh-rcmd-ssh     -
 nfs-utils         nfs-common

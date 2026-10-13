@@ -15,6 +15,7 @@ less
 which
 findutils
 procps-ng
+gawk
 tar
 gzip
 xz
@@ -57,6 +58,11 @@ crash
 python3
 python3-pip
 python3-devel
+
+# running_in_vm() in the test framework asks these, and without them
+# the VMs count as bare metal
+dmidecode
+virt-what
 
 # Misc utilities
 jq
