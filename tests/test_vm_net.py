@@ -611,6 +611,59 @@ class TestRunSsh:
         assert kwargs["capture_output"] is False
         assert kwargs["stdout"] is stream
 
+    def test_retries_a_connection_that_never_got_in(self) -> None:
+        """Regression: cluster deploy lost two of four nodes booted
+        together to "Connection timed out during banner exchange"."""
+        results = [
+            subprocess.CompletedProcess(
+                [], 255, "", "Connection timed out during banner exchange\n"
+            ),
+            subprocess.CompletedProcess(
+                [],
+                255,
+                "",
+                "ssh: connect to host 10.0.0.5 port 22: Connection refused\n",
+            ),
+            subprocess.CompletedProcess([], 0, "ok\n", ""),
+        ]
+        sleeps: list[float] = []
+        with (
+            patch("ltvm_pkg.vm_net.run", side_effect=results) as run,
+            patch.object(vm_net.time, "sleep", sleeps.append),
+        ):
+            r = vm_net.run_ssh("10.0.0.5", "depmod -a")
+        assert r.returncode == 0
+        assert run.call_count == 3
+        assert sleeps == list(vm_net.SSH_CONNECT_RETRY_DELAYS[:2])
+
+    def test_a_failure_after_login_is_not_retried(self) -> None:
+        """255 from the remote side, or a dropped session, may come
+        after the command ran; running it twice is not safe."""
+        for err in ("", "Connection to 10.0.0.5 closed by remote host.\n"):
+            with (
+                patch(
+                    "ltvm_pkg.vm_net.run",
+                    return_value=subprocess.CompletedProcess([], 255, "", err),
+                ) as run,
+                patch.object(vm_net.time, "sleep") as sleep,
+            ):
+                r = vm_net.run_ssh("10.0.0.5", "lctl dl")
+            assert r.returncode == 255
+            assert run.call_count == 1
+            sleep.assert_not_called()
+
+    def test_gives_up_after_the_retries(self) -> None:
+        failed = subprocess.CompletedProcess(
+            [], 255, "", "kex_exchange_identification: read: reset\n"
+        )
+        with (
+            patch("ltvm_pkg.vm_net.run", return_value=failed) as run,
+            patch.object(vm_net.time, "sleep"),
+        ):
+            r = vm_net.run_ssh("10.0.0.5", "true")
+        assert r.returncode == 255
+        assert run.call_count == 1 + len(vm_net.SSH_CONNECT_RETRY_DELAYS)
+
     def test_no_stream_captures(self) -> None:
         with patch.object(
             vm_net, "sshpass_ssh_argv", return_value=["sh", "-c", "echo hi"]

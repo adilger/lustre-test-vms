@@ -20,7 +20,13 @@ import time
 from pathlib import Path
 
 from .paths import read_modinfo_field
-from .vm_net import SSH_KEEPALIVE_OPTS, run_ssh, sshpass_ssh_argv
+from .vm_net import (
+    SSH_CONNECT_RETRY_DELAYS,
+    SSH_KEEPALIVE_OPTS,
+    run_ssh,
+    ssh_never_connected,
+    sshpass_ssh_argv,
+)
 from .vm_state import (
     EXIT_ERROR,
     EXIT_NOT_FOUND,
@@ -82,7 +88,28 @@ def _compressor() -> list[str]:
     return [shutil.which("pigz") or "gzip", "-1", "-c"]
 
 
+class _NotConnected(RuntimeError):
+    pass
+
+
 def _stream_tree(
+    vm: VMInfo, tree: Path, *, exclude_modules: bool = False
+) -> None:
+    """_stream_tree_once, again when its ssh never got in."""
+    for delay in SSH_CONNECT_RETRY_DELAYS:
+        try:
+            _stream_tree_once(vm, tree, exclude_modules=exclude_modules)
+            return
+        except _NotConnected as e:
+            print(f"{e}; retrying in {delay}s", file=sys.stderr)
+            time.sleep(delay)
+    try:
+        _stream_tree_once(vm, tree, exclude_modules=exclude_modules)
+    except _NotConnected as e:
+        raise RuntimeError(str(e)) from None
+
+
+def _stream_tree_once(
     vm: VMInfo, tree: Path, *, exclude_modules: bool = False
 ) -> None:
     """tar | gzip | ssh a DESTDIR tree into the VM's /.
@@ -180,6 +207,10 @@ def _stream_tree(
         if ssh_rc != 0:
             ssh_out.seek(0)
             output = ssh_out.read().decode(errors="replace").strip()
+            if ssh_never_connected(ssh_rc, output):
+                raise _NotConnected(
+                    f"tar deploy failed (rc={ssh_rc}): {output}"
+                )
             if local_rc != 0 and local_msg:
                 output += f"; {local_msg}"
             raise RuntimeError(f"tar deploy failed (rc={ssh_rc}): {output}")

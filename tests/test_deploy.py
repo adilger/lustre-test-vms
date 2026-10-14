@@ -547,6 +547,44 @@ class TestStreamTree:
             with pytest.raises(RuntimeError, match="no route"):
                 deploy._stream_tree(_make_vm(ip="10.9.8.7"), staging)
 
+    def test_a_connection_that_never_got_in_is_tried_again(
+        self,
+        staging: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A guest slow to send its banner after a cold boot gets the
+        tree on a later try instead of failing the node."""
+        root = tmp_path / "root"
+        root.mkdir()
+        flag = tmp_path / "tried"
+        sleeps: list[float] = []
+        monkeypatch.setattr(deploy.time, "sleep", sleeps.append)
+        script = (
+            f"if [ ! -e {flag} ]; then touch {flag}; "
+            "echo 'Connection timed out during banner exchange' >&2; "
+            f"exit 255; fi; tar xzf - -C {root} --no-same-owner"
+        )
+        with self._remote(root, script=script):
+            deploy._stream_tree(_make_vm(ip="10.9.8.7"), staging)
+        assert (root / "lib/modules/5.14/lustre.ko").exists()
+        assert sleeps == [deploy.SSH_CONNECT_RETRY_DELAYS[0]]
+
+    def test_a_guest_that_never_answers_still_fails(
+        self,
+        staging: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(deploy.time, "sleep", lambda s: None)
+        script = (
+            "cat >/dev/null; "
+            "echo 'Connection timed out during banner exchange' >&2; exit 255"
+        )
+        with self._remote(tmp_path, script=script):
+            with pytest.raises(RuntimeError, match="banner exchange"):
+                deploy._stream_tree(_make_vm(ip="10.9.8.7"), staging)
+
 
 class TestStepTimeout:
     def test_default(self, monkeypatch: pytest.MonkeyPatch) -> None:

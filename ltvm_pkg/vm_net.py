@@ -834,6 +834,28 @@ def deploy_ssh_key(ip: str) -> None:
         die(f"SSH key deployment failed on {ip} (rc={r.returncode}): {err}")
 
 
+# ssh's messages for a connection that never reached the login, so the
+# remote command did not run and running it again is safe.  A guest
+# just booted, or one of several booting at once, can be slow to send
+# its banner inside ConnectTimeout.
+_SSH_NOT_CONNECTED = (
+    "during banner exchange",
+    "kex_exchange_identification",
+    "ssh: connect to host",
+)
+# Waits before each retry of a connection that never got in.
+SSH_CONNECT_RETRY_DELAYS = (2, 5, 10)
+
+
+def ssh_never_connected(returncode: int, stderr: str | None) -> bool:
+    """True when ssh failed before the remote command could start."""
+    return (
+        returncode == 255
+        and isinstance(stderr, str)
+        and any(m in stderr for m in _SSH_NOT_CONNECTED)
+    )
+
+
 def run_ssh(
     ip: str,
     command: str,
@@ -848,6 +870,9 @@ def run_ssh(
     result's ``stdout``/``stderr`` are None.  That is for a long remote
     command whose progress is the point, such as llmount.sh -- captured,
     its output would arrive all at once when it finished.
+
+    A captured run whose connection never got in is retried, with
+    SSH_CONNECT_RETRY_DELAYS between the tries.
     """
     ssh_cmd = sshpass_ssh_argv(
         ip,
@@ -856,7 +881,17 @@ def run_ssh(
     )
     try:
         if stream is None:
-            return run(ssh_cmd, timeout=timeout)
+            r = run(ssh_cmd, timeout=timeout)
+            for delay in SSH_CONNECT_RETRY_DELAYS:
+                if not ssh_never_connected(r.returncode, r.stderr):
+                    break
+                print(
+                    f"ssh {ip}: {_one_line(r.stderr)}; retrying in {delay}s",
+                    file=sys.stderr,
+                )
+                time.sleep(delay)
+                r = run(ssh_cmd, timeout=timeout)
+            return r
         # Our own buffered output has to land before the child's.
         sys.stdout.flush()
         sys.stderr.flush()
