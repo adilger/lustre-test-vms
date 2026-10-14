@@ -873,7 +873,11 @@ def _build_in_container(
             f'CROSS_PKG_CONFIG_LIBDIR="{sysroot}/usr/lib64/pkgconfig:'
             f"{sysroot}/usr/lib/pkgconfig:"
             f'{sysroot}/usr/share/pkgconfig" '
-            f'CROSS_PKG_CONFIG_SYSROOT_DIR="{sysroot}" && '
+            f'CROSS_PKG_CONFIG_SYSROOT_DIR="{sysroot}" '
+            # configure finds Kerberos under /usr and checks the library
+            # path pkg-config gives against it, which here is the
+            # sysroot's.
+            f'CROSS_CONFIGURE="--with-krb5={sysroot}/usr" && '
             # Lustre's userspace links against the WhamCloud-patched
             # ext2fs / libcom_err, which has no RHEL package -- the build
             # container builds it natively from source at container-build
@@ -935,7 +939,7 @@ def _build_in_container(
             f'export CROSS_CC_FLAGS="-L{sysroot}/usr/lib" '
             f'CROSS_PKG_CONFIG_LIBDIR="{sysroot}/usr/lib/pkgconfig:'
             f'/usr/lib/{xinfo.multiarch_triple}/pkgconfig" '
-            f'CROSS_PKG_CONFIG_SYSROOT_DIR=""; '
+            f'CROSS_PKG_CONFIG_SYSROOT_DIR="" CROSS_CONFIGURE=""; '
             f"fi"
         )
 
@@ -979,6 +983,7 @@ def _build_in_container(
     if cross_compiling:
         # The container's mpicc builds for the host.
         cfg += " --disable-mpitests"
+        cfg += " $CROSS_CONFIGURE"
     else:
         # Lustre's MPI test programs (mdsrate, cascading_rw,
         # write_disjoint...) build only when configure finds mpicc, and EL

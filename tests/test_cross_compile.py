@@ -226,6 +226,10 @@ class TestCrossBuildScript:
         dnf = script[: script.index("elif command -v apt-get")]
         assert "--installroot=/sysroot-aarch64" in dnf
         assert "krb5-devel" in dnf
+        assert 'CROSS_CONFIGURE="--with-krb5=/sysroot-aarch64/usr"' in dnf
+        apt = script[script.index("elif command -v apt-get") :]
+        assert 'CROSS_CONFIGURE=""' in apt
+        assert " $CROSS_CONFIGURE" in script[script.index("bash autogen.sh") :]
 
     def test_mpi_tests_are_off(self, tmp_path) -> None:
         """The container's mpicc builds for the host."""
