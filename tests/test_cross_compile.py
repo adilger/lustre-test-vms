@@ -226,6 +226,8 @@ class TestCrossBuildScript:
         dnf = script[: script.index("elif command -v apt-get")]
         assert "--installroot=/sysroot-aarch64" in dnf
         assert "krb5-devel" in dnf
+        # svcgssd builds only with OpenSSL's SSK support.
+        assert "openssl-devel" in dnf
         assert 'CROSS_CONFIGURE="--with-krb5=/sysroot-aarch64/usr"' in dnf
         apt = script[script.index("elif command -v apt-get") :]
         assert 'CROSS_CONFIGURE=""' in apt
