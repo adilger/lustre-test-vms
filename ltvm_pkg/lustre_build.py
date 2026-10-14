@@ -847,6 +847,13 @@ def _build_in_container(
             f"libnl3-devel libaio-devel libselinux-devel zlib-devel "
             f"json-c-devel keyutils-libs-devel libuuid-devel "
             f"2>&1 | tail -5 && "
+            # An absolute lib*.so link (EL10's libkeyutils.so) resolves
+            # to the container's own host-arch library, which the cross
+            # linker skips as incompatible.
+            f"for l in {sysroot}/usr/lib64/lib*.so; do "
+            f't=$(readlink "$l") || continue; case "$t" in '
+            f'/*) ln -sf "{sysroot}$t" "$l" ;; esac; '
+            f"done && "
             # CC flags:
             #   --sysroot tells the linker / runtime probes where libc lives
             #   -isystem  tells the preprocessor where to find <stdio.h>

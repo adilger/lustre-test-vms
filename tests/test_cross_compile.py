@@ -210,6 +210,15 @@ class TestCrossBuildScript:
             in apt
         )
 
+    def test_rhel_sysroot_links_stay_in_the_sysroot(self, tmp_path) -> None:
+        """EL10's libkeyutils.so is an absolute link, which resolves to
+        the container's host-arch library unless re-pointed."""
+        script = self._script(tmp_path)
+        dnf = script[: script.index("elif command -v apt-get")]
+        loop = dnf.index("for l in /sysroot-aarch64/usr/lib64/lib*.so")
+        assert loop < dnf.index("Cross-building e2fsprogs")
+        assert 'ln -sf "/sysroot-aarch64$t" "$l"' in dnf
+
     def test_mpi_tests_are_off(self, tmp_path) -> None:
         """The container's mpicc builds for the host."""
         script = self._script(tmp_path)
