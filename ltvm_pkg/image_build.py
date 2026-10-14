@@ -168,7 +168,10 @@ def _prebuild_tools_native(
     else:
         build_tag = f"ltvm-build-{target_config.name}-{host_arch}"
 
-    output_dir.mkdir(parents=True, exist_ok=True)
+    # The scripts clone into it (FlameGraph) and fail on a previous
+    # build's leftovers.
+    shutil.rmtree(output_dir, ignore_errors=True)
+    output_dir.mkdir(parents=True)
 
     # Ensure the native build container exists (build it if missing).
     r = subprocess.run(
@@ -252,6 +255,56 @@ def _prebuild_tools_native(
     ]
     subprocess.run(cmd, check=True)
     log.info("Pre-built tools at %s", output_dir)
+
+
+def cross_patch_dockerfile(text: str, prebuilt: Path) -> str:
+    """Swap an image Dockerfile's tool builds for COPYs of ``prebuilt``.
+
+    The RUN that calls build-tools.sh or build-e2fsprogs.sh gets the
+    COPYs in front of it and ``true`` in place of the call, so whatever
+    else that RUN does (ubuntu2604's gnu17 wrapper, its e2fsprogs
+    ld.so.conf) still happens.  Every top-level directory the prebuild
+    installed is copied: e2fsprogs puts its libraries and mke2fs under
+    lib/ and sbin/, build-tools.sh puts compilebench under opt/.
+    """
+    copies = {
+        "build-tools.sh": ["usr/local", "opt"],
+        "build-e2fsprogs.sh": ["usr", "lib", "sbin", "etc"],
+    }
+    # lib/ and sbin/ land under /usr: every target is merged-/usr, and
+    # COPY onto the /lib symlink itself is not something to rely on.
+    dest = {"lib": "/usr/lib/", "sbin": "/usr/sbin/"}
+    lines = text.splitlines(keepends=True)
+    out: list[str] = []
+    i = 0
+    found = dict.fromkeys(copies, False)
+    while i < len(lines):
+        j = i
+        while lines[j].rstrip().endswith("\\") and j + 1 < len(lines):
+            j += 1
+        instr = "".join(lines[i : j + 1])
+        for script, dirs in copies.items():
+            call = re.compile(
+                r"bash /tmp/" + re.escape(script) + r"[^\\&;|\n]*"
+            )
+            if not (instr.startswith("RUN ") and call.search(instr)):
+                continue
+            found[script] = True
+            for d in dirs:
+                if (prebuilt / d).is_dir():
+                    out.append(
+                        f"COPY _prebuilt/{d}/ {dest.get(d, '/' + d + '/')}\n"
+                    )
+            instr = call.sub("true ", instr)
+        out.append(instr)
+        i = j + 1
+    for script, ok in found.items():
+        if not ok:
+            raise RuntimeError(
+                f"Cross-build Dockerfile patching failed: no RUN calls "
+                f"bash /tmp/{script}.  Has the Dockerfile changed?"
+            )
+    return "".join(out)
 
 
 def _lustre_staging_hash_input(staging: Path) -> bytes:
@@ -711,25 +764,7 @@ def build_image(
         prebuilt_dir = out_dir / "_prebuilt"
         _prebuild_tools_native(target_config, prebuilt_dir)
 
-        # Patch the Dockerfile: replace the RUN build-tools.sh and
-        # build-e2fsprogs.sh steps with COPY from pre-built output.
-        original = dockerfile.read_text()
-        patched = original
-        replacements = {
-            "RUN bash /tmp/build-tools.sh": "COPY _prebuilt/usr/local/ /usr/local/",
-            "RUN bash /tmp/build-e2fsprogs.sh": "COPY _prebuilt/usr/ /usr/",
-        }
-        for old, new in replacements.items():
-            # Match any line starting with the key (ignoring trailing args
-            # like version strings) so version bumps don't silently skip.
-            pattern = re.compile(re.escape(old) + r".*", re.MULTILINE)
-            patched, n = pattern.subn(new, patched)
-            if n == 0:
-                raise RuntimeError(
-                    f"Cross-build Dockerfile patching failed: "
-                    f"could not find '{old}' in {dockerfile}. "
-                    f"Has the Dockerfile changed?"
-                )
+        patched = cross_patch_dockerfile(dockerfile.read_text(), prebuilt_dir)
 
         # Write patched Dockerfile next to the original
         effective_dockerfile = out_dir / "image.Dockerfile.cross"

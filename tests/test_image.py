@@ -10,6 +10,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import ltvm_pkg.image_build as ib
+from ltvm_pkg.target_config import TARGETS_DIR
+
 
 def _make_target_config(tmp_path: Path, name: str = "rocky9") -> MagicMock:
     """Return a MagicMock TargetConfig with sensible defaults."""
@@ -438,6 +441,15 @@ class TestPrebuildToolsNative:
         script = self._script(tmp_path)
         assert script.startswith("set -e\n")
         assert "bash /input/build-tools.sh" in script
+
+    def test_a_previous_prebuild_is_cleared(self, tmp_path: Path) -> None:
+        """build-tools.sh clones FlameGraph into the output and fails
+        when a previous build's clone is still there."""
+        stale = tmp_path / "out" / "usr" / "local" / "FlameGraph"
+        stale.mkdir(parents=True)
+        self._script(tmp_path)
+        assert not stale.exists()
+        assert (tmp_path / "out").is_dir()
 
     def test_script_sets_pipefail_for_the_dnf_pipeline(
         self, tmp_path: Path
@@ -1029,3 +1041,63 @@ class TestLustreBakedImageStaleness:
         tc = self._built_image(tmp_path, {"input_components": dict(components)})
 
         assert image.image_status(tc)["input_components"] == components
+
+
+class TestCrossPatchDockerfile:
+    """A cross image build swaps the tool builds for COPYs of _prebuilt."""
+
+    @staticmethod
+    def _prebuilt(tmp_path: Path) -> Path:
+        for d in ("usr/local", "opt", "lib", "sbin", "etc"):
+            (tmp_path / d).mkdir(parents=True)
+        return tmp_path
+
+    @pytest.mark.parametrize(
+        "target",
+        sorted(p.parent.name for p in TARGETS_DIR.glob("*/image.Dockerfile")),
+    )
+    def test_every_image_dockerfile_patches(
+        self, tmp_path: Path, target: str
+    ) -> None:
+        text = (TARGETS_DIR / target / "image.Dockerfile").read_text()
+        out = ib.cross_patch_dockerfile(text, self._prebuilt(tmp_path))
+        assert "bash /tmp/build-tools.sh" not in out
+        assert "bash /tmp/build-e2fsprogs.sh" not in out
+
+    def test_e2fsprogs_lib_and_sbin_are_copied(self, tmp_path: Path) -> None:
+        """mke2fs and libext2fs install under /sbin and /lib, not /usr."""
+        out = ib.cross_patch_dockerfile(
+            "RUN bash /tmp/build-tools.sh\nRUN bash /tmp/build-e2fsprogs.sh\n",
+            self._prebuilt(tmp_path),
+        )
+        assert "COPY _prebuilt/lib/ /usr/lib/\n" in out
+        assert "COPY _prebuilt/sbin/ /usr/sbin/\n" in out
+        assert "COPY _prebuilt/etc/ /etc/\n" in out
+        assert "COPY _prebuilt/opt/ /opt/\n" in out
+
+    def test_rest_of_the_run_survives(self, tmp_path: Path) -> None:
+        """ubuntu2604 wraps the call in a longer RUN; the rest stays."""
+        text = (
+            "RUN bash /tmp/build-tools.sh\n"
+            "RUN bash /tmp/build-e2fsprogs.sh \\\n"
+            "    && ldconfig \\\n"
+            "    && mke2fs -V\n"
+        )
+        out = ib.cross_patch_dockerfile(text, self._prebuilt(tmp_path))
+        assert out.index("COPY _prebuilt/usr/ /usr/") < out.index("ldconfig")
+        assert "RUN true \\\n    && ldconfig \\\n    && mke2fs -V\n" in out
+
+    def test_only_present_dirs_are_copied(self, tmp_path: Path) -> None:
+        (tmp_path / "usr/local").mkdir(parents=True)
+        out = ib.cross_patch_dockerfile(
+            "RUN bash /tmp/build-tools.sh\nRUN bash /tmp/build-e2fsprogs.sh\n",
+            tmp_path,
+        )
+        assert "_prebuilt/opt/" not in out
+        assert "COPY _prebuilt/usr/local/ /usr/local/" in out
+
+    def test_missing_call_is_an_error(self, tmp_path: Path) -> None:
+        with pytest.raises(RuntimeError, match="build-e2fsprogs.sh"):
+            ib.cross_patch_dockerfile(
+                "RUN bash /tmp/build-tools.sh\n", self._prebuilt(tmp_path)
+            )
