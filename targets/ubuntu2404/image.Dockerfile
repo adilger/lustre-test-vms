@@ -66,8 +66,19 @@ RUN chmod 0755 /usr/local/sbin/setup-nic-softroce.sh \
 # Source-built tools: IOR, mdtest, iozone, pjdfstest, FlameGraph, drgn
 RUN bash /tmp/build-tools.sh
 
-# Lustre-patched e2fsprogs (pinned release)
-RUN bash /tmp/build-e2fsprogs.sh
+# Lustre-patched e2fsprogs (pinned release).  Its libraries land in
+# /usr/lib, which ld.so searches after the multiarch directory holding
+# the distro's older libext2fs, so mke2fs fails with "undefined symbol:
+# ext2fs_set_iops_group".  Put the e2fsprogs libraries (only those --
+# /usr/lib also has its libblkid and libuuid) ahead of the distro's.
+RUN bash /tmp/build-e2fsprogs.sh \
+    && mkdir /usr/lib/e2fsprogs-wc \
+    && for l in libext2fs libe2p libcom_err libss; do \
+         ln -s ../$l.so.2 /usr/lib/e2fsprogs-wc/$l.so.2; \
+       done \
+    && echo /usr/lib/e2fsprogs-wc > /etc/ld.so.conf.d/00-e2fsprogs-wc.conf \
+    && ldconfig \
+    && mke2fs -V
 
 # System configuration
 RUN bash /tmp/setup-ssh.sh

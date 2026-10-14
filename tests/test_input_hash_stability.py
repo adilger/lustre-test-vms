@@ -46,7 +46,7 @@ GOLDEN = [
     ("mainline", "image", None, None, "a6eb079be358e525"),
     ("ubuntu2404", "container", None, None, "a6dbffaea81d2907"),
     ("ubuntu2404", "kernel", None, None, "6a77030fa472f64a"),
-    ("ubuntu2404", "image", None, None, "654270cf1dd64238"),
+    ("ubuntu2404", "image", None, None, "1e4805ff040d1d58"),
     ("ubuntu2604", "container", None, None, "a12a95e67b1528aa"),
     ("ubuntu2604", "kernel", None, None, "17fc16b57bc9c670"),
     ("ubuntu2604", "image", None, None, "7176630508d89f11"),
