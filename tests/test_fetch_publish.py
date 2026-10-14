@@ -162,6 +162,23 @@ class TestFindReleaseUrl:
         assert url.endswith("611.13.1.el9_7_lustre.json")
         assert "mofed" not in url
 
+    @pytest.mark.parametrize(
+        "tag",
+        [
+            "debian13-x86_64-6.12.107-lustre",
+            "opensuse156-x86_64-6.4.0-150700.53.66_lustre-default",
+        ],
+    )
+    def test_base_release_ending_in_a_word(self, tag: str) -> None:
+        """A kernel release can end in a word, a Debian kernel's
+        CONFIG_LOCALVERSION or a SUSE kernel's flavor, which the base
+        guard read as a variant name: neither release could be found."""
+        target = tag.split("-", 1)[0]
+        releases = [self._rel(tag, f"manifest-{tag}.json")]
+        with patch("ltvm_pkg.cli._gh_api", return_value=releases):
+            url = _find_release_url(target, arch="x86_64")
+        assert url.endswith(f"manifest-{tag}.json")
+
     def test_variant_requires_exact_suffix(self) -> None:
         """--variant mofed must reject a base manifest."""
         releases = [

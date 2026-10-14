@@ -225,3 +225,54 @@ class TestKdump:
             for c in cmds
         )
         assert not any("mkdumprd" in c or "dracut" in c for c in cmds)
+
+
+class TestFetch:
+    """fetch found neither published opensuse156 release: the kernel
+    flavor ending the release (-default) read as a variant name, and
+    the 6.4 signature could not tell SP6 from SP7."""
+
+    _TAGS = (
+        "opensuse156-x86_64-6.4.0-150700.53.66_lustre-default",
+        "opensuse156-x86_64-6.4.0-150600.23.78_lustre-default",
+    )
+
+    def _releases(self) -> list[dict]:
+        return [
+            {
+                "tag_name": tag,
+                "assets": [
+                    {
+                        "name": f"manifest-{tag}.json",
+                        "browser_download_url": f"https://ex/{tag}.json",
+                    }
+                ],
+            }
+            for tag in self._TAGS
+        ]
+
+    @pytest.mark.parametrize(
+        "kernel,tag",
+        [("6.4-sles15sp7", _TAGS[0]), ("6.4-sles15sp6", _TAGS[1])],
+    )
+    def test_each_kernel_finds_its_release(self, kernel: str, tag: str) -> None:
+        from ltvm_pkg.cli.fetch import (
+            _find_release_url,
+            _kernel_release_signature,
+        )
+
+        with patch("ltvm_pkg.cli._gh_api", return_value=self._releases()):
+            url = _find_release_url(
+                "opensuse156",
+                arch="x86_64",
+                kernel_signature=_kernel_release_signature(kernel),
+            )
+        assert url == f"https://ex/{tag}.json"
+
+    def test_release_maps_back_to_its_kernel(self) -> None:
+        from ltvm_pkg.cli.fetch import _fetched_kernel_name
+
+        assert (
+            _fetched_kernel_name("opensuse156", self._TAGS[1], "x86_64")
+            == "6.4-sles15sp6"
+        )

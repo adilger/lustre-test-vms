@@ -146,7 +146,9 @@ def _gh_next_link(headers: str) -> str | None:
 
 
 _RHEL_RE = re.compile(r"rhel(\d+)\.(\d+)")
+_SLES_RE = re.compile(r"sles(\d+)sp(\d+)")
 _KVER_PREFIX_RE = re.compile(r"^(\d+\.\d+)")
+_KERNEL_RELEASE_TAILS = ("_lustre-default", "-lustre")
 
 
 def _kernel_release_signature(kname: str) -> str | None:
@@ -155,6 +157,9 @@ def _kernel_release_signature(kname: str) -> str | None:
     Release asset names use the kernel uname-r suffix:
     - RHEL kernels contain ``elX_Y`` where X.Y is the distro minor
       version, so ``5.14-rhel9.5`` -> ``el9_5``.
+    - SLES releases start with the service pack, 6.4.0-150700.53.66
+      for SLE 15 SP7, so ``6.4-sles15sp7`` -> ``-150700.``; SP6 and
+      SP7 share the 6.4 kernel.
     - Non-RHEL (e.g. Ubuntu) fall back to the leading ``MAJOR.MINOR``
       kernel version, so ``6.8-ubuntu2404`` -> ``6.8``.  This only
       discriminates if the target's ``kernels.available`` entries
@@ -167,6 +172,9 @@ def _kernel_release_signature(kname: str) -> str | None:
     m = _RHEL_RE.search(kname)
     if m:
         return f"el{m.group(1)}_{m.group(2)}"
+    m = _SLES_RE.search(kname)
+    if m:
+        return f"-{m.group(1)}{int(m.group(2)):02d}00."
     m = _KVER_PREFIX_RE.match(kname)
     if m:
         return m.group(1)
@@ -309,8 +317,15 @@ def _find_release_url(
                 # name like "-mofed" does not).
                 if any(stem.endswith(f"-{v}") for v in known_variants):
                     continue
+                # Some kernel releases end in a word: the flavor of a
+                # SUSE kernel (6.4.0-150700.53.66_lustre-default), the
+                # CONFIG_LOCALVERSION of a Debian one (6.12.107-lustre).
                 last_seg = stem.rsplit("-", 1)[-1]
-                if last_seg and not any(ch.isdigit() for ch in last_seg):
+                if (
+                    last_seg
+                    and not any(ch.isdigit() for ch in last_seg)
+                    and not stem.endswith(_KERNEL_RELEASE_TAILS)
+                ):
                     continue
             elif not stem.endswith(f"-{variant}"):
                 continue
