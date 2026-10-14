@@ -845,7 +845,7 @@ def _build_in_container(
             f"install "
             f"glibc-devel kernel-headers libgcc libmount-devel libyaml-devel "
             f"libnl3-devel libaio-devel libselinux-devel zlib-devel "
-            f"json-c-devel keyutils-libs-devel libuuid-devel "
+            f"json-c-devel keyutils-libs-devel libuuid-devel krb5-devel "
             f"2>&1 | tail -5 && "
             # An absolute lib*.so link (EL10's libkeyutils.so) resolves
             # to the container's own host-arch library, which the cross

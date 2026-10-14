@@ -219,6 +219,14 @@ class TestCrossBuildScript:
         assert loop < dnf.index("Cross-building e2fsprogs")
         assert 'ln -sf "/sysroot-aarch64$t" "$l"' in dnf
 
+    def test_rhel_sysroot_has_kerberos(self, tmp_path) -> None:
+        """rocky10 configures --enable-gss=yes, which needs the target
+        arch's Kerberos."""
+        script = self._script(tmp_path)
+        dnf = script[: script.index("elif command -v apt-get")]
+        assert "--installroot=/sysroot-aarch64" in dnf
+        assert "krb5-devel" in dnf
+
     def test_mpi_tests_are_off(self, tmp_path) -> None:
         """The container's mpicc builds for the host."""
         script = self._script(tmp_path)
