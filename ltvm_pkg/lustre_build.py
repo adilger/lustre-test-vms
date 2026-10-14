@@ -736,6 +736,87 @@ def _hit_clock_skew(lustre_tree: Path, since: float) -> bool:
         return False
 
 
+# Symbols Lustre's in-kernel o2iblnd links against, from rdma_cm: a
+# kernel without them (no CONFIG_INFINIBAND, or no
+# CONFIG_INFINIBAND_ADDR_TRANS) fails configure --with-o2ib=yes.
+_O2IB_SYMBOLS = ("rdma_destroy_id", "rdma_create_qp")
+
+
+def kernel_has_o2ib(build_tree: Path) -> tuple[bool | None, str]:
+    """Whether a kernel build-tree can build Lustre's ko2iblnd, and why.
+
+    Module.symvers decides when it exists: it lists every exported
+    symbol, built-in or modular, so rdma_cm's are there exactly when
+    o2iblnd can link.  Without it, CONFIG_INFINIBAND and
+    CONFIG_INFINIBAND_ADDR_TRANS in .config (or autoconf.h) stand in.
+    Returns (None, reason) when the tree says nothing either way.
+    """
+    symvers = build_tree / "Module.symvers"
+    try:
+        with symvers.open(errors="replace") as fp:
+            found = {
+                f[1]
+                for line in fp
+                if len(f := line.split("\t")) > 1 and f[1] in _O2IB_SYMBOLS
+            }
+    except OSError:
+        pass
+    else:
+        if found:
+            return (True, "rdma_cm symbols in Module.symvers")
+        return (False, "no rdma_destroy_id in its Module.symvers")
+
+    for name, prefix in (
+        (".config", "CONFIG_"),
+        ("include/generated/autoconf.h", "#define CONFIG_"),
+    ):
+        try:
+            text = (build_tree / name).read_text(errors="replace")
+        except OSError:
+            continue
+        opts = {
+            line[len(prefix) :].split("=" if prefix == "CONFIG_" else " ")[0]
+            for line in text.splitlines()
+            if line.startswith(prefix)
+        }
+        ok = {"INFINIBAND", "INFINIBAND_ADDR_TRANS"} <= opts or (
+            "INFINIBAND_MODULE" in opts and "INFINIBAND_ADDR_TRANS" in opts
+        )
+        if ok:
+            return (True, f"CONFIG_INFINIBAND in {name}")
+        return (False, f"no CONFIG_INFINIBAND/INFINIBAND_ADDR_TRANS in {name}")
+    return (None, "no Module.symvers, .config or autoconf.h")
+
+
+def _names_o2ib(extra_configure: list[str] | None) -> bool:
+    """Whether a target or the user already chose an o2ib setting."""
+    return any(
+        a.split("=", 1)[0] in ("--with-o2ib", "--without-o2ib")
+        for a in extra_configure or []
+    )
+
+
+def o2ib_configure_flag(
+    build_tree: Path, extra_configure: list[str] | None
+) -> str:
+    """``--with-o2ib=yes``, or ``=no`` for a kernel without InfiniBand.
+
+    yes is the default (ko2iblnd for SoftRoCE testing), but configure
+    fails outright on a kernel built without IB -- the locally built
+    rocky9 aarch64 kernels and ubuntu2604-server's first one are --
+    so such a kernel gets no, with a note.  An explicit --with-o2ib or
+    --without-o2ib from configure_args or --configure is never
+    overridden: it is appended later and wins either way.
+    """
+    if _names_o2ib(extra_configure):
+        return "--with-o2ib=yes"
+    has, why = kernel_has_o2ib(build_tree)
+    if has is False:
+        print(f"  Kernel has no InfiniBand ({why}): configuring --with-o2ib=no")
+        return "--with-o2ib=no"
+    return "--with-o2ib=yes"
+
+
 def _build_in_container(
     lustre_tree: Path,
     build_tree: Path,
@@ -994,8 +1075,10 @@ def _build_in_container(
     #
     # extra_configure is appended after this line, and autoconf takes
     # the last spelling of a flag, so a target's configure_args or
-    # `--configure --with-o2ib=no` still opts out.
-    cfg = "./configure --with-linux=/kernel --with-o2ib=yes"
+    # `--configure --with-o2ib=no` still opts out.  A kernel built
+    # without InfiniBand gets --with-o2ib=no (o2ib_configure_flag).
+    o2ib = o2ib_configure_flag(build_tree, extra_configure)
+    cfg = f"./configure --with-linux=/kernel {o2ib}"
     if cross_compiling:
         cfg += f" --host={xinfo.triple}"
         # CROSS_CC_FLAGS / CROSS_PKG_CONFIG_* come from the install branch

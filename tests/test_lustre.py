@@ -17,7 +17,9 @@ from ltvm_pkg.lustre_build import (
     _show_configure_log,
     _tree_claim,
     build_lustre,
+    kernel_has_o2ib,
     lustre_status,
+    o2ib_configure_flag,
     read_staging_meta,
     staging_path,
 )
@@ -944,3 +946,141 @@ class TestRegisterGitExclude:
         (tree / ".ltvm-staging" / "rocky9").mkdir(parents=True)
         (tree / ".ltvm-staging" / "rocky9" / "a.ko").write_text("x\n")
         assert git("-C", str(tree), "status", "--porcelain") == ""
+
+
+class TestO2ibDetection:
+    """--with-o2ib=yes is the default, but configure fails outright on a
+    kernel built without InfiniBand, so such a kernel gets =no -- unless
+    a target or the user named an o2ib setting, which always wins."""
+
+    IB_SYMVERS = (
+        "0x1\trdma_destroy_id\tdrivers/infiniband/core/rdma_cm\t"
+        "EXPORT_SYMBOL\t\n"
+    )
+    NO_IB_SYMVERS = "0x2\tjbd2_journal_start\tvmlinux\tEXPORT_SYMBOL\t\n"
+
+    def test_symvers_with_rdma_cm(self, tmp_path: Path) -> None:
+        (tmp_path / "Module.symvers").write_text(self.IB_SYMVERS)
+        assert kernel_has_o2ib(tmp_path)[0] is True
+
+    def test_symvers_without_rdma_cm(self, tmp_path: Path) -> None:
+        """Module.symvers decides, even over a .config that has IB."""
+        (tmp_path / "Module.symvers").write_text(self.NO_IB_SYMVERS)
+        (tmp_path / ".config").write_text(
+            "CONFIG_INFINIBAND=m\nCONFIG_INFINIBAND_ADDR_TRANS=y\n"
+        )
+        has, why = kernel_has_o2ib(tmp_path)
+        assert has is False
+        assert "rdma_destroy_id" in why
+
+    @pytest.mark.parametrize(
+        "config,has",
+        [
+            ("CONFIG_INFINIBAND=m\nCONFIG_INFINIBAND_ADDR_TRANS=y\n", True),
+            ("CONFIG_INFINIBAND=y\nCONFIG_INFINIBAND_ADDR_TRANS=y\n", True),
+            ("CONFIG_INFINIBAND=m\n", False),
+            ("# CONFIG_INFINIBAND is not set\n", False),
+        ],
+    )
+    def test_config_without_symvers(
+        self, tmp_path: Path, config: str, has: bool
+    ) -> None:
+        (tmp_path / ".config").write_text(config)
+        assert kernel_has_o2ib(tmp_path)[0] is has
+
+    def test_autoconf_h(self, tmp_path: Path) -> None:
+        gen = tmp_path / "include" / "generated"
+        gen.mkdir(parents=True)
+        (gen / "autoconf.h").write_text(
+            "#define CONFIG_INFINIBAND_MODULE 1\n"
+            "#define CONFIG_INFINIBAND_ADDR_TRANS 1\n"
+        )
+        assert kernel_has_o2ib(tmp_path)[0] is True
+
+    def test_empty_tree_cannot_tell(self, tmp_path: Path) -> None:
+        assert kernel_has_o2ib(tmp_path)[0] is None
+        # ... and keeps the default rather than guessing.
+        assert o2ib_configure_flag(tmp_path, None) == "--with-o2ib=yes"
+
+    def test_no_ib_falls_back_with_a_note(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        (tmp_path / "Module.symvers").write_text(self.NO_IB_SYMVERS)
+        assert o2ib_configure_flag(tmp_path, ["--enable-gss"]) == (
+            "--with-o2ib=no"
+        )
+        out = capsys.readouterr().out
+        assert out.count("\n") == 1
+        assert "configuring --with-o2ib=no" in out
+
+    @pytest.mark.parametrize(
+        "explicit",
+        [
+            ["--with-o2ib=yes"],
+            ["--with-o2ib=/usr/src/ofa_kernel/default"],
+            ["--with-o2ib"],
+            ["--without-o2ib"],
+        ],
+    )
+    def test_explicit_setting_is_never_overridden(
+        self,
+        tmp_path: Path,
+        explicit: list[str],
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """An explicit setting is appended after the default and wins,
+        so the default line is left alone and nothing is printed."""
+        (tmp_path / "Module.symvers").write_text(self.NO_IB_SYMVERS)
+        assert o2ib_configure_flag(tmp_path, explicit) == "--with-o2ib=yes"
+        assert capsys.readouterr().out == ""
+
+    def _script(self, tmp_path: Path, symvers: str, extra=None) -> str:
+        lustre, kernel = TestTreeClaim()._tree(tmp_path)
+        (kernel / "Module.symvers").write_text(symvers)
+        captured: list[str] = []
+
+        def mock_run(cmd, *args, **kwargs):
+            if "podman" in cmd[0]:
+                captured.append(cmd[-1])
+            return _make_completed(0)
+
+        with (
+            patch("ltvm_pkg.lustre_build.subprocess.run", side_effect=mock_run),
+            patch(
+                "ltvm_pkg.lustre_build.run_podman_with_cleanup",
+                side_effect=mock_run,
+            ),
+            patch("ltvm_pkg.lustre_build._container_exists", return_value=True),
+            patch("ltvm_pkg.target_config.TargetConfig") as mock_tc,
+        ):
+            mock_tc.return_value.resolve_kernel.return_value = "5.14-rhel9.7"
+            try:
+                build_lustre(
+                    lustre,
+                    kernel,
+                    container_tag="ltvm-build-rocky9",
+                    target=TestTreeClaim.TARGET,
+                    extra_configure=extra,
+                    force=False,
+                )
+            except Exception:
+                pass
+        assert captured, "podman run was not called"
+        return captured[0]
+
+    def test_build_configures_no_for_a_kernel_without_ib(
+        self, tmp_path: Path
+    ) -> None:
+        script = self._script(tmp_path, self.NO_IB_SYMVERS)
+        assert "--with-linux=/kernel --with-o2ib=no" in script
+
+    def test_build_keeps_yes_for_a_kernel_with_ib(self, tmp_path: Path) -> None:
+        script = self._script(tmp_path, self.IB_SYMVERS)
+        assert "--with-linux=/kernel --with-o2ib=yes" in script
+
+    def test_build_keeps_the_users_choice(self, tmp_path: Path) -> None:
+        script = self._script(
+            tmp_path, self.NO_IB_SYMVERS, extra=["--with-o2ib=yes"]
+        )
+        assert "--with-o2ib=no" not in script
+        assert script.rstrip().count("--with-o2ib=yes") >= 1

@@ -1186,6 +1186,18 @@ Builds inside the target's build container against the
 target's kernel build tree.  Output goes to the Lustre
 tree's `.ltvm-staging/<target>/<arch>/<kernel>[/<variant>]/`.
 
+configure gets `--with-o2ib=yes` (the in-kernel ko2iblnd, for
+SoftRoCE), except on a kernel built without InfiniBand, where it fails
+outright: `lustre_build.o2ib_configure_flag` reads the build-tree --
+rdma_cm's `rdma_destroy_id` in Module.symvers, else
+`CONFIG_INFINIBAND` and `CONFIG_INFINIBAND_ADDR_TRANS` in .config or
+autoconf.h -- and switches to `--with-o2ib=no` with a one-line note.
+An o2ib setting in configure_args or `--configure` is never
+overridden; it is appended after the default and wins.  Every Lustre
+build goes through it: `build lustre`/`all`, deploy-lustre, cluster
+deploy and make-install.  The ZFS and MOFED-kmod builds do not
+configure Lustre.
+
 The container runs under `podman run --timeout`, as the ZFS and
 MOFED-kmod builds do ([ltvm_pkg/build_timeout.py](ltvm_pkg/build_timeout.py)):
 3600s for Lustre, 1800s for the other two.  `LTVM_BUILD_TIMEOUT`,
