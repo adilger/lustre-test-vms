@@ -393,6 +393,11 @@ MatchedIn = Literal[
     # lists.  Distinct from "not_listed": being ahead of the ChangeLog
     # is the point of an upstream target, not a reason to refuse it.
     "upstream_ahead",
+    # The same RHEL minor release as a listed kernel, at another
+    # z-stream update: Rocky stops mirroring a minor release before
+    # Lustre stops refreshing its target.in for it.
+    "which_patch_zstream",
+    "changelog_zstream",
     "not_listed",
 ]
 
@@ -441,6 +446,26 @@ def _built_kver(kernel_build_tree: Path | None) -> str | None:
 
 def _kver_matches(declared: str, target_kver: str) -> bool:
     return _normalize_kver(declared) == _normalize_kver(target_kver)
+
+
+# 6.12.0-55.41.1.el10 -> ("6.12.0", "55", "el10"): the GA build number
+# names the RHEL minor release, the rest is its z-stream update.
+_RHEL_KVER_RE = re.compile(r"^(\d+\.\d+\.\d+)-(\d+)(?:\.[\d.]+)?\.(el\d+)$")
+
+
+def _same_rhel_minor(declared: str, target_kver: str) -> bool:
+    a = _RHEL_KVER_RE.match(_normalize_kver(declared))
+    b = _RHEL_KVER_RE.match(_normalize_kver(target_kver))
+    return a is not None and b is not None and a.groups() == b.groups()
+
+
+def _zstream_note(declared: str, kver: str) -> str:
+    return (
+        f"kernel {kver} is the RHEL minor release of {declared} at "
+        f"another z-stream update; Lustre picks its patches by minor "
+        f"release, so this normally builds, but it is not the kernel "
+        f"this tree was tested on"
+    )
 
 
 # Extract the leading "<major>.<minor>" from a kernel-shaped token.
@@ -828,6 +853,14 @@ def validate_target(
                         + ")"
                     ),
                 )
+            if _same_rhel_minor(declared, kver):
+                return ValidationResult(
+                    status="best_effort",
+                    mode=mode,
+                    kernel_version=kver,
+                    matched_in="which_patch_zstream",
+                    message=f"{series}: " + _zstream_note(declared, kver),
+                )
             return ValidationResult(
                 status="refuse",
                 mode=mode,
@@ -1009,6 +1042,15 @@ def validate_target(
                         f"{declared})"
                     ),
                 )
+        for declared in cl.server_primary + cl.server_best_effort:
+            if _same_rhel_minor(declared, kver):
+                return ValidationResult(
+                    status="best_effort",
+                    mode=mode,
+                    kernel_version=kver,
+                    matched_in="changelog_zstream",
+                    message=_zstream_note(declared, kver),
+                )
         return ValidationResult(
             status="refuse",
             mode=mode,
@@ -1070,6 +1112,15 @@ def validate_target(
                         f"'other clients' (best-effort; matched "
                         f"{declared})"
                     ),
+                )
+        for declared in cl.client_primary + cl.client_best_effort:
+            if _same_rhel_minor(declared, kver):
+                return ValidationResult(
+                    status="best_effort",
+                    mode=mode,
+                    kernel_version=kver,
+                    matched_in="changelog_zstream",
+                    message=_zstream_note(declared, kver),
                 )
         if tc.is_upstream:
             # Building against a kernel Lustre has not tested is the

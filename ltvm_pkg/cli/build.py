@@ -1438,6 +1438,11 @@ def _gate_lustre_validation(
             )
             return
         print(f"[refuse] {result.message}", file=sys.stderr)
+        print(
+            "  Rerun with --force-compat to build anyway, or use a "
+            "Lustre tree that supports this kernel.",
+            file=sys.stderr,
+        )
         raise SystemExit(EXIT_ERROR)
     # "error": parse / IO problems.  Not force-able.
     print(f"[error] {result.message}", file=sys.stderr)

@@ -548,6 +548,41 @@ class TestValidateTarget:
         assert r.status == "refuse"
         assert "the kernel built is 5.14.0-999.99.9.el9_7" in r.message
 
+    def test_a_zstream_lag_warns_instead_of_refusing(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression: Rocky never mirrored the rhel10.0 z-stream that
+        master's target.in names, so the artifact kernel lags it."""
+        tree = _make_tree(
+            tmp_path,
+            which_patch=_WP_BASIC,
+            changelog=_CL_PRIMARY,
+            target_ins={"5.14-rhel9.7": _TI_RHEL97},
+        )
+        tc = _FakeTC("5.14-rhel9.7", LustreMode.SERVER_LDISKFS)
+        bt = self._built(tmp_path, "5.14.0-611.11.1.el9_7_lustre")
+        r = validate_target(tc, tree, kernel_build_tree=bt)
+        assert r.status == "best_effort"
+        assert r.matched_in == "which_patch_zstream"
+        assert "5.14.0-611.13.1.el9" in r.message
+
+        for mode in (LustreMode.SERVER_ZFS, LustreMode.CLIENT):
+            r = validate_target(
+                _FakeTC("5.14-rhel9.7", mode), tree, kernel_build_tree=bt
+            )
+            assert r.status == "best_effort"
+            assert r.matched_in == "changelog_zstream"
+
+    def test_same_rhel_minor(self) -> None:
+        from ltvm_pkg.lustre_compat import _same_rhel_minor
+
+        assert _same_rhel_minor("6.12.0-55.43.1.el10", "6.12.0-55.41.1.el10_0")
+        assert _same_rhel_minor("4.18.0-553.el8_10", "4.18.0-553.89.1.el8")
+        assert not _same_rhel_minor(
+            "5.14.0-611.13.1.el9", "5.14.0-570.13.1.el9_6"
+        )
+        assert not _same_rhel_minor("6.4.0-150700.53.66", "6.4.0-150700.53.60")
+
     def test_ldiskfs_series_absent(self, tmp_path: Path) -> None:
         tree = _make_tree(
             tmp_path,
