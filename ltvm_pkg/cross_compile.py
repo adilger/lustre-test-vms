@@ -36,7 +36,7 @@ class CrossInfo:
                             arch that distinguishes them (e.g. musl vs
                             gnu) can diverge without churning callers.
         apt_sources_url:    Suitable URL for an apt sources entry for
-                            ``deb_arch`` on Ubuntu Noble.  amd64 uses
+                            ``deb_arch`` on Ubuntu.  amd64 uses
                             archive.ubuntu.com; other archs use ports.
     """
 

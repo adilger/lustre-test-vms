@@ -169,3 +169,49 @@ class TestHostPodmanPlatform:
             "ltvm_pkg.cross_compile.platform.machine", return_value="arm64"
         ):
             assert host_podman_platform() == "linux/arm64"
+
+
+class TestCrossBuildScript:
+    """What a cross Lustre build runs in the container."""
+
+    def _script(self, tmp_path) -> str:
+        from tests.test_zfs_wiring import _capture_container_build
+
+        with patch("platform.machine", return_value="x86_64"):
+            cmd = _capture_container_build(tmp_path, arch="aarch64")
+        return cmd[-1]
+
+    def test_target_arch_libs_come_from_the_containers_release(
+        self, tmp_path
+    ) -> None:
+        """Multiarch needs both arches' copies of a library at one
+        version, so the target arch's suite is the container's own,
+        never a fixed one (noble's arm64 libs on resolute: Breaks)."""
+        script = self._script(tmp_path)
+        assert "noble" not in script
+        assert "Suites: %s %s-updates %s-security" in script
+        assert "VERSION_CODENAME" in script
+
+    def test_debian_takes_the_arch_from_its_own_mirror(self, tmp_path) -> None:
+        """ports.ubuntu.com is Ubuntu's; only Ubuntu gets the extra list."""
+        script = self._script(tmp_path)
+        assert 'if [ "$DISTRO" = ubuntu ]; then' in script
+        assert script.index('"$DISTRO" = ubuntu') < script.index("ports.ubuntu")
+
+    def test_debian_cross_builds_e2fsprogs_into_the_sysroot(
+        self, tmp_path
+    ) -> None:
+        script = self._script(tmp_path)
+        apt = script[script.index("elif command -v apt-get") :]
+        assert "DESTDIR=/sysroot-aarch64" in apt
+        assert 'CROSS_CC_FLAGS="-L/sysroot-aarch64/usr/lib"' in apt
+        assert (
+            'CROSS_PKG_CONFIG_LIBDIR="/sysroot-aarch64/usr/lib/pkgconfig:'
+            in apt
+        )
+
+    def test_mpi_tests_are_off(self, tmp_path) -> None:
+        """The container's mpicc builds for the host."""
+        script = self._script(tmp_path)
+        assert "--disable-mpitests" in script
+        assert "--enable-mpitests" not in script

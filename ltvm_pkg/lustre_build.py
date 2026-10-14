@@ -820,11 +820,14 @@ def _build_in_container(
     # --sysroot.
     #
     # Debian branch: install cross gcc AND set up multiarch for cross-arch
-    # -dev packages.  Ubuntu 24.04 uses DEB822 .sources files: pin the
-    # native arch and add a separate sources file for the target arch
-    # pointing at ports.ubuntu.com for non-amd64 archs, or
-    # archive.ubuntu.com for amd64.  Multiarch -dev packages install
-    # under /usr/lib/<multiarch-triple>, so no separate sysroot is needed.
+    # -dev packages.  Debian's mirror carries every arch, so adding the
+    # arch is enough.  Ubuntu's does not: pin the native arch in the
+    # DEB822 .sources files and add one for the target arch pointing at
+    # ports.ubuntu.com for non-amd64 archs, or archive.ubuntu.com for
+    # amd64, on the container's own release (multiarch needs both
+    # arches' copies of a library at one version).  Multiarch -dev
+    # packages install under /usr/lib/<multiarch-triple>, so no separate
+    # sysroot is needed.
     if cross_compiling:
         sysroot = f"/sysroot-{xinfo.target_arch}"
         script_parts.append(
@@ -883,16 +886,19 @@ def _build_in_container(
             f"apt-get update -qq && "
             f"apt-get install -y gcc-{xinfo.apt_triple} 2>&1 | tail -3 && "
             f"dpkg --add-architecture {xinfo.deb_arch} && "
+            f'DISTRO=$(. /etc/os-release && echo "$ID") && '
+            f'CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME") && '
+            f'if [ "$DISTRO" = ubuntu ]; then '
             r"grep -rl '^Types:' /etc/apt/sources.list.d/*.sources 2>/dev/null "
             r"| xargs -I{} sed -i '/^Architectures:/d; /^Types:/a Architectures: "
             + host_deb_arch(host_machine)
             + r"' {} && "
-            f"printf 'Types: deb\\n"
-            f"URIs: {xinfo.apt_sources_url}\\n"
-            f"Suites: noble noble-updates\\n"
-            f"Components: main universe\\n"
-            f"Architectures: {xinfo.deb_arch}\\n' "
-            f"> /etc/apt/sources.list.d/{xinfo.deb_arch}-sources.sources && "
+            f'printf "Types: deb\\nURIs: %s\\nSuites: %s %s-updates %s-security'
+            f'\\nComponents: main universe\\nArchitectures: %s\\n" '
+            f'{xinfo.apt_sources_url} "$CODENAME" "$CODENAME" "$CODENAME" '
+            f"{xinfo.deb_arch} "
+            f"> /etc/apt/sources.list.d/{xinfo.deb_arch}-sources.sources; "
+            f"fi && "
             f"apt-get update -qq 2>&1 | tail -3 && "
             f"apt-get install -y "
             f"libmount-dev:{xinfo.deb_arch} libyaml-dev:{xinfo.deb_arch} "
@@ -900,8 +906,28 @@ def _build_in_container(
             f"libnl-3-dev:{xinfo.deb_arch} libnl-genl-3-dev:{xinfo.deb_arch} "
             f"libaio-dev:{xinfo.deb_arch} libkeyutils-dev:{xinfo.deb_arch} "
             f"2>&1 | tail -5 && "
-            f'export CROSS_CC_FLAGS="" '
-            f'CROSS_PKG_CONFIG_LIBDIR="/usr/lib/{xinfo.multiarch_triple}/pkgconfig" '
+            # The WhamCloud e2fsprogs again, as for RHEL.  Debian's
+            # cross gcc needs no --sysroot, so the .pc files are pointed
+            # at {sysroot} instead of setting PKG_CONFIG_SYSROOT_DIR,
+            # which would also move the multiarch ones.  Lustre links a
+            # bare -lext2fs, so CC carries the -L that RHEL's --sysroot
+            # gives it, and the lib*.so links, which e2fsprogs makes
+            # absolute, must point inside {sysroot} rather than at the
+            # host's own libraries.
+            f"if [ ! -f {sysroot}/usr/lib/pkgconfig/ext2fs.pc ]; then "
+            f"echo '--- Cross-building e2fsprogs into {sysroot}...' && "
+            f"TARGET_ARCH={xinfo.target_arch} DESTDIR={sysroot} "
+            f"bash /ltvm-common/build-e2fsprogs.sh 2>&1 | tail -5 && "
+            f"sed -i -E 's#^(prefix|exec_prefix|libdir|includedir)=/usr#"
+            f"\\1={sysroot}/usr#' {sysroot}/usr/lib/pkgconfig/*.pc && "
+            f"for l in {sysroot}/usr/lib/lib*.so; do "
+            f't=$(readlink "$l") && case "$t" in '
+            f'/*) ln -sf "{sysroot}$t" "$l" ;; esac; '
+            f"done; "
+            f"fi; "
+            f'export CROSS_CC_FLAGS="-L{sysroot}/usr/lib" '
+            f'CROSS_PKG_CONFIG_LIBDIR="{sysroot}/usr/lib/pkgconfig:'
+            f'/usr/lib/{xinfo.multiarch_triple}/pkgconfig" '
             f'CROSS_PKG_CONFIG_SYSROOT_DIR=""; '
             f"fi"
         )
@@ -943,7 +969,10 @@ def _build_in_container(
     # second OSD rather than replacing the first.
     if zfs_src is not None:
         cfg += " --with-zfs=/zfs"
-    if not cross_compiling:
+    if cross_compiling:
+        # The container's mpicc builds for the host.
+        cfg += " --disable-mpitests"
+    else:
         # Lustre's MPI test programs (mdsrate, cascading_rw,
         # write_disjoint...) build only when configure finds mpicc, and EL
         # keeps it off PATH; parallel-scale and performance-sanity skip
