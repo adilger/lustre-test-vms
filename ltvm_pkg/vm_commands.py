@@ -3237,7 +3237,21 @@ def _check_claims(fix: bool) -> tuple[int, int]:
     but --fix clears them.  Returns (issues, failures).
     """
     issues = failures = 0
-    if not vm_claim.claims_dir_ok():
+    if not vm_claim.claims_dir_ok() and vm_claim.claims_dir_self_heals():
+        # A pw-run container, or a fresh VM_DIR: the first claim does it.
+        print(
+            f"VM claims: {vm_claim.CLAIMS_DIR} not set up yet; the first "
+            f"claim makes it mode {vm_claim.CLAIMS_DIR_MODE:o}, no root "
+            "needed"
+        )
+        if fix:
+            try:
+                vm_claim.ensure_claims_dir(noninteractive=True)
+                print(f"  fixed: set up {vm_claim.CLAIMS_DIR}")
+            except (vm_claim.ClaimError, OSError) as e:
+                print(f"  could not set up: {e}")
+                failures += 1
+    elif not vm_claim.claims_dir_ok():
         print(
             f"VM claims unavailable: {vm_claim.CLAIMS_DIR} missing or not "
             f"mode {vm_claim.CLAIMS_DIR_MODE:o}"

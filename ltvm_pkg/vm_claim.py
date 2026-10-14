@@ -210,6 +210,18 @@ def claims_dir_ok() -> bool:
     return stat.S_ISDIR(st.st_mode) and (st.st_mode & 0o7777) == CLAIMS_DIR_MODE
 
 
+def claims_dir_self_heals() -> bool:
+    """Can the first claim set the directory up without root?  True when
+    it is ours to chmod, or missing under a VM_DIR we may write."""
+    try:
+        st = CLAIMS_DIR.lstat()
+    except FileNotFoundError:
+        return os.access(VM_DIR, os.W_OK | os.X_OK)
+    except OSError:
+        return False
+    return stat.S_ISDIR(st.st_mode) and st.st_uid == os.geteuid()
+
+
 def ensure_claims_dir(*, noninteractive: bool = False) -> None:
     """Create ``VM_DIR/claims`` as 1777, with sudo if VM_DIR needs it."""
     if claims_dir_ok():

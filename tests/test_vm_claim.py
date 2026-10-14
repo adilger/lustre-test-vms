@@ -281,8 +281,10 @@ class TestCli:
 
 def test_doctor_check_creates_dir_and_clears_stale(session, dead_pid, capsys):
     vm_claim.CLAIMS_DIR.rmdir()
+    # Missing under a VM_DIR we can write: the first claim makes it.
     found, failed = vm_commands._check_claims(fix=False)
-    assert (found, failed) == (1, 0)
+    assert (found, failed) == (0, 0)
+    assert "not set up yet" in capsys.readouterr().out
     found, failed = vm_commands._check_claims(fix=True)
     assert failed == 0 and vm_claim.claims_dir_ok()
     session("a", dead_pid)
@@ -290,6 +292,26 @@ def test_doctor_check_creates_dir_and_clears_stale(session, dead_pid, capsys):
     assert vm_commands._check_claims(fix=True) == (0, 0)
     assert "stale claim: vm1" in capsys.readouterr().out
     assert vm_claim.load("vm1") is None
+
+
+def test_doctor_a_dir_only_root_can_fix_is_an_issue(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    vm_claim.CLAIMS_DIR.chmod(0o755)
+    monkeypatch.setattr(vm_claim, "claims_dir_self_heals", lambda: False)
+    assert vm_commands._check_claims(fix=False) == (1, 0)
+    assert "VM claims unavailable" in capsys.readouterr().out
+
+
+def test_doctor_an_own_dir_of_the_wrong_mode_is_not_an_issue(capsys) -> None:
+    """A pw-run container makes the claims directory 0755 and the agent
+    owns it; the first claim chmods it, so doctor only says so."""
+    vm_claim.CLAIMS_DIR.chmod(0o755)
+    assert vm_claim.claims_dir_self_heals()
+    assert vm_commands._check_claims(fix=False) == (0, 0)
+    assert "not set up yet" in capsys.readouterr().out
+    assert vm_commands._check_claims(fix=True) == (0, 0)
+    assert vm_claim.claims_dir_ok()
 
 
 class TestReviewFixes:
