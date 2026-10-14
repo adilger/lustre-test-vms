@@ -822,7 +822,9 @@ def deploy_ssh_key(ip: str) -> None:
             input=key_data,
             capture_output=True,
             text=True,
-            timeout=10,
+            # sshd already answered; this is one login, which an
+            # emulated (TCG) guest on a busy host can take well past 10s.
+            timeout=60,
         )
     except subprocess.TimeoutExpired:
         die(f"SSH key deployment timed out for {ip}")
