@@ -302,6 +302,49 @@ class TestResults:
         assert argv[argv.index("--exclude") + 1] == "*.debug_log.*"
         assert argv[-2] == f"root@10.0.0.9:/root/ltvm-suite/{RID}/"
         assert argv[-1] == f"{tmp_path}/"
+        argv = suite_run.rsync_argv(t, RID, tmp_path, debug_logs=True)
+        assert "--exclude" not in argv
+
+    def test_collect_counts_the_debug_logs_it_left(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        monkeypatch.setattr(
+            suite_run.VMInfo,
+            "load",
+            lambda name: SimpleNamespace(ip="10.0.0.9"),
+        )
+        monkeypatch.setattr(
+            suite_run.subprocess,
+            "run",
+            lambda argv, **kw: subprocess.CompletedProcess(argv, 0, "", ""),
+        )
+        finds: list[str] = []
+
+        def fake_ssh(node: str, command: str, **kw: Any) -> Any:
+            finds.append(command)
+            out = f"{3 * 2**20}\n{2**20}\n"
+            return subprocess.CompletedProcess([], 0, out, "")
+
+        monkeypatch.setattr(suite_run, "_ssh", fake_ssh)
+        t = suite_run.SuiteTarget("co1", "vm", "co1", ["co1"])
+        skipped = suite_run.collect(t, RID, tmp_path)
+        assert skipped == (2, 4 * 2**20)
+        assert "*.debug_log.*" in finds[0]
+        suite_run.print_summary(
+            suite_run.RunStatus(RID, "done", rc=0),
+            suite_run.summarize(tmp_path),
+            tmp_path,
+            skipped,
+        )
+        out = capsys.readouterr().out
+        assert "2 debug log(s) (4 MiB) not copied; --debug-logs" in out
+
+        finds.clear()
+        assert suite_run.collect(t, RID, tmp_path, debug_logs=True) is None
+        assert finds == []
 
 
 # -- status -----------------------------------------------------------------
@@ -716,7 +759,9 @@ class TestCmdRun:
 
         dests: list[Path] = []
 
-        def fake_collect(t: Any, run_id: str, dest: Path) -> None:
+        def fake_collect(
+            t: Any, run_id: str, dest: Path, debug_logs: bool = False
+        ) -> None:
             dests.append(dest)
             logs = dest / "logs" / "x"
             logs.mkdir(parents=True)
@@ -755,7 +800,9 @@ class TestCmdRun:
         )
         dests: list[Path] = []
         monkeypatch.setattr(
-            suite_run, "collect", lambda t, rid, dest: dests.append(dest)
+            suite_run,
+            "collect",
+            lambda t, rid, dest, debug_logs=False: dests.append(dest),
         )
         mine = tmp_path / "mine"
         rc = suite_run.cmd_suite_run(
@@ -1007,7 +1054,9 @@ class TestCmdCollect:
         )
         dests: list[Path] = []
         monkeypatch.setattr(
-            suite_run, "collect", lambda t, rid, dest: dests.append(dest)
+            suite_run,
+            "collect",
+            lambda t, rid, dest, debug_logs=False: dests.append(dest),
         )
         cwd = tmp_path / "work"
         cwd.mkdir()

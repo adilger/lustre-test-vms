@@ -2551,6 +2551,13 @@ def build_parser() -> argparse.ArgumentParser:
         "./ltvm-suite/<target>/<run-id>)",
     )
     _srp_results.completer = complete_directories  # type: ignore[attr-defined]
+    srp.add_argument(
+        "--debug-logs",
+        dest="debug_logs",
+        action="store_true",
+        help="With --wait, also copy the Lustre debug logs "
+        "(*.debug_log.*), which are left behind by default",
+    )
     srp.set_defaults(func=cmd_suite_run)
 
     ssp = suite_sub.add_parser(
@@ -2580,6 +2587,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Where to put the logs (default: ./ltvm-suite/<target>/<run-id>)",
     )
     _scp_dest.completer = complete_directories  # type: ignore[attr-defined]
+    scp.add_argument(
+        "--debug-logs",
+        dest="debug_logs",
+        action="store_true",
+        help="Also copy the Lustre debug logs (*.debug_log.*), which "
+        "are left behind by default",
+    )
     scp.set_defaults(func=cmd_suite_collect)
 
     def _suite_no_action(args: argparse.Namespace) -> int:

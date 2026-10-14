@@ -495,14 +495,19 @@ def summarize(root: Path) -> dict[str, Any]:
 # -- collect ------------------------------------------------------------
 
 
-def rsync_argv(t: SuiteTarget, run_id: str, dest: Path) -> list[str]:
+DEBUG_LOG_GLOB = "*.debug_log.*"
+
+
+def rsync_argv(
+    t: SuiteTarget, run_id: str, dest: Path, debug_logs: bool = False
+) -> list[str]:
     ip = VMInfo.load(t.exec_node).ip
     ssh = shlex.join([*sshpass_argv(), "ssh", *SSH_OPTS, *_SSH_EXTRA])
+    exclude = [] if debug_logs else ["--exclude", DEBUG_LOG_GLOB]
     return [
         "rsync",
         "-a",
-        "--exclude",
-        "*.debug_log.*",
+        *exclude,
         "-e",
         ssh,
         f"root@{ip}:{run_dir(run_id)}/",
@@ -510,11 +515,33 @@ def rsync_argv(t: SuiteTarget, run_id: str, dest: Path) -> list[str]:
     ]
 
 
-def collect(t: SuiteTarget, run_id: str, dest: Path) -> None:
+def count_debug_logs(t: SuiteTarget, run_id: str) -> tuple[int, int] | None:
+    """(files, bytes) of the run's Lustre debug logs, or None."""
+    cmd = (
+        f"find {run_dir(run_id)} -type f -name '{DEBUG_LOG_GLOB}' "
+        "-printf '%s\\n'"
+    )
+    try:
+        r = _ssh(t.exec_node, cmd, timeout=60)
+    except Unreachable:
+        return None
+    if r.returncode != 0:
+        return None
+    sizes = [int(x) for x in r.stdout.split() if x.isdigit()]
+    return len(sizes), sum(sizes)
+
+
+def collect(
+    t: SuiteTarget, run_id: str, dest: Path, debug_logs: bool = False
+) -> tuple[int, int] | None:
+    """Copy the run back; returns the debug logs left behind, if any
+    were and they could be counted."""
     dest.mkdir(parents=True, exist_ok=True)
     try:
         r = subprocess.run(
-            rsync_argv(t, run_id, dest), capture_output=True, text=True
+            rsync_argv(t, run_id, dest, debug_logs),
+            capture_output=True,
+            text=True,
         )
     except FileNotFoundError:
         die("rsync is not installed on this host")
@@ -524,6 +551,10 @@ def collect(t: SuiteTarget, run_id: str, dest: Path) -> None:
             f"rsync from {t.exec_node} failed (rc={r.returncode}): "
             f"{r.stderr.strip()}"
         )
+    if debug_logs:
+        return None
+    skipped = count_debug_logs(t, run_id)
+    return skipped if skipped and skipped[0] else None
 
 
 def _cwd_root() -> Path | None:
@@ -587,7 +618,10 @@ def _note(msg: str, use_json: bool) -> None:
 
 
 def print_summary(
-    status: RunStatus, summary: dict[str, Any], dest: Path
+    status: RunStatus,
+    summary: dict[str, Any],
+    dest: Path,
+    skipped: tuple[int, int] | None = None,
 ) -> None:
     print(f"{status.run_id}: {status.label()}, results in {dest}")
     for w in status.warnings():
@@ -606,6 +640,11 @@ def print_summary(
         print(
             "  no results.yml: the suite never started a subtest; "
             f"see {dest}/out and {dest}/cleanup.log"
+        )
+    if skipped:
+        print(
+            f"  {skipped[0]} debug log(s) ({skipped[1] / 2**20:.0f} MiB) "
+            "not copied; --debug-logs copies them"
         )
 
 
@@ -690,6 +729,11 @@ def cmd_suite_run(args: argparse.Namespace) -> int:
             "--results-dir only applies with --wait; without it, give "
             "it to `ltvm suite collect`"
         )
+    if getattr(args, "debug_logs", False) and not args.wait:
+        die(
+            "--debug-logs only applies with --wait; without it, give "
+            "it to `ltvm suite collect`"
+        )
     only = " ".join(args.only) if args.only else None
     env = list(args.env or [])
     env_assignments(env)
@@ -763,7 +807,14 @@ def cmd_suite_run(args: argparse.Namespace) -> int:
     if not args.json:
         print(f"{run_id} started on {t.exec_node}", flush=True)
     _note(f"results will be collected to {dest}", args.json)
-    return _wait_and_collect(t, run_id, args.timeout, args.json, dest)
+    return _wait_and_collect(
+        t,
+        run_id,
+        args.timeout,
+        args.json,
+        dest,
+        getattr(args, "debug_logs", False),
+    )
 
 
 def _wait_and_collect(
@@ -772,6 +823,7 @@ def _wait_and_collect(
     timeout: int | None,
     use_json: bool,
     dest: Path,
+    debug_logs: bool = False,
 ) -> int:
     start = time.monotonic()
     lost_since: float | None = None
@@ -814,23 +866,28 @@ def _wait_and_collect(
             return EXIT_TIMEOUT
         time.sleep(POLL_SECONDS)
 
-    collect(t, run_id, dest)
+    skipped = collect(t, run_id, dest, debug_logs)
     summary = summarize(dest)
     if use_json:
-        _emit(_collect_json(t, status, summary, dest))
+        _emit(_collect_json(t, status, summary, dest, skipped))
     else:
-        print_summary(status, summary, dest)
+        print_summary(status, summary, dest, skipped)
     return EXIT_ERROR if failed(status, summary) else EXIT_OK
 
 
 def _collect_json(
-    t: SuiteTarget, status: RunStatus, summary: dict[str, Any], dest: Path
+    t: SuiteTarget,
+    status: RunStatus,
+    summary: dict[str, Any],
+    dest: Path,
+    skipped: tuple[int, int] | None = None,
 ) -> dict[str, Any]:
     return {
         "target": t.name,
         "node": t.exec_node,
         "dest": str(dest),
         "status": asdict(status),
+        "debug_logs_skipped": skipped[0] if skipped else 0,
         **summary,
     }
 
@@ -897,12 +954,12 @@ def cmd_suite_collect(args: argparse.Namespace) -> int:
     dest = results_dest(args.results_dir, t.name, args.run_id)
     check_dest(dest)
     _note(f"collecting {args.run_id} to {dest}", args.json)
-    collect(t, args.run_id, dest)
+    skipped = collect(t, args.run_id, dest, getattr(args, "debug_logs", False))
     summary = summarize(dest)
     if args.json:
-        _emit(_collect_json(t, status, summary, dest))
+        _emit(_collect_json(t, status, summary, dest, skipped))
     else:
-        print_summary(status, summary, dest)
+        print_summary(status, summary, dest, skipped)
         if status.state == "running":
             print("  (still running: these results are partial)")
     return EXIT_OK
