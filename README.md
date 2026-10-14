@@ -88,7 +88,7 @@ with `ltvm target list --all-kernels`.
 | mainline* | x86_64 | server (ldiskfs) + client | see below | no -- build locally |
 | ubuntu2604* | x86_64 | client only | 7.0-ubuntu2604 | no -- build locally |
 | opensuse156* | x86_64 | client only | 6.4-sles15sp7 | 6.4-sles15sp7, sles15sp6 |
-| ubuntu2604-server* | aarch64 | server (ldiskfs) + client | 7.0.0-14-ubuntu26 | no -- build locally |
+| ubuntu2604-server* | aarch64 | server (ldiskfs) + client | 7.0.0-14-ubuntu26 | 7.0.0-14-ubuntu26 |
 | debian13* | x86_64 | server (ldiskfs) + client | 6.12-debian13 | 6.12-debian13 |
 
 `rocky9-64k` is rocky9 with `CONFIG_ARM64_64K_PAGES`, for testing
