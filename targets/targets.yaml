@@ -235,6 +235,42 @@ targets:
     status: experimental
     zfs:
       version: 2.4.0
+  # SLES 15 kernels on an openSUSE Leap 15.6 userspace, for Lustre
+  # clients.  Public SLES kernel SRPMs are scarce, but SUSE publishes
+  # each released kernel as an rpm-<version>-<release> tag in two
+  # GitHub repositories: SUSE/kernel, the source with series.conf
+  # already applied, and SUSE/kernel-source, the patches and configs.
+  # The kernel is the former built with the latter's
+  # config/<arch>/default, as kernel-binary.spec does, at the lnxrel
+  # Lustre's <kernel>.target pins.  Leap 15.6 ships SLE 15's own
+  # packages for most of its userspace.
+  #
+  # client only: Lustre ships no ldiskfs series past SLES 15 SP5, and
+  # lustre/ChangeLog lists SLES 15 SP7 as a client primary kernel.
+  # SP7 has no Leap release, so the userspace stays at 15.6 (SP6's).
+  opensuse156:
+    # Leap's openmpi4 is off PATH, where the base configure line's
+    # mpicc probe cannot find it
+    configure_args:
+    - --enable-mpitests=/usr/lib64/mpi/gcc/openmpi4/bin/mpicc
+    container_image: registry.opensuse.org/opensuse/leap:15.6
+    kernel_suse_source: https://github.com/SUSE
+    kernels:
+      available:
+      - 6.4-sles15sp7
+      - 6.4-sles15sp6
+      config:
+        CONFIG_XEN_PVH: y
+        # SUSE builds these kernels with GCC 7 and DWARF 4
+        CONFIG_DEBUG_INFO_DWARF4: y
+        CONFIG_DEBUG_INFO_DWARF5: n
+      default: 6.4-sles15sp7
+    lustre:
+      mode: client
+    os_family: suse
+    os_name: opensuse-leap
+    os_version: '15.6'
+    status: experimental
   ubuntu2404:
     # --with-o2ib=yes is the base configure default (lustre_build.py).
     # Add --with-o2ib=no to configure_args if this kernel lacks

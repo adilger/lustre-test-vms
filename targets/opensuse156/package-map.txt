@@ -1,0 +1,71 @@
+# package-map.txt -- opensuse156
+#
+# Translates RHEL package names (used in targets/common/packages-*.txt)
+# to openSUSE Leap package names.  Format:
+#
+#   rhel_name  suse_name [suse_name2 ...]
+#
+# A suse_name of "-" means "skip this package on openSUSE".
+# Packages not listed here pass through unchanged (assumes the name
+# matches on both distros).
+#
+# Lines starting with # and blank lines are ignored.
+
+# --- packages-base.txt ---------------------------------------------
+basesystem        -
+# passwd(1) is in shadow on SUSE
+passwd            shadow
+procps-ng         procps
+dnf               -
+# rc.local configures the network from the kernel cmdline, and nothing
+# else should touch eth0
+NetworkManager    -
+iproute           iproute2
+vim-minimal       vim-small
+vim-enhanced      vim
+
+# --- packages-test.txt ---------------------------------------------
+openmpi           openmpi4
+openmpi-devel     openmpi4-devel
+libaio            libaio1
+libyaml           libyaml-0-2
+json-c            libjson-c5
+python3-pyyaml    python3-PyYAML
+# SUSE's pdsh carries the ssh rcmd module itself
+pdsh-rcmd-ssh     -
+libselinux-utils  selinux-tools
+krb5-workstation  krb5-client
+# `ltvm cluster krb5` is rhel-only
+krb5-server       -
+sssd-kcm          -
+nfs-utils         nfs-client
+iperf3            iperf
+librdmacm         librdmacm1
+
+# --- packages-debug.txt --------------------------------------------
+kernel-tools      cpupower
+# Both require a kernel-<flavor>-devel, which drags that flavor's
+# distro kernel into the image, and their headers would not match the
+# kernel ltvm boots anyway
+bcc-tools         -
+bpftrace          -
+iproute-tc        -
+tuna              -
+
+# --- packages-server.txt -------------------------------------------
+elfutils-devel        libelf-devel libdw-devel
+elfutils-libelf-devel libelf-devel
+kernel-devel          -
+fuse-libs             libfuse2
+json-c-devel          libjson-c-devel
+
+# --- packages-dev.txt ----------------------------------------------
+openssl-devel         libopenssl-devel
+perl-interpreter      perl
+perl-Carp             -
+# perl's headers are in the perl package itself
+perl-devel            -
+perl-generators       -
+keyutils-libs-devel   keyutils-devel
+pkgconf-pkg-config    pkg-config
+kernel-rpm-macros     -

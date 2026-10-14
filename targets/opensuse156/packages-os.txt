@@ -1,0 +1,22 @@
+# packages-os.txt -- openSUSE Leap 15.6 specific packages
+#
+# Installed on top of the translated common/packages-*.txt lists.
+
+# rc-local.service, which runs /etc/init.d/boot.local: rc.local's
+# network setup from the kernel cmdline depends on it
+systemd-sysvcompat
+
+# build-tools.sh installs these itself through dnf or apt, which Leap
+# has neither of
+gcc-c++
+patch
+
+# SUSE's kdump tooling (RHEL's comes with kexec-tools)
+kdump
+makedumpfile
+
+# ltvm itself needs Python 3.10+ for the `make-*` commands (see
+# "Running ltvm inside a VM it built"), and drgn more than 3.6
+python311
+python311-PyYAML
+python311-pip

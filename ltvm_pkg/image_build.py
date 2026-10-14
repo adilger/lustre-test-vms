@@ -556,6 +556,13 @@ def _kdump_inject_lines(
                 f"/var/lib/kdump/initrd.img-{kver} && "
                 f"ln -sf /boot/vmlinuz-{kver} /var/lib/kdump/vmlinuz"
             )
+        elif os_family == "suse":
+            # SUSE's kdump loads /boot/vmlinuz.  Its initrd is not baked:
+            # mkdumprd records the root filesystem it runs on, which here
+            # is the build container's overlay, and the capture kernel
+            # then cannot mount /dev/vda to save the dump.  kdump.service
+            # builds it on the VM's first boot.
+            lines.append(f"RUN ln -sf vmlinuz-{kver} /boot/vmlinuz")
         else:
             lines.append(
                 f"RUN dracut --kver {kver} --force "

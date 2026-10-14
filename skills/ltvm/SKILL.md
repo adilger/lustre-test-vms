@@ -327,6 +327,20 @@ Start with a 16K client against 4K servers (as above); move the servers
 to 16K once that passes.  Distro userspace needs nothing special: EL
 aarch64 binaries are built with 64K segment alignment.
 
+### SLES clients
+
+`opensuse156` (x86_64, client only) is a SLES 15 kernel on an openSUSE
+Leap 15.6 userspace: `6.4-sles15sp7` (the default, Lustre's SLES client
+primary kernel) and `6.4-sles15sp6`, built from SUSE/kernel-source's
+release tags.  There is no published release: `ltvm build all
+opensuse156 --lustre-tree <tree>`.  It has no server, so put it in a
+cluster with rocky servers:
+
+```bash
+ltvm cluster create co8 rocky9 mgs+mds+oss:co8-srv:4 client:co8-sles \
+    --node-target co8-sles=opensuse156
+```
+
 Create and start wait up to 120 seconds for a guest to answer ssh,
 longer (up to 600) while its console shows it still booting, and stop
 sooner if its QEMU exits. A host busy enough to run out of that ("SSH

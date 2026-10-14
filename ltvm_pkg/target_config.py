@@ -82,6 +82,7 @@ _KNOWN_TARGET_KEYS = frozenset(
         "configure_args",
         "default_mem",
         "kernel_deb_source",
+        "kernel_suse_source",
         "kernel_upstream",
         "kernels",
         "lustre",
@@ -743,6 +744,17 @@ class TargetConfig:
         return str(v) if v is not None else None
 
     @property
+    def kernel_suse_source(self) -> str | None:
+        """GitHub organisation of SUSE/kernel and SUSE/kernel-source, or
+        None if not a SUSE target.
+
+        Their ``rpm-<version>-<release>`` tags name every kernel SUSE
+        released, and a SUSE target's kernels are built from them.
+        """
+        v = self._data.get("kernel_suse_source")
+        return str(v) if v is not None else None
+
+    @property
     def kernel_upstream(self) -> dict[str, Any] | None:
         """kernel.org source config, or None if this isn't an upstream target.
 
@@ -1177,6 +1189,8 @@ class TargetConfig:
             ltvm_pkg_dir = Path(__file__).parent
             if self.is_upstream:
                 inner_name = "kernel-build-inner-upstream.sh"
+            elif self.kernel_suse_source:
+                inner_name = "kernel-build-inner-suse.sh"
             elif self.os_family == "debian":
                 inner_name = "kernel-build-inner-deb.sh"
             else:

@@ -129,6 +129,7 @@ def _kernel_build_jobs() -> int:
 INNER_SCRIPT = Path(__file__).parent / "kernel-build-inner.sh"
 INNER_SCRIPT_DEB = Path(__file__).parent / "kernel-build-inner-deb.sh"
 INNER_SCRIPT_UPSTREAM = Path(__file__).parent / "kernel-build-inner-upstream.sh"
+INNER_SCRIPT_SUSE = Path(__file__).parent / "kernel-build-inner-suse.sh"
 
 
 def _kernel_outputs_complete(kernel_out: Path) -> bool:
@@ -978,7 +979,14 @@ def build_kernel(
         return _build_kernel_deb(target_config, force=force, kernel=kernel)
 
     if lustre_tree is None:
-        raise ValueError("lustre_tree is required for SRPM-based kernel builds")
+        raise ValueError(
+            "lustre_tree is required for SRPM and SUSE kernel builds"
+        )
+
+    if target_config.kernel_suse_source:
+        return _build_kernel_suse(
+            target_config, lustre_tree, force=force, kernel=kernel
+        )
 
     return _build_kernel_srpm(
         target_config, lustre_tree, force=force, kernel=kernel
@@ -1311,6 +1319,231 @@ def _mark_ubuntu_abi(build_tree: Path, abi: str) -> None:
     text = uts.read_text()
     if "UTS_UBUNTU_RELEASE_ABI" not in text:
         uts.write_text(text + f"#define UTS_UBUNTU_RELEASE_ABI {abi}\n")
+
+
+def parse_suse_target(
+    lustre_tree: str | Path, lustre_target: str
+) -> dict[str, str]:
+    """Read a SLES .target file: kernel version, SUSE release, series.
+
+    Returns dict with keys: version ("6.4.0"), release
+    ("150700.53.66") and series (the file name, or "" for none).
+    SLES targets split the version as lnxmaj="6.4" lnxmin=".0", and
+    most name no series: Lustre puts no patches on a SLES kernel.
+    """
+    targets_dir = kp_targets(lustre_tree)
+    for name in (f"{lustre_target}.target.in", f"{lustre_target}.target"):
+        path = targets_dir / name
+        if path.exists():
+            break
+    else:
+        raise FileNotFoundError(
+            f"Lustre target file not found: {targets_dir}/"
+            f"{lustre_target}.target[.in]"
+        )
+    text = path.read_text()
+    lnxmaj = _shell_var(text, "lnxmaj")
+    lnxrel = _shell_var(text, "lnxrel")
+    if not lnxmaj or not lnxrel:
+        raise ValueError(f"Cannot parse lnxmaj/lnxrel from {path}")
+    return {
+        "version": lnxmaj + (_shell_var(text, "lnxmin") or ""),
+        "release": lnxrel,
+        "series": _shell_var(text, "SERIES") or "",
+    }
+
+
+def suse_tag(version: str, release: str) -> str:
+    """The tag SUSE/kernel and SUSE/kernel-source give a released kernel."""
+    return f"rpm-{version}-{release}"
+
+
+def _download(url: str, cached: Path) -> Path:
+    """Fetch ``url`` to ``cached`` unless a non-empty copy is there.
+
+    Through a temp file renamed on success, as download_srpm does, so
+    an interrupted download never leaves a truncated file to reuse.
+    """
+    if cached.exists() and cached.stat().st_size > 0:
+        log.info("Using cached %s", cached)
+        return cached
+    cached.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_str = tempfile.mkstemp(
+        dir=str(cached.parent), prefix=f".{cached.name}.", suffix=".partial"
+    )
+    os.close(fd)
+    tmp = Path(tmp_str)
+    log.info("Downloading %s", url)
+    try:
+        subprocess.run(
+            ["curl", "-fSL", "--progress-bar", "-o", str(tmp), url],
+            check=True,
+        )
+        if tmp.stat().st_size == 0:
+            raise RuntimeError(f"downloaded an empty file from {url}")
+        tmp.rename(cached)
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(f"could not download {url}: {exc}") from exc
+    finally:
+        tmp.unlink(missing_ok=True)
+    return cached
+
+
+def suse_source_urls(base: str, tag: str, arch: str) -> tuple[str, str]:
+    """Where a SUSE kernel's source tree and config are published.
+
+    ``base`` is the GitHub organisation from targets.yaml.  SUSE/kernel
+    is the expanded source -- the vanilla tree with series.conf already
+    applied, one tag per released kernel -- and SUSE/kernel-source,
+    tagged the same, holds the patches and the configs.
+    """
+    base = base.rstrip("/")
+    suse_arch = {"x86_64": "x86_64", "aarch64": "arm64"}.get(arch)
+    if suse_arch is None:
+        raise ValueError(f"no SUSE kernel config for arch {arch!r}")
+    return (
+        f"{base}/kernel/archive/refs/tags/{tag}.tar.gz",
+        f"{base}/kernel-source/raw/{tag}/config/{suse_arch}/default",
+    )
+
+
+def _build_kernel_suse(
+    target_config: TargetConfig,
+    lustre_tree: str | Path,
+    force: bool = False,
+    kernel: str | None = None,
+) -> dict[str, object]:
+    """Build a SLES kernel from SUSE's published source for its release.
+
+    The tag is ``rpm-<version>-<release>``, from the lnxmaj/lnxmin and
+    lnxrel the Lustre .target pins; a kernels.available entry's
+    ``srpm_version: <version>-<release>`` picks another release.
+    """
+    lustre_tree = Path(lustre_tree)
+    lustre_target = target_config._short_kernel_name(
+        kernel or target_config.default_kernel
+    )
+    base = target_config.kernel_suse_source
+    assert base is not None
+
+    info = parse_suse_target(lustre_tree, lustre_target)
+    override = target_config.kernel_overrides(lustre_target).get("srpm_version")
+    if override:
+        if "-" not in override:
+            raise ValueError(
+                f"kernel {lustre_target!r}: srpm_version override "
+                f"{override!r} must be '<version>-<release>'"
+            )
+        info["version"], info["release"] = override.split("-", 1)
+    tag = suse_tag(info["version"], info["release"])
+    log.info("SUSE kernel: %s", tag)
+
+    lustre_files: LustreFiles
+    if info["series"]:
+        lustre_files = resolve_lustre_files(
+            lustre_tree,
+            lustre_target,
+            {"lnxmaj": info["version"], "series": info["series"]},
+            arch=target_config.arch,
+        )
+    else:
+        lustre_files = {
+            "config": None,
+            "series_file": kp_series(lustre_tree) / f"{lustre_target}.series",
+            "patches": [],
+        }
+    lustre_patches = lustre_files["patches"]
+    log.info("Lustre patches to apply: %d", len(lustre_patches))
+
+    extra_hash = lustre_inputs_hash(lustre_tree, lustre_target, lustre_files)
+    extra_hash += b"suse:" + tag.encode()
+
+    if not force and not target_config.is_stale(
+        "kernel", kernel=lustre_target, extra_hash=extra_hash
+    ):
+        log.info("Kernel is up to date (use force=True to rebuild)")
+        return kernel_status(
+            target_config, kernel=kernel, extra_hash=extra_hash
+        )
+
+    full_name = f"{lustre_target}-{info['version']}-{info['release']}"
+    log.info("Kernel output directory: kernels/%s", full_name)
+
+    cache_dir = target_config.output_dir / "cache"
+    tree_url, config_url = suse_source_urls(base, tag, target_config.arch)
+    tree = _download(tree_url, cache_dir / f"suse-kernel-{tag}.tar.gz")
+    config = _download(
+        config_url, cache_dir / f"suse-config-{tag}-{target_config.arch}"
+    )
+
+    image_tag = _ensure_container_image(target_config)
+
+    kernel_out = target_config.output_dir / "kernels" / full_name
+    kernel_out.mkdir(parents=True, exist_ok=True)
+    archived_build_id = archive_outgoing_vmlinux(kernel_out)
+
+    with tempfile.TemporaryDirectory(prefix="ltvm-kbuild-") as staging_str:
+        staging = Path(staging_str)
+        patches_dir = staging / "patches"
+        patches_dir.mkdir()
+        for p in lustre_patches:
+            shutil.copy2(p, patches_dir / p.name)
+        (staging / "series").write_text(
+            "".join(f"{p.name}\n" for p in lustre_patches)
+        )
+        shutil.copy2(config, staging / "kernel.config")
+        (staging / "config.fragment").write_text(
+            _build_config_fragment(target_config)
+        )
+        shutil.copy2(INNER_SCRIPT_SUSE, staging / "kernel-build-inner-suse.sh")
+        os.chmod(staging / "kernel-build-inner-suse.sh", 0o755)
+        shutil.copy2(
+            TARGETS_DIR / "common" / "cross-compile-env.sh",
+            staging / "cross-compile-env.sh",
+        )
+
+        jobs = _kernel_build_jobs()
+        container_cmd = [
+            "podman",
+            "run",
+            "--rm",
+            "-v",
+            f"{staging}:/input/staging:ro,Z",
+            "-v",
+            f"{tree}:/input/kernel.tar.gz:ro,Z",
+            "-v",
+            f"{kernel_out}:/output:Z",
+            "-v",
+            f"{_ccache_volume(target_config)}:/ccache:Z",
+            "-e",
+            f"JOBS={jobs}",
+            "-e",
+            f"KERNEL_RELEASE={info['release']}",
+            "-e",
+            f"TARGET_ARCH={target_config.arch}",
+            image_tag,
+            "-c",
+            "/input/staging/kernel-build-inner-suse.sh",
+        ]
+
+        log.info("Starting SUSE kernel build in container (j%d)...", jobs)
+        _run_kernel_podman(container_cmd, kernel_out)
+
+    if (
+        archived_build_id
+        and elf_build_id(kernel_out / "vmlinux") == archived_build_id
+    ):
+        (kernel_out / f"vmlinux-{archived_build_id}").unlink(missing_ok=True)
+
+    return _finalize_kernel_build(
+        target_config,
+        kernel_out,
+        full_name,
+        lustre_target,
+        patches_applied=len(lustre_patches),
+        extra_meta={"suse_tag": tag, "suse_source": tree_url},
+        extra_hash=extra_hash,
+    )
 
 
 def _build_kernel_srpm(

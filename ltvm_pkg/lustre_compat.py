@@ -35,6 +35,8 @@ class TargetIn:
     lnxrel: str
     KERNEL_SRPM: str
     SERIES: str
+    # SLES targets split the version: lnxmaj="6.4" lnxmin=".0"
+    lnxmin: str = ""
 
 
 # ------------------------------------------------------------------
@@ -233,6 +235,7 @@ def parse_target_in(tree: Path, series: str) -> TargetIn:
         lnxrel=lnxrel,
         KERNEL_SRPM=srpm,
         SERIES=series_val,
+        lnxmin=_shell_var(text, "lnxmin") or "",
     )
 
 
@@ -417,7 +420,7 @@ def _normalize_kver(ver: str) -> str:
 
 
 def _kver_from_target_in(ti: TargetIn) -> str:
-    return f"{ti.lnxmaj}-{ti.lnxrel}"
+    return f"{ti.lnxmaj}{ti.lnxmin}-{ti.lnxrel}"
 
 
 def _built_kver(kernel_build_tree: Path | None) -> str | None:
@@ -431,7 +434,9 @@ def _built_kver(kernel_build_tree: Path | None) -> str | None:
     v = meta.get("kernel_version") if isinstance(meta, dict) else None
     if not isinstance(v, str) or not v:
         return None
-    return v.removesuffix("_lustre")
+    # RHEL's 5.14.0-611.55.1.el9_7_lustre; SUSE's carries its flavor,
+    # 6.4.0-150700.53.66_lustre-default
+    return re.sub(r"_lustre(-[a-z0-9]+)?$", "", v)
 
 
 def _kver_matches(declared: str, target_kver: str) -> bool:

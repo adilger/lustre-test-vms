@@ -398,6 +398,32 @@ defconfig plus ubuntu2604's options plus the target's own -- notably
 `CONFIG_KPROBES`, without which every Lustre module fails to load with
 -EOPNOTSUPP (libcfs finds `kallsyms_lookup_name` through a kprobe).
 
+**SLES kernels** (`opensuse156`).  A target with `kernel_suse_source`
+(the GitHub organisation) builds a SLES kernel from SUSE's own release
+tags, not an SRPM: `kernel_build._build_kernel_suse` reads the version
+(`lnxmaj`+`lnxmin`, "6.4.0") and release from Lustre's SLES `.target`
+(a kernels.available `srpm_version: <version>-<release>` picks another
+tag) and downloads `rpm-<version>-<release>` from SUSE/kernel, the
+expanded source, and that tag's `config/<arch>/default` from
+SUSE/kernel-source.  The expanded tree matched applying the tag's
+`series.conf` to the vanilla tarball, except one drm CI text file
+(checked 2026-10-13).  It saves applying 60,000 patches: one `patch`
+process each takes most of an hour, and one `patch` run for all of
+them loses a file that a revert deletes and a later patch recreates.
+`CONFIG_SUSE_KERNEL` is what makes Lustre's configure take it for SUSE's
+(and install modules under `updates/`).  The kernel is named
+`6.4.0-<release>_lustre-default`.  No module carries SUSE's "supported"
+mark, so the image sets `allow_unsupported_modules 1`, as SLES sites
+running Lustre do.  The userspace is Leap 15.6 (`os_family: suse`,
+zypper; systemd runs `/etc/init.d/boot.local`, not `/etc/rc.local`).
+SUSE paths stay in `targets/opensuse156/` (`setup-suse.sh` replaces
+`common/setup-kdump.sh`) so no other target's image hash moves.  The
+build container points `CONFIG_SITE` at SUSE's site-config, the
+counterpart of EL's `/usr/share/config.site`, so Lustre installs under
+`/usr/lib64` there too; rhel
+and suse nodes then share `/usr/lib64/lustre`, so a cluster may mix
+them (`vm_cluster._cluster_os_family`); debian nodes cannot join them.
+
 ## ZFS
 
 ZFS is a per-build option, not a property of a target.  It

@@ -87,9 +87,10 @@ with `ltvm target list --all-kernels`.
 | rocky10-16k* | aarch64 | server (ldiskfs) + client | 6.12-rhel10.2 | no -- build locally |
 | mainline* | x86_64 | server (ldiskfs) + client | see below | no -- build locally |
 | ubuntu2604* | x86_64 | client only | 7.0-ubuntu2604 | no -- build locally |
+| opensuse156* | x86_64 | client only | 6.4-sles15sp7 | no -- build locally |
 | ubuntu2604-server* | aarch64 | server (ldiskfs) + client | 7.0.0-14-ubuntu26 | no -- build locally |
-
 | debian13* | x86_64 | server (ldiskfs) + client | 6.12-debian13 | no -- build locally |
+
 `rocky9-64k` is rocky9 with `CONFIG_ARM64_64K_PAGES`, for testing
 Lustre against a 64K page size.  It is aarch64-only: on an x86_64 host
 it cross-builds, and `ltvm target list` hides it behind
@@ -107,6 +108,20 @@ Apple Silicon has only the 4K and 16K translation granules, so
 for nested KVM, nftables, cgroup-BPF and ext4/XFS project quota: a
 guest for testing services that run their own VMs and firewalls.
 
+`opensuse156` (experimental) runs SLES 15 kernels (`6.4-sles15sp7`,
+`6.4-sles15sp6`) on an openSUSE Leap 15.6 userspace, as a Lustre
+client.  Public SLES kernel SRPMs are scarce (Leap's mirrors keep only
+SP6's newest few, and SP7 has none), but SUSE tags every released
+kernel (`rpm-6.4.0-150700.53.66`) in
+[SUSE/kernel](https://github.com/SUSE/kernel), the patched source, and
+[SUSE/kernel-source](https://github.com/SUSE/kernel-source), its
+patches and configs.  ltvm builds the tag Lustre's `.target` pins with
+that tag's `config/x86_64/default`, as SUSE's own kernel spec does.
+Leap 15.6 ships SLE 15 SP6's packages for most of its userspace.
+Lustre ships no ldiskfs series for SLES past SP5, so run these as
+clients against rocky servers:
+`ltvm cluster create co8 rocky9 mgs+mds+oss:co8-srv:4 client:co8-sles --node-target co8-sles=opensuse156`.
+
 `ubuntu2604-server` (experimental) is Ubuntu 26.04 as an ldiskfs
 server, on the kernel Lustre's `ldiskfs-7.0.0-14-ubuntu26` series is
 for: the source is pinned to linux-source 7.0.0-14.14, the kernel is
@@ -114,6 +129,13 @@ named 7.0.0-14-lustre, and its build-tree carries the
 `UTS_UBUNTU_RELEASE_ABI` line Ubuntu's packaging writes.  Lustre's
 configure goes by that line and the ABI to pick an Ubuntu series;
 without them it would build the vanilla `ldiskfs-7.0-ml` instead.
+
+`debian13` (experimental) is Debian 13 as an ldiskfs server, built
+from Debian's patched kernel source (linux-source 6.12.107, pinned:
+the ldiskfs series stops applying at 6.12.111) with defconfig plus
+`ubuntu2604-server`'s options rather than Debian's own config.
+Lustre's configure has no Debian case, so it builds the vanilla
+`ldiskfs-6.12-ml` series.
 
 `mainline` (experimental) builds Lustre against vanilla kernel.org
 kernels rather than a distro SRPM.  Its `--kernel` takes a release
@@ -129,13 +151,6 @@ Top-level:
 ltvm install                    One-time host setup (sudo)
 ltvm update                     git fast-forward ltvm itself
 ltvm build      <action> ...    Build artifacts (see below)
-`debian13` (experimental) is Debian 13 as an ldiskfs server, built
-from Debian's patched kernel source (linux-source 6.12.107, pinned:
-the ldiskfs series stops applying at 6.12.111) with defconfig plus
-`ubuntu2604-server`'s options rather than Debian's own config.
-Lustre's configure has no Debian case, so it builds the vanilla
-`ldiskfs-6.12-ml` series.
-
 ltvm target     <action> ...    Target OS management (see below)
 ltvm vm         <action> ...    VM inspection / crash / snapshot (see below);
                                 also accepts every VM command below, so

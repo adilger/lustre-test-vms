@@ -236,6 +236,9 @@ def _seed_kdump_boot(vm: VMInfo) -> None:
         reload_cmd = (
             "kdump-config load 2>&1; systemctl restart kdump-tools 2>&1"
         )
+    elif os_family == "suse":
+        initrd_path = "/var/lib/kdump/initrd"
+        reload_cmd = "systemctl restart kdump 2>&1"
     else:
         initrd_path = f"/boot/initramfs-{kver}.img"
         reload_cmd = "systemctl restart kdump 2>&1"
@@ -288,6 +291,11 @@ def _seed_kdump_boot(vm: VMInfo) -> None:
             )
         if os_family == "debian":
             regen_cmd = f"update-initramfs -c -k {kver}"
+        elif os_family == "suse":
+            # kdump.service runs mkdumprd itself when the initrd is
+            # missing, and restarting it waits out a first-boot run
+            # rather than racing it.
+            regen_cmd = f"ln -sf vmlinuz-{kver} /boot/vmlinuz && systemctl restart kdump"
         else:
             regen_cmd = f"dracut --kver {kver} --force {initrd_path}"
         # 600s, not 120: dracut on a TCG guest is in the same league as

@@ -1150,6 +1150,10 @@ _PDSH_SCRIPTS = {
         "command -v pdsh >/dev/null && exit 0; "
         "DEBIAN_FRONTEND=noninteractive apt-get install -y -q pdsh"
     ),
+    "suse": (
+        "rpm -q pdsh >/dev/null 2>&1 && exit 0; "
+        "zypper -n -q install --no-recommends pdsh"
+    ),
 }
 
 
@@ -1171,6 +1175,25 @@ def _ensure_pdsh(
         r.returncode,
         ((r.stdout or "") + (r.stderr or "")).strip(),
     )
+
+
+def _cluster_os_family(name: str, node_families: dict[str, str]) -> str:
+    """The OS family a cluster's shared cfg/local.sh is written for.
+
+    That file names Lustre's install directory, so rhel and suse nodes
+    (/usr/lib64/lustre) can share it and debian ones (/usr/lib/lustre)
+    cannot join them.
+    """
+    families = set(node_families.values())
+    libdirs = {lustre_libdir(f) for f in families}
+    if len(libdirs) > 1:
+        die(
+            f"cluster {name!r} mixes OS families "
+            f"({', '.join(sorted(families))}) that install Lustre in "
+            f"different places ({', '.join(sorted(libdirs))}); its nodes "
+            f"share one cfg/local.sh, so they cannot be deployed together"
+        )
+    return min(families) if families else "rhel"
 
 
 GUEST_HOSTS_BEGIN = "# --- ltvm cluster"
@@ -1380,7 +1403,7 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
     # kernel tree and arch the VM actually runs -- not just the target's
     # defaults.
     groups: dict[tuple[str, str | None, str, str], list[str]] = {}
-    os_families: set[str] = set()
+    node_families: dict[str, str] = {}
     for n in nodes:
         try:
             vm = VMInfo.load(n.name)
@@ -1395,24 +1418,18 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
             from .target_config import TargetConfig
 
             try:
-                os_families.add(
-                    TargetConfig(target, arch=vm.arch or None).os_family
-                )
+                node_families[n.name] = TargetConfig(
+                    target, arch=vm.arch or None
+                ).os_family
             except ValueError as e:
                 die(f"cluster {cluster.name!r}: target {target!r}: {e}")
         else:
-            os_families.add("rhel")
+            node_families[n.name] = "rhel"
         # vm.kernel points at .../kernels/<name>/vmlinuz; extract <name>
         kernel_name = Path(vm.kernel).parent.name if vm.kernel else None
         key = (target, kernel_name, vm.arch or "x86_64", vm.variant)
         groups.setdefault(key, []).append(n.name)
-    if len(os_families) > 1:
-        die(
-            f"cluster {cluster.name!r} mixes OS families "
-            f"({', '.join(sorted(os_families))}); its nodes share one "
-            f"cfg/local.sh, so they must all be rhel or all debian"
-        )
-    os_family = os_families.pop() if os_families else "rhel"
+    os_family = _cluster_os_family(cluster.name, node_families)
 
     print(f"=== Deploying to cluster '{cluster.name}' ===")
     print(f"    Build: {build}")
@@ -1647,7 +1664,9 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
         die(f"/etc/hosts update failed for: {', '.join(failed_hosts)}")
     failed_pdsh = _parallel_cluster_op(
         nodes,
-        lambda node: _ensure_pdsh(node.name, node_ips[node.name], os_family),
+        lambda node: _ensure_pdsh(
+            node.name, node_ips[node.name], node_families[node.name]
+        ),
         success_verb="pdsh ready",
         failure_verb="pdsh install FAILED",
     )
