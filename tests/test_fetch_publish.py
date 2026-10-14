@@ -902,6 +902,7 @@ class TestCmdFetch:
         with (
             patch.object(cli_mod, "TargetConfig", _tc_factory(tmp_targets)),
             patch.object(cfg, "ARTIFACTS_DIR", out),
+            patch.object(cli_mod, "_gh_api", return_value={"assets": []}),
             patch.object(cli_mod, "fetch_target") as ft,
         ):
             args = _ns(
@@ -922,6 +923,60 @@ class TestCmdFetch:
         assert not ft.called
         assert "Already up to date" in capsys.readouterr().out
 
+    def _same_tag_republished(
+        self, tmp_targets: Path, replace: bool
+    ) -> tuple[int, MagicMock]:
+        """The local copy's tag matches, but the release's assets were
+        uploaded again after it was fetched."""
+        import ltvm_pkg.target_config as cfg
+
+        out = tmp_targets / "artifacts"
+        target_dir = out / "rocky9" / "x86_64"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        _write_tag(out, "rocky9", "x86_64", "rocky9-x86_64-same")
+        url = "https://x/releases/download/rocky9-x86_64-same/manifest.json"
+        rel = {"assets": [{"updated_at": "2099-01-01T00:00:00Z"}]}
+
+        with (
+            patch.object(cli_mod, "TargetConfig", _tc_factory(tmp_targets)),
+            patch.object(cfg, "ARTIFACTS_DIR", out),
+            patch.object(cli_mod, "_gh_api", return_value=rel),
+            patch.object(cli_mod, "fetch_target") as ft,
+        ):
+            args = _ns(
+                target="rocky9",
+                url=url,
+                filter=None,
+                arch="x86_64",
+                kernel=None,
+                variant="base",
+                list=False,
+                replace=replace,
+                force=False,
+                image=False,
+            )
+            return cmd_fetch(args), ft
+
+    def test_republished_same_tag_is_not_up_to_date(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        tmp_targets: Path,
+    ) -> None:
+        rc, ft = self._same_tag_republished(tmp_targets, replace=False)
+        assert rc == EXIT_ERROR
+        assert not ft.called
+        err = capsys.readouterr().err
+        assert "republished" in err
+        assert "--replace" in err
+
+    def test_replace_takes_a_republished_same_tag(
+        self, tmp_targets: Path
+    ) -> None:
+        # No --force needed: the bytes are not the ones on disk.
+        rc, ft = self._same_tag_republished(tmp_targets, replace=True)
+        assert rc == EXIT_OK
+        assert ft.called
+
     def test_replace_without_force_refuses_when_same_tag(
         self,
         capsys: pytest.CaptureFixture[str],
@@ -939,6 +994,7 @@ class TestCmdFetch:
         with (
             patch.object(cli_mod, "TargetConfig", _tc_factory(tmp_targets)),
             patch.object(cfg, "ARTIFACTS_DIR", out),
+            patch.object(cli_mod, "_gh_api", return_value={"assets": []}),
             patch.object(cli_mod, "fetch_target") as ft,
         ):
             args = _ns(
@@ -996,6 +1052,7 @@ class TestCmdFetch:
         with (
             patch.object(cli_mod, "TargetConfig", _tc_factory(tmp_targets)),
             patch.object(cfg, "ARTIFACTS_DIR", out),
+            patch.object(cli_mod, "_gh_api", return_value={"assets": []}),
             patch.object(
                 cli_mod, "fetch_target", side_effect=_fake_fetch
             ) as ft,

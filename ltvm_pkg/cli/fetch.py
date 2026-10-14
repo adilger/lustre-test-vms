@@ -444,6 +444,34 @@ def _tag_file_date(tag_file: Any) -> str:
         return ""
 
 
+def _republished_at(release_tag: str, tag_file: Any) -> str:
+    """When ``release_tag``'s assets were re-uploaded after the local
+    copy was fetched, the newest upload time (ISO); otherwise ``""``.
+
+    A republish keeps the tag when the kernel version is unchanged (a
+    config or image fix), so the tag alone cannot tell the local copy
+    from the release.  GitHub moves an asset's ``updated_at`` when it is
+    uploaded again; the tag file's mtime is when it was fetched.  Any
+    failure reads as "not republished", the tag-only answer.
+    """
+    from datetime import datetime, timezone
+
+    try:
+        fetched = datetime.fromtimestamp(tag_file.stat().st_mtime, timezone.utc)
+        rel = _cli_attr("_gh_api")(f"releases/tags/{release_tag}")
+        uploads = [
+            datetime.fromisoformat(a["updated_at"].replace("Z", "+00:00"))
+            for a in rel.get("assets", [])
+            if a.get("updated_at")
+        ]
+    except Exception:
+        return ""
+    newest = max(uploads, default=None)
+    if newest is None or newest <= fetched:
+        return ""
+    return newest.isoformat(timespec="minutes")
+
+
 def _compare_dates(local: str, remote: str) -> str:
     """Return ``"newer"``, ``"older"``, or ``""`` comparing ISO dates.
 
@@ -469,6 +497,7 @@ def _dry_run_report(
     use_json: bool,
     existing_tag: str = "",
     release_tag: str = "",
+    republished: str = "",
 ) -> None:
     """Print (or JSON-emit) what a fetch would do without doing it.
 
@@ -489,6 +518,8 @@ def _dry_run_report(
             payload["release_tag"] = release_tag
         if existing_tag:
             payload["existing_tag"] = existing_tag
+        if republished:
+            payload["republished"] = republished
         print(json.dumps(payload, indent=2))
         return
 
@@ -497,7 +528,12 @@ def _dry_run_report(
     if release_tag:
         print(f"  release:    {release_tag}")
     if existing_tag:
-        if existing_tag == release_tag:
+        if republished:
+            print(
+                f"  local tag:  {existing_tag} (republished {republished}; "
+                f"--replace takes it)"
+            )
+        elif existing_tag == release_tag:
             print(f"  local tag:  {existing_tag} (already up to date)")
         else:
             print(f"  local tag:  {existing_tag} (would be replaced)")
@@ -781,6 +817,11 @@ def cmd_fetch(args: argparse.Namespace) -> int:
         else ""
     )
 
+    republished = (
+        _republished_at(release_tag, tag_file)
+        if release_tag and existing_tag == release_tag
+        else ""
+    )
     if dry_run:
         # Early return so --dry-run ALWAYS reports the resolved URL,
         # even in the no-op "already up to date" and divergent-tag
@@ -795,10 +836,18 @@ def cmd_fetch(args: argparse.Namespace) -> int:
             use_json=use_json,
             existing_tag=existing_tag,
             release_tag=release_tag,
+            republished=republished,
         )
         return EXIT_OK
 
-    if release_tag and existing_tag == release_tag:
+    if republished and not replace:
+        return _error(
+            f"{release_tag} was republished ({republished}) after the "
+            f"local copy was fetched ({_tag_file_date(tag_file)})",
+            use_json,
+            hint="pass --replace to take the republished release",
+        )
+    if release_tag and existing_tag == release_tag and not republished:
         # Same tag already on disk.  Without --replace: no-op success.
         # With --replace but no --force: refuse, because the "clean
         # re-fetch" would produce identical bytes -- probably not

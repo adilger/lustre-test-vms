@@ -39,6 +39,15 @@ release, or when the kernel or image genuinely needs to change:
 `ltvm build all rocky9 --lustre-tree <tree>` rebuilds only what is stale,
 `--force` rebuilds everything, and `ltvm build status` shows what is.
 
+When a local container, kernel or image turns stale after `ltvm update`
+or a pull, check for a newer release before rebuilding: an update that
+moves an input often comes with republished artifacts, and `ltvm target
+fetch <target>` takes them in a minute or two where a kernel build takes
+from 20 minutes to over an hour. Rebuild locally when no release has
+caught up (`ltvm target fetch <target> --dry-run` says what it would
+take). A release republished under the same tag (same kernel version,
+new config or image) makes fetch stop and ask for `--replace`.
+
 Images are per-kernel. A target with two kernels has an image for each,
 so `--kernel <name>` on `build image` and on `create` picks which one,
 and creating against a kernel with no matching image fails rather than
