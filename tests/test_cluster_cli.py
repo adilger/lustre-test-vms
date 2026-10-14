@@ -508,6 +508,47 @@ class TestClusterCreateArgs:
         ]
         assert ns.node_targets == [None, None, "rocky10-16k", "rocky10-16k"]
 
+    def test_node_kernel_picks_one_nodes_kernel(self) -> None:
+        """--node-kernel names a kernel of the node's own target, which
+        --kernel (the cluster-wide target's) cannot."""
+        cmd_cluster(
+            _ns(
+                "create",
+                "co8",
+                "rocky9",
+                "mgs+mds+oss:co8-srv:4",
+                "client:co8-c",
+                "--node-target",
+                "co8-c=opensuse156",
+                "--node-kernel",
+                "co8-c=6.4-sles15sp6",
+            )
+        )
+        ns = self._captured_ns()
+        assert ns.node_targets == [None, "opensuse156"]
+        assert ns.node_kernels == [None, "6.4-sles15sp6"]
+
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            ["client:co7-c1", "--node-kernel", "co7-c1"],
+            ["client:co7-c1", "--node-kernel", "co7-c9=5.14-rhel9.5"],
+            [
+                "client:co7-c1",
+                "--node-kernel",
+                "co7-c1=5.14-rhel9.5",
+                "--node-kernel",
+                "co7-c1=5.14-rhel9.4",
+            ],
+        ],
+    )
+    def test_bad_node_kernel_errors(self, extra: list[str]) -> None:
+        rc = cmd_cluster(
+            _ns("create", "co7", "rocky9", "mgs+mds:co7-mds:1", *extra)
+        )
+        assert rc == EXIT_ERROR
+        assert not self.handler.called
+
     @pytest.mark.parametrize(
         "extra",
         [

@@ -307,8 +307,11 @@ never prompts.
 `--node-target VM=TARGET` (repeatable) boots one node on its own
 target, so one cluster can mix targets.  That node boots its target's
 default kernel and base variant (`--kernel` and `--variant` name things
-in the cluster-wide target), and `cluster deploy` builds Lustre once per
-distinct target and kernel:
+in the cluster-wide target); `--node-kernel VM=KERNEL` gives it another
+of its own target's kernels.  `cluster deploy` builds Lustre once per
+distinct target and kernel.  Targets that install Lustre in different
+places (Debian and Ubuntu under /usr/lib, the rest under /usr/lib64)
+mix too: deploy links each node's directory under the other name.
 
 ```bash
 ltvm cluster create co7 rocky9 mgs+mds+oss:co7-srv:4 client:co7-c16k \
@@ -331,14 +334,14 @@ aarch64 binaries are built with 64K segment alignment.
 
 `opensuse156` (x86_64, client only) is a SLES 15 kernel on an openSUSE
 Leap 15.6 userspace: `6.4-sles15sp7` (the default, Lustre's SLES client
-primary kernel) and `6.4-sles15sp6`, built from SUSE/kernel-source's
-release tags.  There is no published release: `ltvm build all
-opensuse156 --lustre-tree <tree>`.  It has no server, so put it in a
-cluster with rocky servers:
+primary kernel) and `6.4-sles15sp6`, built from SUSE's release tags.
+Both are published (`ltvm target fetch opensuse156`).  It has no
+server, so put it in a cluster with rocky servers; `--node-kernel`
+picks SP6:
 
 ```bash
 ltvm cluster create co8 rocky9 mgs+mds+oss:co8-srv:4 client:co8-sles \
-    --node-target co8-sles=opensuse156
+    --node-target co8-sles=opensuse156 --node-kernel co8-sles=6.4-sles15sp6
 ```
 
 Create and start wait up to 120 seconds for a guest to answer ssh,

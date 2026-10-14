@@ -10,7 +10,7 @@ import pytest
 
 from ltvm_pkg import deploy, vm_cluster
 from ltvm_pkg.deploy import ENV_SAVE_BEGIN
-from ltvm_pkg.vm_state import ClusterInfo
+from ltvm_pkg.vm_state import ClusterInfo, ClusterNode
 from tests.host_marks import needs_gnu_sed
 
 # ── parse_node_spec ──────────────────────────────────────
@@ -962,3 +962,72 @@ class TestEnsurePdsh:
             text = Path(f"targets/{target}/image.Dockerfile").read_text()
             assert "repo=epel-10&arch=$basearch" in text, target
             assert "pdsh pdsh-rcmd-ssh" in text, target
+
+
+class TestMixedFamilies:
+    """Nodes that install Lustre in different places share one cluster
+    block: rocky or SLES servers with Debian or Ubuntu clients."""
+
+    def _link(
+        self, families: dict[str, str]
+    ) -> tuple[list[str], dict[str, str]]:
+        nodes = [ClusterNode(name=n, roles=["client"]) for n in families]
+        ips = {n: f"10.0.0.{i}" for i, n in enumerate(families, 1)}
+        by_ip: dict[str, str] = {}
+
+        def _ssh(ip, cmd, **kw):
+            by_ip[ip] = cmd
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch.object(vm_cluster, "run_ssh", side_effect=_ssh):
+            failed = vm_cluster._link_lustre_libdirs(nodes, ips, families)
+        return failed, {n: by_ip.get(ips[n], "") for n in families}
+
+    def test_one_place_needs_no_links(self) -> None:
+        failed, cmds = self._link({"co3-mds": "rhel", "co3-c1": "suse"})
+        assert failed == []
+        assert cmds == {"co3-mds": "", "co3-c1": ""}
+
+    def test_each_node_links_the_other_place_to_its_own(self) -> None:
+        failed, cmds = self._link({"co3-mds": "rhel", "co3-c1": "debian"})
+        assert failed == []
+        assert "ln -sfn /usr/lib64/lustre /usr/lib/lustre" in cmds["co3-mds"]
+        assert "mkdir -p /usr/lib64 && " in cmds["co3-c1"]
+        assert "ln -sfn /usr/lib/lustre /usr/lib64/lustre" in cmds["co3-c1"]
+        # A real directory there is another install, not replaced.
+        assert "[ ! -L /usr/lib64/lustre ]" in cmds["co3-c1"]
+
+    def test_cluster_block_family_is_stable(self) -> None:
+        families = {"co3-mds": "rhel", "co3-c1": "debian", "co3-c2": "suse"}
+        assert vm_cluster._cluster_os_family(families) == "debian"
+        assert vm_cluster._cluster_os_family({}) == "rhel"
+
+
+class TestNodeKernels:
+    def _nodes(self) -> list[ClusterNode]:
+        return [
+            ClusterNode(name="co8-srv", roles=["mgs", "mds", "oss"]),
+            ClusterNode(name="co8-c", roles=["client"]),
+        ]
+
+    def test_a_kernel_of_the_nodes_own_target(self) -> None:
+        got = vm_cluster._node_kernels(
+            self._nodes(),
+            [None, "6.4-sles15sp6"],
+            {"co8-srv": None, "co8-c": "opensuse156"},
+            "rocky9",
+        )
+        assert got == {"co8-srv": None, "co8-c": "6.4-sles15sp6"}
+
+    def test_another_targets_kernel_is_refused_up_front(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit):
+            vm_cluster._node_kernels(
+                self._nodes(),
+                [None, "5.14-rhel9.5"],
+                {"co8-srv": None, "co8-c": "opensuse156"},
+                "rocky9",
+            )
+        err = capsys.readouterr().err
+        assert "opensuse156 has no kernel '5.14-rhel9.5'" in err

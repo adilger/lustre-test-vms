@@ -125,29 +125,38 @@ def cmd_cluster_create(args: argparse.Namespace) -> int:
         )
 
     # --node-target VM=TARGET gives one node its own target, so a cluster
-    # can mix them, e.g. 4 KiB-page servers with a 16 KiB-page client.
-    # None means the cluster-wide target.
+    # can mix them, e.g. 4 KiB-page servers with a 16 KiB-page client;
+    # --node-kernel VM=KERNEL its own kernel.  None means the cluster's.
     names = [s.split(":")[1] for s in nodes]
-    per_node: dict[str, str] = {}
-    for item in args.node_target or []:
-        vm, sep, target = item.partition("=")
-        if not sep or not vm or not target:
-            return _error(
-                f"--node-target {item!r}: expected VM=TARGET", use_json
-            )
-        if vm not in names:
-            return _error(
-                f"--node-target {item!r}: no node {vm!r} in the node specs",
-                use_json,
-            )
-        if vm in per_node and per_node[vm] != target:
-            return _error(
-                f"--node-target gives {vm!r} two targets: "
-                f"{per_node[vm]!r} and {target!r}",
-                use_json,
-            )
-        per_node[vm] = target
-    node_targets: list[str | None] = [per_node.get(n) for n in names]
+    per_node: dict[str, dict[str, str]] = {}
+    for flag, what, items in (
+        ("--node-target", "TARGET", args.node_target),
+        ("--node-kernel", "KERNEL", args.node_kernel),
+    ):
+        given: dict[str, str] = {}
+        for item in items or []:
+            vm, sep, value = item.partition("=")
+            if not sep or not vm or not value:
+                return _error(f"{flag} {item!r}: expected VM={what}", use_json)
+            if vm not in names:
+                return _error(
+                    f"{flag} {item!r}: no node {vm!r} in the node specs",
+                    use_json,
+                )
+            if vm in given and given[vm] != value:
+                return _error(
+                    f"{flag} gives {vm!r} two values: "
+                    f"{given[vm]!r} and {value!r}",
+                    use_json,
+                )
+            given[vm] = value
+        per_node[flag] = given
+    node_targets: list[str | None] = [
+        per_node["--node-target"].get(n) for n in names
+    ]
+    node_kernels: list[str | None] = [
+        per_node["--node-kernel"].get(n) for n in names
+    ]
 
     flag_target = args.target
     if (
@@ -167,6 +176,7 @@ def cmd_cluster_create(args: argparse.Namespace) -> int:
             name=args.name,
             nodes=nodes,
             node_targets=node_targets,
+            node_kernels=node_kernels,
             vcpus=args.vcpus,
             # mem=None means "let cmd_create resolve the target's
             # default_mem" (rocky10 needs 4096), rather than silently

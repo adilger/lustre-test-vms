@@ -119,8 +119,11 @@ patches and configs.  ltvm builds the tag Lustre's `.target` pins with
 that tag's `config/x86_64/default`, as SUSE's own kernel spec does.
 Leap 15.6 ships SLE 15 SP6's packages for most of its userspace.
 Lustre ships no ldiskfs series for SLES past SP5, so run these as
-clients against rocky servers:
-`ltvm cluster create co8 rocky9 mgs+mds+oss:co8-srv:4 client:co8-sles --node-target co8-sles=opensuse156`.
+clients against rocky servers, picking SP6 with `--node-kernel`:
+`ltvm cluster create co8 rocky9 mgs+mds+oss:co8-srv:4 client:co8-sles --node-target co8-sles=opensuse156 --node-kernel co8-sles=6.4-sles15sp6`.
+A cluster can mix Debian-family targets with the others too, though
+they install Lustre in different places: `cluster deploy` links one
+place to the other on each node.
 
 `ubuntu2604-server` (experimental) is Ubuntu 26.04 as an ldiskfs
 server, on the kernel Lustre's `ldiskfs-7.0.0-14-ubuntu26` series is

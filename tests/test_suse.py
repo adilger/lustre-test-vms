@@ -163,21 +163,6 @@ class TestDispatch:
 
 
 class TestCluster:
-    def test_rhel_and_suse_nodes_share_a_local_sh(self) -> None:
-        """SLES clients against rocky servers: both install Lustre
-        under /usr/lib64."""
-        family = vm_cluster._cluster_os_family(
-            "co3", {"co3-mds": "rhel", "co3-c1": "suse"}
-        )
-        assert lustre_libdir(family) == "/usr/lib64/lustre"
-
-    def test_debian_cannot_join_them(self, capsys) -> None:
-        with pytest.raises(SystemExit):
-            vm_cluster._cluster_os_family(
-                "co3", {"co3-mds": "rhel", "co3-c1": "debian"}
-            )
-        assert "/usr/lib/lustre" in capsys.readouterr().err
-
     def test_pdsh_comes_from_zypper(self) -> None:
         with patch.object(
             vm_cluster,

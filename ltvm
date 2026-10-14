@@ -2101,8 +2101,18 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="VM=TARGET",
         help="OS target for one node instead of --target, e.g. "
         "co7-c16k=rocky10-16k for 4K servers with a 16K client; that "
-        "node boots its target's default kernel and base variant. "
-        "Repeat for more nodes.",
+        "node boots its target's default kernel (or its --node-kernel) "
+        "and base variant. Repeat for more nodes.",
+    )
+    ccp.add_argument(
+        "--node-kernel",
+        dest="node_kernel",
+        action="append",
+        default=None,
+        metavar="VM=KERNEL",
+        help="Kernel one node boots instead of --kernel, one of its own "
+        "target's, e.g. co8-c=6.4-sles15sp6 with --node-target "
+        "co8-c=opensuse156. Repeat for more nodes.",
     )
     ccp.add_argument(
         "--kernel",

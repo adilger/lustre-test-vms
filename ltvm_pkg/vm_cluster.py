@@ -635,6 +635,47 @@ def _node_targets(
     return result
 
 
+def _node_kernels(
+    node_specs: list[ClusterNode],
+    kernels: list[str | None] | None,
+    node_targets: dict[str, str | None],
+    os_target: str | None,
+) -> dict[str, str | None]:
+    """Map each node name to its own kernel, or None.
+
+    A node kernel is one of the node's own target's: declared in
+    targets.yaml or already built.  Checked here, before any node is
+    created, rather than by the node's `ltvm create` once the others
+    are up.
+    """
+    from .target_config import TargetConfig
+
+    if kernels is None:
+        kernels = [None] * len(node_specs)
+    if len(kernels) != len(node_specs):
+        die("internal error: node_kernels does not match node specs")
+    result: dict[str, str | None] = {}
+    for node, k in zip(node_specs, kernels):
+        result[node.name] = k
+        if k is None:
+            continue
+        target = node_targets.get(node.name) or os_target or DEFAULT_TARGET
+        try:
+            tc = TargetConfig(target)
+        except ValueError as e:
+            die(f"node {node.name!r}: {e}")
+        declared = tc.declared_kernels()
+        if tc._short_kernel_name(k) in declared:
+            continue
+        if (tc.output_dir / "kernels" / tc.resolve_kernel(k)).is_dir():
+            continue
+        die(
+            f"node {node.name!r}: {target} has no kernel {k!r} "
+            f"(declared: {', '.join(declared)})"
+        )
+    return result
+
+
 def _print_cluster_plan(
     cluster_name: str,
     node_specs: list[ClusterNode],
@@ -643,6 +684,7 @@ def _print_cluster_plan(
     mem: int | None,
     os_target: str | None,
     node_targets: dict[str, str | None],
+    node_kernels: dict[str, str | None],
     arch: str | None,
     kernel: str | None,
     variant: str,
@@ -667,10 +709,12 @@ def _print_cluster_plan(
         if node.ost_disks:
             disks.append(f"{node.ost_disks} OST")
         own = node_targets.get(node.name)
+        own_kernel = node_kernels.get(node.name)
         print(
             f"  {node.name:<20} roles={'+'.join(node.roles):<16} "
             f"disks={', '.join(disks) or 'none'}"
             + (f"  target={own}" if own else "")
+            + (f"  kernel={own_kernel}" if own_kernel else "")
         )
     mem_desc = f"{mem} MB" if mem is not None else "target default"
     arch_desc = f" arch={arch}" if arch else ""
@@ -842,10 +886,17 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
     kernel = getattr(args, "kernel", None)
     variant = getattr(args, "variant", None) or "base"
     # A node named after its own target boots that target's default
-    # kernel and base variant: --kernel/--variant name things in the
-    # cluster-wide target, and another target has its own names.
+    # kernel, or its --node-kernel, and base variant: --kernel/--variant
+    # name things in the cluster-wide target, and another target has
+    # its own names.
     node_targets = _node_targets(
         node_specs, getattr(args, "node_targets", None), os_target
+    )
+    node_kernels = _node_kernels(
+        node_specs,
+        getattr(args, "node_kernels", None),
+        node_targets,
+        os_target,
     )
     disk_size = getattr(args, "disk_size", None)
     root_size = getattr(args, "root_size", None)
@@ -874,6 +925,7 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
             mem=mem,
             os_target=os_target,
             node_targets=node_targets,
+            node_kernels=node_kernels,
             arch=arch,
             kernel=kernel,
             variant=variant,
@@ -899,6 +951,9 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
     for name, t in node_targets.items():
         if t:
             print(f"    Target: {t} for {name}")
+    for name, k in node_kernels.items():
+        if k:
+            print(f"    Kernel: {k} for {name}")
     print(f"    Creating {len(node_specs)} nodes in parallel...")
 
     failed = []
@@ -918,7 +973,8 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
                 owner_id,
                 wait_seconds=wait_seconds,
                 numa_nodes=numa_nodes,
-                kernel=None if node_targets[node.name] else kernel,
+                kernel=node_kernels[node.name]
+                or (None if node_targets[node.name] else kernel),
                 variant="base" if node_targets[node.name] else variant,
             ): node
             for node in node_specs
@@ -1177,23 +1233,60 @@ def _ensure_pdsh(
     )
 
 
-def _cluster_os_family(name: str, node_families: dict[str, str]) -> str:
-    """The OS family a cluster's shared cfg/local.sh is written for.
+def _cluster_os_family(node_families: dict[str, str]) -> str:
+    """The OS family whose Lustre directory the cluster block names.
 
-    That file names Lustre's install directory, so rhel and suse nodes
-    (/usr/lib64/lustre) can share it and debian ones (/usr/lib/lustre)
-    cannot join them.
+    cfg/local.sh sets LUSTRE, RLUSTRE and RPWD once for every node, and
+    the framework uses them on the other nodes too.  Any family will do
+    once _link_lustre_libdirs has made each node's directory reachable
+    under the others' names.
     """
-    families = set(node_families.values())
-    libdirs = {lustre_libdir(f) for f in families}
-    if len(libdirs) > 1:
-        die(
-            f"cluster {name!r} mixes OS families "
-            f"({', '.join(sorted(families))}) that install Lustre in "
-            f"different places ({', '.join(sorted(libdirs))}); its nodes "
-            f"share one cfg/local.sh, so they cannot be deployed together"
+    return min(node_families.values(), default="rhel")
+
+
+def _link_lustre_libdirs(
+    nodes: list[ClusterNode],
+    node_ips: dict[str, str],
+    node_families: dict[str, str],
+) -> list[str]:
+    """In a cluster whose nodes install Lustre in different places (rhel
+    and suse /usr/lib64/lustre, debian /usr/lib/lustre), link each
+    other place to the node's own.  Returns the nodes that failed.
+
+    A directory already there is not replaced: it would be another
+    Lustre install, and the framework would run its scripts.
+    """
+    libdirs = {lustre_libdir(f) for f in node_families.values()}
+    if len(libdirs) < 2:
+        return []
+
+    def _link(node: ClusterNode) -> tuple[str, int, str]:
+        own = lustre_libdir(node_families[node.name])
+        steps = []
+        for other in sorted(libdirs - {own}):
+            q_own, q_other = shlex.quote(own), shlex.quote(other)
+            steps.append(
+                f"if [ -e {q_other} ] && [ ! -L {q_other} ]; then "
+                f"echo {q_other} is not a link to {q_own} >&2; exit 1; fi; "
+                f"mkdir -p {shlex.quote(str(Path(other).parent))} && "
+                f"ln -sfn {q_own} {q_other}"
+            )
+        try:
+            r = run_ssh(node_ips[node.name], " && ".join(steps), timeout=60)
+        except subprocess.TimeoutExpired as e:
+            return node.name, 1, f"timed out after {e.timeout}s"
+        return (
+            node.name,
+            r.returncode,
+            ((r.stdout or "") + (r.stderr or "")).strip(),
         )
-    return min(families) if families else "rhel"
+
+    return _parallel_cluster_op(
+        nodes,
+        _link,
+        success_verb="Lustre directories linked",
+        failure_verb="Lustre directory link FAILED",
+    )
 
 
 GUEST_HOSTS_BEGIN = "# --- ltvm cluster"
@@ -1429,7 +1522,7 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
         kernel_name = Path(vm.kernel).parent.name if vm.kernel else None
         key = (target, kernel_name, vm.arch or "x86_64", vm.variant)
         groups.setdefault(key, []).append(n.name)
-    os_family = _cluster_os_family(cluster.name, node_families)
+    os_family = _cluster_os_family(node_families)
 
     print(f"=== Deploying to cluster '{cluster.name}' ===")
     print(f"    Build: {build}")
@@ -1581,7 +1674,7 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
             lambda node: _deploy_one_node(
                 node.name,
                 build,
-                os_family,
+                node_families[node.name],
                 zfs_by_node.get(node.name),
                 userspace_only=userspace_only,
                 need_zfs=(
@@ -1677,6 +1770,9 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
             f"it.  Rebuild the image (ltvm build image <target>) and "
             f"recreate the cluster."
         )
+    failed_links = _link_lustre_libdirs(nodes, node_ips, node_families)
+    if failed_links:
+        die(f"Lustre directory links failed for: {', '.join(failed_links)}")
     failed_sh = _parallel_cluster_op(
         nodes,
         lambda node: _write_cluster_local_sh(
@@ -1684,7 +1780,7 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
             node_ips[node.name],
             local_sh,
             ssh_opts,
-            os_family,
+            node_families[node.name],
         ),
         success_verb="local.sh written",
         failure_verb="local.sh FAILED",

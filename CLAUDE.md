@@ -420,9 +420,7 @@ SUSE paths stay in `targets/opensuse156/` (`setup-suse.sh` replaces
 `common/setup-kdump.sh`) so no other target's image hash moves.  The
 build container points `CONFIG_SITE` at SUSE's site-config, the
 counterpart of EL's `/usr/share/config.site`, so Lustre installs under
-`/usr/lib64` there too; rhel
-and suse nodes then share `/usr/lib64/lustre`, so a cluster may mix
-them (`vm_cluster._cluster_os_family`); debian nodes cannot join them.
+`/usr/lib64` there too, the path SLES's own Lustre packages use.
 
 ## ZFS
 
@@ -927,6 +925,16 @@ lustre`, then unloading it again), and
 (the real `target export` pipeline).
 
 ### Clusters
+
+A cluster may mix targets (`--node-target VM=TARGET`, and
+`--node-kernel VM=KERNEL` for one of that node's own target's kernels).
+Its nodes share one cluster block naming Lustre's directory (LUSTRE,
+RLUSTRE, RPWD), which the framework also uses on the other nodes, and
+Debian-family targets install under /usr/lib/lustre while the rest use
+/usr/lib64/lustre.  So when a cluster mixes them, `cluster deploy`
+links each node's directory under the other name
+(`_link_lustre_libdirs`), refusing to replace a real directory there;
+each node is still deployed with its own family's paths.
 
 ```bash
 sudo ltvm cluster create co2 mgs+mds:co2-mds:1 oss:co2-oss:3
