@@ -1075,6 +1075,52 @@ class TestCrossPatchDockerfile:
         assert "COPY _prebuilt/etc/ /etc/\n" in out
         assert "COPY _prebuilt/opt/ /opt/\n" in out
 
+    def test_rhel_libraries_replace_the_distro_ones(
+        self, tmp_path: Path
+    ) -> None:
+        """On RHEL the patched libext2fs must land where ld.so finds it."""
+        out = ib.cross_patch_dockerfile(
+            "RUN bash /tmp/build-tools.sh\nRUN bash /tmp/build-e2fsprogs.sh\n",
+            self._prebuilt(tmp_path),
+            libdir="/usr/lib64/",
+        )
+        assert "COPY _prebuilt/lib/ /usr/lib64/\n" in out
+
+    def test_internal_libblkid_is_dropped(self, tmp_path: Path) -> None:
+        for f in (
+            "lib/libblkid.so.1",
+            "lib/libblkid.so.1.0",
+            "lib/libext2fs.so.2",
+            "usr/lib/libblkid.a",
+            "usr/lib/pkgconfig/blkid.pc",
+            "usr/lib/pkgconfig/ext2fs.pc",
+            "usr/include/blkid/blkid.h",
+            "sbin/blkid",
+            "sbin/findfs",
+            "sbin/fsck",
+            "sbin/mke2fs",
+        ):
+            (tmp_path / f).parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / f).write_text("")
+        ib._drop_internal_blkid(tmp_path)
+        left = sorted(
+            str(p.relative_to(tmp_path))
+            for p in tmp_path.rglob("*")
+            if p.is_file()
+        )
+        assert left == [
+            "lib/libext2fs.so.2",
+            "sbin/mke2fs",
+            "usr/lib/pkgconfig/ext2fs.pc",
+        ]
+
+    def test_system_libblkid_build_is_left_alone(self, tmp_path: Path) -> None:
+        """Without its own libblkid, e2fsprogs' fsck stays."""
+        (tmp_path / "sbin").mkdir()
+        (tmp_path / "sbin/fsck").write_text("")
+        ib._drop_internal_blkid(tmp_path)
+        assert (tmp_path / "sbin/fsck").exists()
+
     def test_rest_of_the_run_survives(self, tmp_path: Path) -> None:
         """ubuntu2604 wraps the call in a longer RUN; the rest stays."""
         text = (

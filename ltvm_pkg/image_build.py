@@ -254,10 +254,47 @@ def _prebuild_tools_native(
         script,
     ]
     subprocess.run(cmd, check=True)
+    _drop_internal_blkid(output_dir)
     log.info("Pre-built tools at %s", output_dir)
 
 
-def cross_patch_dockerfile(text: str, prebuilt: Path) -> str:
+# e2fsprogs builds its own libblkid when configure finds none, as in a
+# RHEL cross sysroot, along with the tools util-linux also ships.
+_INTERNAL_BLKID = (
+    "lib/libblkid.so*",
+    "usr/lib/libblkid.*",
+    "usr/lib/pkgconfig/blkid.pc",
+    "usr/include/blkid",
+    "sbin/blkid",
+    "sbin/findfs",
+    "sbin/fsck",
+    "usr/share/man/man3/libblkid.3",
+    "usr/share/man/man8/blkid.8",
+    "usr/share/man/man8/findfs.8",
+    "usr/share/man/man8/fsck.8",
+)
+
+
+def _drop_internal_blkid(prebuilt: Path) -> None:
+    """Remove e2fsprogs' own libblkid and its tools from a prebuild.
+
+    It carries no symbol versions, and copied into the image it shadows
+    util-linux's: systemd's libmount then fails to find
+    blkid_probe_lookup_value and init dies at boot.
+    """
+    if not any((prebuilt / "lib").glob("libblkid.so*")):
+        return
+    for pattern in _INTERNAL_BLKID:
+        for path in prebuilt.glob(pattern):
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+
+
+def cross_patch_dockerfile(
+    text: str, prebuilt: Path, libdir: str = "/usr/lib/"
+) -> str:
     """Swap an image Dockerfile's tool builds for COPYs of ``prebuilt``.
 
     The RUN that calls build-tools.sh or build-e2fsprogs.sh gets the
@@ -266,6 +303,10 @@ def cross_patch_dockerfile(text: str, prebuilt: Path) -> str:
     ld.so.conf) still happens.  Every top-level directory the prebuild
     installed is copied: e2fsprogs puts its libraries and mke2fs under
     lib/ and sbin/, build-tools.sh puts compilebench under opt/.
+
+    ``libdir`` is where the image's own libext2fs lives, which the
+    patched one must replace: /usr/lib64 on RHEL, where a native build
+    installs it and ld.so looks, and nothing else does.
     """
     copies = {
         "build-tools.sh": ["usr/local", "opt"],
@@ -273,7 +314,7 @@ def cross_patch_dockerfile(text: str, prebuilt: Path) -> str:
     }
     # lib/ and sbin/ land under /usr: every target is merged-/usr, and
     # COPY onto the /lib symlink itself is not something to rely on.
-    dest = {"lib": "/usr/lib/", "sbin": "/usr/sbin/"}
+    dest = {"lib": libdir, "sbin": "/usr/sbin/"}
     lines = text.splitlines(keepends=True)
     out: list[str] = []
     i = 0
@@ -764,7 +805,13 @@ def build_image(
         prebuilt_dir = out_dir / "_prebuilt"
         _prebuild_tools_native(target_config, prebuilt_dir)
 
-        patched = cross_patch_dockerfile(dockerfile.read_text(), prebuilt_dir)
+        patched = cross_patch_dockerfile(
+            dockerfile.read_text(),
+            prebuilt_dir,
+            libdir="/usr/lib64/"
+            if target_config.os_family == "rhel"
+            else "/usr/lib/",
+        )
 
         # Write patched Dockerfile next to the original
         effective_dockerfile = out_dir / "image.Dockerfile.cross"
