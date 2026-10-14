@@ -393,6 +393,7 @@ ltvm suite run co1-single sanity --only '39r 42a'
 ltvm suite run co2 sanity-sec --env SHARED_KEY=true --wait  # cluster
 ltvm suite status co1-single [$id]   # running / done rc=N / died
 ltvm suite collect co1-single $id    # logs to ./ltvm-suite/..., summary
+ltvm suite collect co1-single $id --debug-logs   # the debug logs as well
 ```
 
 A cluster runs it from its first client.  `--wait` collects at the end
@@ -405,13 +406,15 @@ directory you run from; `run` and `collect` print the full path, and
 `status` shows `collected to <dir>` once a run has been collected.
 `--results-dir DIR` on `collect` or `run --wait` puts them elsewhere:
 use it when the current directory is a git tree that should not get
-them.
+them.  The `*.debug_log.*` files stay in the guest unless `collect` or
+`run --wait` is given `--debug-logs`; the summary says how many were
+left.
 
 For a single subtest by hand:
 
 ```bash
 ssh co1-single 'sudo -E ONLY=42a bash /usr/lib64/lustre/tests/sanity.sh'
-ssh co1-single 'sudo -E auster sanity --only 42a'
+ssh co1-single 'cd /usr/lib64/lustre/tests && sudo -E ./auster sanity --only 42a'
 ```
 
 auster's `-s` is `SLOW=yes`, not "suite": CI runs `SLOW=no`, so leave it off

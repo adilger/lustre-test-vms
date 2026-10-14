@@ -1010,7 +1010,10 @@ first, `auster -k -v -r -H`, launched under `setsid nohup keyctl session
 is alive, "done" once it wrote `done`, "died" otherwise; a node whose
 uptime is shorter than the run's age crashed under it.  `collect`
 rsyncs the run dir back without `*.debug_log.*` and parses results.yml
-line by line (a killed suite leaves invalid YAML).
+line by line (a killed suite leaves invalid YAML).  `--debug-logs` (on
+`collect` and on `run --wait`) copies the debug logs too; without it
+the summary counts the ones left in the guest (`debug_logs_skipped`
+under `--json`).
 
 Collected results go to `./ltvm-suite/<target>/<run-id>/` under the
 working directory (`suite_run.results_root()`), where people look for
