@@ -9,8 +9,9 @@ set -euo pipefail
 
 # Enable sshd (service name differs: sshd on RHEL, ssh on Debian).
 # Ask for ssh first: Debian 13's ssh.service lists sshd.service as an
-# alias, which `systemctl enable` refuses.
-if systemctl list-unit-files ssh.service &>/dev/null; then
+# alias, which `systemctl enable` refuses.  Match the listing rather
+# than the exit status, which EL8's systemd leaves 0 for no match.
+if systemctl list-unit-files ssh.service | grep '^ssh\.service' >/dev/null; then
 	systemctl enable ssh
 else
 	systemctl enable sshd
