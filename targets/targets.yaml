@@ -272,9 +272,8 @@ targets:
     os_version: '15.6'
     status: experimental
   ubuntu2404:
-    # --with-o2ib=yes is the base configure default (lustre_build.py).
-    # Add --with-o2ib=no to configure_args if this kernel lacks
-    # CONFIG_INFINIBAND.
+    # --with-o2ib=yes is the base configure default (lustre_build.py);
+    # a kernel built without InfiniBand gets --with-o2ib=no on its own.
     container_image: docker.io/library/ubuntu:24.04
     kernel_deb_source: linux-source-6.8.0
     kernels:

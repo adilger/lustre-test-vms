@@ -229,6 +229,12 @@ timeout = 7200
 
 Kernel and image builds have no limit.
 
+Lustre is configured `--with-o2ib=yes`, building ko2iblnd against the
+kernel's own InfiniBand stack, unless the kernel was built without one
+(no rdma_cm symbols in its Module.symvers): then the build says so and
+uses `--with-o2ib=no`.  `--configure --with-o2ib=...`, or the same in a
+target's `configure_args`, always overrides that choice.
+
 `target` sub-actions:
 
 ```
