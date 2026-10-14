@@ -919,31 +919,84 @@ def _ensure_container_image(target_config: TargetConfig) -> str:
 # ------------------------------------------------------------------
 
 
+def _config_key(line: str) -> str | None:
+    """The symbol a fragment line sets, or None for a comment or blank."""
+    line = line.strip()
+    if not line.startswith("CONFIG_") or "=" not in line:
+        return None
+    return line.split("=", 1)[0]
+
+
 def _build_config_fragment(target_config: TargetConfig) -> str:
     """Assemble the merged config fragment (common + arch + target).
 
+    These are the values the build forces.  A symbol the target whites
+    out (``null`` in kernels.config) is left out of the shared files.
+
     Returns the fragment text.
     """
-    lines = []
+    lines: list[str] = []
+    whiteouts = target_config.kernel_config_whiteouts
 
     # Common fragment -- targets_dir is target_dir's parent (targets/)
     targets_dir = target_config.target_dir.parent
     common = targets_dir / "common" / "kernel-config.fragment"
-    if common.exists():
-        lines.append(common.read_text())
-
     # Arch-specific fragment (e.g. kernel-config-aarch64.fragment)
     arch_frag = (
         targets_dir / "common" / f"kernel-config-{target_config.arch}.fragment"
     )
-    if arch_frag.exists():
-        lines.append(arch_frag.read_text())
+    for frag in (common, arch_frag):
+        if frag.exists():
+            lines.extend(
+                line
+                for line in frag.read_text().splitlines()
+                if _config_key(line) not in whiteouts
+            )
 
     # Per-target overrides from kernel.conf [config]
     for key, val in target_config.kernel_config_overrides.items():
         lines.append(f"{key}={val}")
 
     return "\n".join(lines) + "\n"
+
+
+def _build_config_overlay(target_config: TargetConfig) -> str:
+    """The shared overlay this target's kernel takes, best effort.
+
+    targets/common/kernel-config.overlay, less every symbol the forced
+    fragment sets and every symbol the target whites out.
+    """
+    overlay = (
+        target_config.target_dir.parent / "common" / "kernel-config.overlay"
+    )
+    if not overlay.exists():
+        return ""
+    drop = set(target_config.kernel_config_whiteouts)
+    drop.update(
+        key
+        for key in map(
+            _config_key, _build_config_fragment(target_config).splitlines()
+        )
+        if key
+    )
+    return "".join(
+        line.strip() + "\n"
+        for line in overlay.read_text().splitlines()
+        if (key := _config_key(line)) and key not in drop
+    )
+
+
+def _stage_config_inputs(target_config: TargetConfig, staging: Path) -> None:
+    """Write the config fragment and overlay, and the shared shell
+    helpers every inner build script sources, into the staging dir."""
+    (staging / "config.fragment").write_text(
+        _build_config_fragment(target_config)
+    )
+    (staging / "config.overlay").write_text(
+        _build_config_overlay(target_config)
+    )
+    for name in ("cross-compile-env.sh", "kernel-config-overlay.sh"):
+        shutil.copy2(TARGETS_DIR / "common" / name, staging / name)
 
 
 # ------------------------------------------------------------------
@@ -1034,6 +1087,18 @@ def _finalize_kernel_build(
     log.info("vmlinuz: %.1f MB", vmlinuz_size / 1e6)
     log.info("Kernel version: %s", krelease)
 
+    # kernel-config-overlay.sh's list of overlay entries this kernel's
+    # config would not take.
+    missed_file = kernel_out / "config-overlay-missed"
+    overlay_missed = (
+        missed_file.read_text().splitlines() if missed_file.exists() else []
+    )
+    if overlay_missed:
+        log.warning(
+            "Shared config overlay entries this kernel did not take:\n  %s",
+            "\n  ".join(overlay_missed),
+        )
+
     # Schema: see ltvm_pkg.meta_schema.KernelMeta.
     # target/input_hash are written by TargetConfig.write_meta.
     meta: dict[str, Any] = {
@@ -1054,6 +1119,7 @@ def _finalize_kernel_build(
         # crash-collect tell whether the vmlinux on disk actually
         # matches the vmcore it is about to be paired with.
         "kernel_build_id": kernel_build_id,
+        "config_overlay_missed": overlay_missed,
         "built_at": datetime.now(timezone.utc).isoformat(),
         **extra_meta,
     }
@@ -1124,17 +1190,11 @@ def _build_kernel_upstream(
 
     with tempfile.TemporaryDirectory(prefix="ltvm-kbuild-") as staging_str:
         staging = Path(staging_str)
-        (staging / "config.fragment").write_text(
-            _build_config_fragment(target_config)
-        )
+        _stage_config_inputs(target_config, staging)
         shutil.copy2(
             INNER_SCRIPT_UPSTREAM, staging / "kernel-build-inner-upstream.sh"
         )
         os.chmod(staging / "kernel-build-inner-upstream.sh", 0o755)
-        shutil.copy2(
-            TARGETS_DIR / "common" / "cross-compile-env.sh",
-            staging / "cross-compile-env.sh",
-        )
 
         jobs = _kernel_build_jobs()
         container_cmd = [
@@ -1228,17 +1288,10 @@ def _build_kernel_deb(
         (staging / "patches").mkdir()
         (staging / "series").write_text("")
 
-        # Write config fragment
-        frag = _build_config_fragment(target_config)
-        (staging / "config.fragment").write_text(frag)
+        _stage_config_inputs(target_config, staging)
 
-        # Copy inner build script + shared cross-compile helper
         shutil.copy2(INNER_SCRIPT_DEB, staging / "kernel-build-inner-deb.sh")
         os.chmod(staging / "kernel-build-inner-deb.sh", 0o755)
-        shutil.copy2(
-            TARGETS_DIR / "common" / "cross-compile-env.sh",
-            staging / "cross-compile-env.sh",
-        )
 
         # Run build in container
         jobs = _kernel_build_jobs()
@@ -1492,15 +1545,9 @@ def _build_kernel_suse(
             "".join(f"{p.name}\n" for p in lustre_patches)
         )
         shutil.copy2(config, staging / "kernel.config")
-        (staging / "config.fragment").write_text(
-            _build_config_fragment(target_config)
-        )
+        _stage_config_inputs(target_config, staging)
         shutil.copy2(INNER_SCRIPT_SUSE, staging / "kernel-build-inner-suse.sh")
         os.chmod(staging / "kernel-build-inner-suse.sh", 0o755)
-        shutil.copy2(
-            TARGETS_DIR / "common" / "cross-compile-env.sh",
-            staging / "cross-compile-env.sh",
-        )
 
         jobs = _kernel_build_jobs()
         container_cmd = [
@@ -1681,17 +1728,10 @@ def _build_kernel_srpm(
         else:
             (staging / "kernel.config").write_text("")
 
-        # Write config fragment
-        frag = _build_config_fragment(target_config)
-        (staging / "config.fragment").write_text(frag)
+        _stage_config_inputs(target_config, staging)
 
-        # Copy inner build script + shared cross-compile helper
         shutil.copy2(INNER_SCRIPT, staging / "kernel-build-inner.sh")
         os.chmod(staging / "kernel-build-inner.sh", 0o755)
-        shutil.copy2(
-            TARGETS_DIR / "common" / "cross-compile-env.sh",
-            staging / "cross-compile-env.sh",
-        )
 
         # Run build in container
         jobs = _kernel_build_jobs()

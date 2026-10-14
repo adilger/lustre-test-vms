@@ -246,7 +246,30 @@ target's slice: `lustre/kernel_patches/`
 then merges [targets/common/kernel-config.fragment](targets/common/kernel-config.fragment)
 (plus the per-target `kernels.config` from `targets.yaml`)
 and builds vmlinux/vmlinuz/modules/build-tree inside the
-build container.  SRPMs cache under `artifacts/<target>/<arch>/cache/`
+build container.
+
+Two layers of config go on top of the base config:
+
+- **The shared overlay**,
+  [targets/common/kernel-config.overlay](targets/common/kernel-config.overlay),
+  is best effort.  It goes in first and is never forced: what the
+  kernel will not take after `olddefconfig` (an unmet dependency, a
+  select, a symbol it lacks) is listed in the build log and in the
+  kernel's meta.json as `config_overlay_missed`, and the build goes on.
+  It holds what every kernel should have but no single target needs to
+  boot: InfiniBand for ko2iblnd, and the hardware a headless microvm
+  never has (DRM, sound, media, wireless, staging) turned off.
+- **The forced fragment** is `kernel-config.fragment`, the per-arch
+  `kernel-config-<arch>.fragment`, then the target's `kernels.config`.
+  Its values are forced in before and after `olddefconfig`.  A symbol a
+  target sets drops out of the overlay; a symbol it sets to `null`
+  (`CONFIG_DRM: null`) is whited out of both shared files, which leaves
+  it to the kernel's own config.
+
+The four inner scripts share the overlay logic through
+`targets/common/kernel-config-overlay.sh`, staged beside them with
+`cross-compile-env.sh`.  The overlay, its helper and the whiteouts are
+all inputs to every kernel's hash.  SRPMs cache under `artifacts/<target>/<arch>/cache/`
 with a Rocky-vault fallback for older minors.
 
 ### Image
@@ -1043,7 +1066,7 @@ Per-target keys:
 | zfs.version | 2.4.0 | ZFS release `--zfs` builds (does not enable it) |
 | kernels.default | 5.14-rhel9.7 | Default kernel |
 | kernels.available | [5.14-rhel9.7, ...] | Buildable kernels |
-| kernels.config | {CONFIG_XEN_PVH: y} | Per-target config overrides |
+| kernels.config | {CONFIG_XEN_PVH: y} | Per-target config overrides (null whites out a shared entry) |
 | variants | {mofed-24: {...}} | Optional add-on variants |
 
 ### Package Lists

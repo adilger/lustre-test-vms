@@ -34,6 +34,7 @@ BUILD=/build/kernel-src
 
 # shellcheck disable=SC1091
 source /input/staging/cross-compile-env.sh
+source /input/staging/kernel-config-overlay.sh
 
 echo "=== kernel-build-inner-upstream.sh ==="
 echo "    Jobs: ${JOBS}"
@@ -97,6 +98,8 @@ fi
 # bindgen; say so rather than let a fragment silently turn it on.
 scripts/config --disable RUST || true
 
+overlay_apply
+
 if [[ -f scripts/kconfig/merge_config.sh ]]; then
 	KCONFIG_CONFIG=.config \
 		./scripts/kconfig/merge_config.sh \
@@ -124,6 +127,7 @@ done < /input/staging/config.fragment
 
 echo "--- Running olddefconfig..."
 make "${MAKE_ARCH_FLAGS[@]}" olddefconfig 2>&1 | tail -3
+overlay_report
 
 echo "--- Verifying config overrides..."
 unmet=0

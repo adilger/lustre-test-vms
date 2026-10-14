@@ -39,6 +39,7 @@ BUILD=/build/kernel-src
 # TARGET_ARCH verbatim -- no separate SRPM_CONFIG_ARCH mapping needed.
 # shellcheck disable=SC1091
 source /input/staging/cross-compile-env.sh
+source /input/staging/kernel-config-overlay.sh
 SRPM_CONFIG_ARCH="$TARGET_ARCH"
 
 echo "=== kernel-build-inner.sh ==="
@@ -177,6 +178,8 @@ else
 	cp "$SRPM_CONFIG" .config
 fi
 
+overlay_apply
+
 # Apply the microvm config fragment on top.
 # Use scripts/kconfig/merge_config.sh if available,
 # otherwise append and run olddefconfig.
@@ -210,6 +213,7 @@ echo "    Applied overrides from config fragment"
 
 echo "--- Running olddefconfig..."
 make "${MAKE_ARCH_FLAGS[@]}" olddefconfig 2>&1 | tail -3
+overlay_report
 
 # Verify critical overrides survived olddefconfig
 echo "--- Verifying config overrides..."

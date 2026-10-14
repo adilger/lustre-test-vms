@@ -882,7 +882,16 @@ class TargetConfig:
         return {
             k: ("y" if v is True else "n" if v is False else str(v))
             for k, v in raw.items()
+            if v is not None
         }
+
+    @property
+    def kernel_config_whiteouts(self) -> frozenset[str]:
+        """Symbols kernels.config sets to null: the shared overlay and
+        fragments do not set them for this target, so the kernel's own
+        config decides."""
+        raw = self._kernels.get("config", {})
+        return frozenset(k for k, v in raw.items() if v is None)
 
     def _short_kernel_name(self, name: str) -> str:
         """Return the short kernel name (e.g. "5.14-rhel9.7") from either
@@ -1170,10 +1179,17 @@ class TargetConfig:
             h.label("kernels.config")
             for k, v in sorted(self.kernel_config_overrides.items()):
                 h.update(f"{k}={v}".encode())
+            for k in sorted(self.kernel_config_whiteouts):
+                h.update(f"!{k}".encode())
             common_frag = TARGETS_DIR / "common" / "kernel-config.fragment"
             if common_frag.exists():
                 h.label("common/kernel-config.fragment")
                 h.update(common_frag.read_bytes())
+            for name in ("kernel-config.overlay", "kernel-config-overlay.sh"):
+                path = TARGETS_DIR / "common" / name
+                if path.exists():
+                    h.label(f"common/{name}")
+                    h.update(path.read_bytes())
             # The arch-specific fragment is also consumed by
             # kernel_build._build_config_fragment, so it must contribute
             # to the staleness hash too.

@@ -1,0 +1,24 @@
+# Shared kernel config overlay, applied best effort to every target's
+# kernel.  Unlike kernel-config.fragment, nothing here is forced: an
+# entry the kernel's config cannot take is reported in the build log
+# and in the kernel's meta.json (config_overlay_missed), and the build
+# goes on.  A target overrides an entry by setting the symbol in its
+# kernels.config in targets.yaml, or drops it with a null value
+# (CONFIG_DRM: null), which leaves the symbol to the kernel's own
+# config.
+
+# ko2iblnd (Lustre configures --with-o2ib=yes) and SoftRoCE.
+CONFIG_INFINIBAND=m
+CONFIG_INFINIBAND_USER_ACCESS=m
+CONFIG_INFINIBAND_ADDR_TRANS=y
+CONFIG_RDMA_RXE=m
+
+# Hardware a headless virtio microvm never has.  Each takes the
+# drivers under it along; from a 46 minute debian13 build they were
+# about 6300 of the module compiles.
+CONFIG_DRM=n
+CONFIG_SOUND=n
+CONFIG_MEDIA_SUPPORT=n
+CONFIG_WIRELESS=n
+CONFIG_WLAN=n
+CONFIG_STAGING=n

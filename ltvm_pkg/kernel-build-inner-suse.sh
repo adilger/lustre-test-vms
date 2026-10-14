@@ -36,6 +36,7 @@ BUILD=/build/kernel-src
 
 # shellcheck disable=SC1091
 source /input/staging/cross-compile-env.sh
+source /input/staging/kernel-config-overlay.sh
 
 echo "=== kernel-build-inner-suse.sh ==="
 echo "    Jobs: ${JOBS}"
@@ -107,6 +108,8 @@ cp /input/staging/kernel.config .config
 	--disable CONFIG_SUSE_KERNEL_RELEASED \
 	--disable CONFIG_SUSE_HAVE_STABLE_KABI
 
+overlay_apply
+
 # The fragment is the common one plus the target's overrides, so a key
 # can appear twice; the target's, which comes last, wins.
 awk -F= '/^CONFIG_/ { if (!($1 in v)) k[++n] = $1; v[$1] = $0 }
@@ -136,6 +139,7 @@ force_fragment
 
 echo "--- Running olddefconfig..."
 make "${MAKE_ARCH_FLAGS[@]}" olddefconfig 2>&1 | tail -3
+overlay_report
 
 echo "--- Verifying config overrides..."
 while IFS= read -r line; do

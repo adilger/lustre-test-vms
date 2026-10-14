@@ -60,6 +60,7 @@ class KernelMeta(_BaseMeta, total=False):
     vmlinuz_bytes: int
     built_at: str
     kernel_build_id: str
+    config_overlay_missed: list[str]
 
 
 class ImageMeta(_BaseMeta, total=False):

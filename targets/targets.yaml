@@ -272,9 +272,6 @@ targets:
     os_version: '15.6'
     status: experimental
   ubuntu2404:
-    # --with-o2ib=yes is the base configure default (lustre_build.py).
-    # Add --with-o2ib=no to configure_args if this kernel lacks
-    # CONFIG_INFINIBAND.
     container_image: docker.io/library/ubuntu:24.04
     kernel_deb_source: linux-source-6.8.0
     kernels:
@@ -517,11 +514,6 @@ targets:
         CONFIG_NFSD: m
         CONFIG_SCSI_DEBUG: m
         CONFIG_BLK_DEV_NULL_BLK: m
-        # ko2iblnd (Lustre configures --with-o2ib=yes) and SoftRoCE
-        CONFIG_INFINIBAND: m
-        CONFIG_INFINIBAND_USER_ACCESS: m
-        CONFIG_INFINIBAND_ADDR_TRANS: y
-        CONFIG_RDMA_RXE: m
       default: 7.0.0-14-ubuntu26
     lustre:
       mode: server_ldiskfs

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import copy
 import json
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -11,6 +13,7 @@ import pytest
 from ltvm_pkg.kernel_build import (
     SrpmNotFoundError,
     _build_config_fragment,
+    _build_config_overlay,
     _ensure_container_image,
     _kernel_outputs_complete,
     _list_lustre_kernel_targets,
@@ -25,7 +28,13 @@ from ltvm_pkg.kernel_build import (
     parse_lustre_target,
     resolve_lustre_files,
 )
-from tests.conftest import _make_config, _make_kernel_outputs
+from tests.conftest import (
+    _ROCKY9_YAML,
+    _make_config,
+    _make_kernel_outputs,
+    _write_targets_yaml,
+)
+from tests.host_marks import needs_gnu_sed
 
 _ROCKY9_SRPM_URL = (
     "https://dl.rockylinux.org/pub/rocky/9/BaseOS/source/tree/Packages/k"
@@ -660,6 +669,117 @@ class TestBuildConfigFragment:
         frag = _build_config_fragment(cfg)
         assert "CONFIG_XEN_PVH=y" in frag
         assert "CONFIG_VIRTIO=y" not in frag
+
+
+def _with_kernel_config(tmp_targets: Path, config: dict) -> None:
+    data = copy.deepcopy(_ROCKY9_YAML)
+    data["targets"]["rocky9"]["kernels"]["config"] = config
+    _write_targets_yaml(tmp_targets / "targets", data)
+
+
+class TestBuildConfigOverlay:
+    @pytest.fixture(autouse=True)
+    def _overlay(self, tmp_targets: Path) -> None:
+        (
+            tmp_targets / "targets" / "common" / "kernel-config.overlay"
+        ).write_text(
+            "# comment\nCONFIG_INFINIBAND=m\nCONFIG_DRM=n\n"
+            "CONFIG_VIRTIO=m\nCONFIG_SOUND=n\n"
+        )
+
+    def test_overlay_without_the_forced_symbols(
+        self, tmp_targets: Path
+    ) -> None:
+        # CONFIG_VIRTIO is in the forced common fragment, which wins.
+        cfg = _make_config(tmp_targets)
+        assert _build_config_overlay(cfg) == (
+            "CONFIG_INFINIBAND=m\nCONFIG_DRM=n\nCONFIG_SOUND=n\n"
+        )
+
+    def test_target_override_moves_the_symbol_to_the_fragment(
+        self, tmp_targets: Path
+    ) -> None:
+        _with_kernel_config(tmp_targets, {"CONFIG_DRM": "m"})
+        cfg = _make_config(tmp_targets)
+        assert "CONFIG_DRM" not in _build_config_overlay(cfg)
+        assert "CONFIG_DRM=m" in _build_config_fragment(cfg)
+
+    def test_null_whites_out_overlay_and_fragment(
+        self, tmp_targets: Path
+    ) -> None:
+        _with_kernel_config(
+            tmp_targets, {"CONFIG_SOUND": None, "CONFIG_9P_FS": None}
+        )
+        cfg = _make_config(tmp_targets)
+        assert cfg.kernel_config_whiteouts == {"CONFIG_SOUND", "CONFIG_9P_FS"}
+        assert "CONFIG_SOUND" not in cfg.kernel_config_overrides
+        assert "CONFIG_SOUND" not in _build_config_overlay(cfg)
+        frag = _build_config_fragment(cfg)
+        assert "CONFIG_9P_FS" not in frag
+        assert "None" not in frag
+
+    def test_no_overlay_file(self, tmp_targets: Path) -> None:
+        (tmp_targets / "targets" / "common" / "kernel-config.overlay").unlink()
+        assert _build_config_overlay(_make_config(tmp_targets)) == ""
+
+
+class TestOverlayHelper:
+    """targets/common/kernel-config-overlay.sh, against a scratch .config."""
+
+    def _run(self, tmp_path: Path, steps: str) -> str:
+        helper = (
+            Path(__file__).parent.parent
+            / "targets"
+            / "common"
+            / "kernel-config-overlay.sh"
+        ).read_text()
+        helper = helper.replace(
+            "/input/staging/config.overlay", str(tmp_path / "overlay")
+        ).replace("/output/", f"{tmp_path}/")
+        (tmp_path / "helper.sh").write_text(helper)
+        r = subprocess.run(
+            ["bash", "-c", f"set -euo pipefail; source helper.sh; {steps}"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return r.stdout
+
+    @needs_gnu_sed
+    def test_apply_then_report_what_did_not_stick(self, tmp_path: Path) -> None:
+        (tmp_path / ".config").write_text(
+            "CONFIG_DRM=y\n# CONFIG_INFINIBAND is not set\nCONFIG_SOUND=m\n"
+        )
+        (tmp_path / "overlay").write_text(
+            "CONFIG_INFINIBAND=m\nCONFIG_DRM=n\nCONFIG_SOUND=n\n"
+        )
+        self._run(tmp_path, "overlay_apply")
+        config = (tmp_path / ".config").read_text().splitlines()
+        assert sorted(config) == [
+            "CONFIG_DRM=n",
+            "CONFIG_INFINIBAND=m",
+            "CONFIG_SOUND=n",
+        ]
+        # As olddefconfig would leave it: DRM selected back on, SOUND
+        # written as unset.
+        (tmp_path / ".config").write_text(
+            "CONFIG_DRM=y\nCONFIG_INFINIBAND=m\n# CONFIG_SOUND is not set\n"
+        )
+        out = self._run(tmp_path, "overlay_report")
+        assert "2 of 3 taken" in out
+        assert (tmp_path / "config-overlay-missed").read_text() == (
+            "CONFIG_DRM=n (got y)\n"
+        )
+
+    @needs_gnu_sed
+    def test_empty_overlay_leaves_an_empty_report(self, tmp_path: Path) -> None:
+        (tmp_path / ".config").write_text("CONFIG_DRM=y\n")
+        (tmp_path / "overlay").write_text("")
+        (tmp_path / "config-overlay-missed").write_text("stale\n")
+        self._run(tmp_path, "overlay_apply; overlay_report")
+        assert (tmp_path / ".config").read_text() == "CONFIG_DRM=y\n"
+        assert (tmp_path / "config-overlay-missed").read_text() == ""
 
 
 # ------------------------------------------------------------------

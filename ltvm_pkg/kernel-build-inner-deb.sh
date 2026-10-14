@@ -32,6 +32,7 @@ BUILD=/build/kernel-src
 # for the full list of exports it provides).
 # shellcheck disable=SC1091
 source /input/staging/cross-compile-env.sh
+source /input/staging/kernel-config-overlay.sh
 
 echo "=== kernel-build-inner-deb.sh ==="
 echo "    Jobs: ${JOBS}"
@@ -164,7 +165,6 @@ if [[ "$TARGET_ARCH" == "aarch64" && "$HOST_ARCH" != "aarch64" ]]; then
 	scripts/config --disable NFC
 	scripts/config --disable CAN
 	scripts/config --disable BT
-	scripts/config --disable INFINIBAND
 	scripts/config --disable USB_GADGET
 	scripts/config --disable PCI_ENDPOINT
 	scripts/config --disable CORESIGHT
@@ -178,6 +178,8 @@ if [[ "$TARGET_ARCH" == "aarch64" && "$HOST_ARCH" != "aarch64" ]]; then
 	scripts/config --disable MFD_CORE
 	scripts/config --disable IIO
 fi
+
+overlay_apply
 
 # Apply the microvm config fragment on top
 if [[ -f scripts/kconfig/merge_config.sh ]]; then
@@ -214,6 +216,7 @@ done
 
 echo "--- Running olddefconfig..."
 make "${MAKE_ARCH_FLAGS[@]}" olddefconfig 2>&1 | tail -3
+overlay_report
 
 # Verify critical overrides survived olddefconfig
 echo "--- Verifying config overrides..."
