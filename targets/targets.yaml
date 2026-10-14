@@ -517,6 +517,11 @@ targets:
         CONFIG_NFSD: m
         CONFIG_SCSI_DEBUG: m
         CONFIG_BLK_DEV_NULL_BLK: m
+        # ko2iblnd (Lustre configures --with-o2ib=yes) and SoftRoCE
+        CONFIG_INFINIBAND: m
+        CONFIG_INFINIBAND_USER_ACCESS: m
+        CONFIG_INFINIBAND_ADDR_TRANS: y
+        CONFIG_RDMA_RXE: m
       default: 7.0.0-14-ubuntu26
     lustre:
       mode: server_ldiskfs
@@ -539,11 +544,6 @@ targets:
       config:
         <<: *ubuntu2604_server_config
         CONFIG_LOCALVERSION: '"-lustre"'
-        # ko2iblnd (Lustre configures --with-o2ib=yes) and SoftRoCE
-        CONFIG_INFINIBAND: m
-        CONFIG_INFINIBAND_USER_ACCESS: m
-        CONFIG_INFINIBAND_ADDR_TRANS: y
-        CONFIG_RDMA_RXE: m
       default: 6.12-debian13
     lustre:
       mode: server_ldiskfs
