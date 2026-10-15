@@ -672,6 +672,45 @@ class TestWaitForSshQemuExit:
         assert "SSH not ready after" in msg
 
 
+class TestEmulatedGuestsWaitLonger:
+    """A TCG guest gets TCG_SSH_WAIT_FACTOR times the ssh budget."""
+
+    def _elapsed(self, emulated: bool, monkeypatch) -> int:
+        import re
+
+        from ltvm_pkg.vm_net import wait_for_ssh
+        from ltvm_pkg.vm_state import VMInfo
+
+        vm = VMInfo(name="co9-x", ip="192.168.100.9", arch="aarch64", pid=0)
+        clock = _FakeClock()
+        with (
+            patch(
+                "ltvm_pkg.vm_net.run_ssh",
+                return_value=_ssh_result(255, "No route to host"),
+            ),
+            patch("ltvm_pkg.vm_net.emulated", return_value=emulated),
+            patch(
+                "ltvm_pkg.vm_net.time.monotonic", side_effect=clock.monotonic
+            ),
+            patch("ltvm_pkg.vm_net.time.sleep", side_effect=clock.sleep),
+            patch("ltvm_pkg.vm_net.die", side_effect=SystemExit) as die,
+        ):
+            with pytest.raises(SystemExit):
+                wait_for_ssh(vm.ip, max_wait=120, vm=vm)
+        m = re.search(r"after (\d+)s", die.call_args.args[0])
+        assert m
+        return int(m.group(1))
+
+    def test_emulated_guest_waits_longer(self, monkeypatch) -> None:
+        monkeypatch.delenv("LTVM_SSH_TIMEOUT", raising=False)
+        assert self._elapsed(False, monkeypatch) < 200
+        assert self._elapsed(True, monkeypatch) >= 600
+
+    def test_an_explicit_timeout_is_kept(self, monkeypatch) -> None:
+        monkeypatch.setenv("LTVM_SSH_TIMEOUT", "120")
+        assert self._elapsed(True, monkeypatch) < 200
+
+
 class _FakeClock:
     """time.monotonic that only moves when wait_for_ssh sleeps."""
 

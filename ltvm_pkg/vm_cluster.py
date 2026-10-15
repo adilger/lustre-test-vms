@@ -22,6 +22,7 @@ from .vm_net import (
     SSH_KEEPALIVE_OPTS,
     SSH_OPTS,
     run_ssh,
+    ssh_wait_budget,
     ssh_wait_cap,
     sshpass_argv,
     sshpass_ssh_argv,
@@ -535,7 +536,10 @@ def _create_one_node(
 
     try:
         r = _run_prefixed(
-            cmd, node.name, timeout=_node_create_timeout() + wait_seconds
+            cmd,
+            node.name,
+            timeout=_node_create_timeout(_node_arch(os_target, arch))
+            + wait_seconds,
         )
     except subprocess.TimeoutExpired as e:
         # See _write_cluster_local_sh: don't propagate out of the parallel
@@ -595,7 +599,19 @@ def _run_prefixed(
 _NODE_CREATE_HEADROOM = 270
 
 
-def _node_create_timeout() -> int:
+def _node_arch(os_target: str | None, arch: str | None) -> str:
+    """The arch a node's `ltvm create` will boot."""
+    if arch:
+        return arch
+    from .target_config import TargetConfig
+
+    try:
+        return TargetConfig(os_target or DEFAULT_TARGET).arch
+    except Exception:
+        return "x86_64"
+
+
+def _node_create_timeout(arch: str = "x86_64") -> int:
     """Wall-clock budget for one node's child `ltvm create`.
 
     A backstop over the child's own limits, which end it first: the
@@ -607,7 +623,11 @@ def _node_create_timeout() -> int:
     """
     from .vm_commands import KDUMP_SEED_BUDGET
 
-    return ssh_wait_cap(SSH_TIMEOUT) + KDUMP_SEED_BUDGET + _NODE_CREATE_HEADROOM
+    return (
+        ssh_wait_cap(ssh_wait_budget(SSH_TIMEOUT, arch))
+        + KDUMP_SEED_BUDGET
+        + _NODE_CREATE_HEADROOM
+    )
 
 
 def _node_targets(

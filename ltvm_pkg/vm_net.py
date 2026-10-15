@@ -27,6 +27,7 @@ from .vm_state import (
     VM_DIR,
     VMInfo,
     VMNotFound,
+    qemu_machine_for_arch,
     subnet_for_nic,
 )
 
@@ -1023,6 +1024,25 @@ def ssh_wait_cap(max_wait: int) -> int:
     return max_wait * SSH_WAIT_STRETCH
 
 
+# An emulated (TCG) guest boots several times slower, and can be quiet
+# on its console for minutes: Debian's kdump-tools rebuilds its
+# initramfs at boot.
+TCG_SSH_WAIT_FACTOR = 5
+
+
+def emulated(arch: str) -> bool:
+    """True when QEMU runs an *arch* guest under TCG, not KVM or HVF."""
+    return "accel=tcg" in qemu_machine_for_arch(arch)
+
+
+def ssh_wait_budget(max_wait: int, arch: str) -> int:
+    """*max_wait*, scaled for an emulated guest unless LTVM_SSH_TIMEOUT
+    was set explicitly."""
+    if "LTVM_SSH_TIMEOUT" not in os.environ and emulated(arch):
+        return max_wait * TCG_SSH_WAIT_FACTOR
+    return max_wait
+
+
 def _console_size(vm: VMInfo | None) -> int:
     if vm is None:
         return -1
@@ -1054,6 +1074,8 @@ def wait_for_ssh(
     connects (ssh_permanent_failure), and, given *vm*, a QEMU that has
     exited.  Otherwise the timeout error carries the last probe's stderr.
     """
+    if vm is not None:
+        max_wait = ssh_wait_budget(max_wait, vm.arch)
     # Announce the wait: this is the one step in create/start that can
     # take tens of seconds, and it is silent otherwise.  stderr, so
     # --json callers still get a clean stdout.

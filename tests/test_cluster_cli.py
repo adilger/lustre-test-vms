@@ -2495,6 +2495,19 @@ class TestNodeCreateProgress:
             ssh_wait_cap(SSH_TIMEOUT) + KDUMP_SEED_BUDGET
         )
 
+    def test_an_emulated_node_gets_the_longer_wait(self, monkeypatch) -> None:
+        """The child waits TCG_SSH_WAIT_FACTOR times longer for an
+        emulated guest; the backstop must not cut it short."""
+        from ltvm_pkg.vm_commands import KDUMP_SEED_BUDGET
+        from ltvm_pkg.vm_net import TCG_SSH_WAIT_FACTOR, ssh_wait_cap
+        from ltvm_pkg.vm_state import SSH_TIMEOUT
+
+        monkeypatch.delenv("LTVM_SSH_TIMEOUT", raising=False)
+        monkeypatch.setattr("ltvm_pkg.vm_net.emulated", lambda arch: True)
+        assert vm_cluster._node_create_timeout("aarch64") > (
+            ssh_wait_cap(SSH_TIMEOUT * TCG_SSH_WAIT_FACTOR) + KDUMP_SEED_BUDGET
+        )
+
 
 class TestClusterMemoryPreflight:
     """A cluster that cannot fit is refused before any node is made."""
