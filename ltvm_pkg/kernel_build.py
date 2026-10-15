@@ -986,6 +986,30 @@ def _build_config_overlay(target_config: TargetConfig) -> str:
     )
 
 
+# What Lustre's ko2iblnd needs from the kernel (rdma_cm).
+_INFINIBAND_SYMBOLS = ("CONFIG_INFINIBAND", "CONFIG_INFINIBAND_ADDR_TRANS")
+
+
+def infiniband_opt_out(target_config: TargetConfig) -> bool:
+    """Whether this target's kernel goes without InfiniBand on purpose.
+
+    True when the forced fragment or kernels.config turns
+    CONFIG_INFINIBAND or CONFIG_INFINIBAND_ADDR_TRANS off, or
+    kernels.config whites one out, leaving it to the kernel's own
+    config.  Recorded in meta.json; the Lustre build configures
+    --with-o2ib=no for a kernel without InfiniBand only when it is set.
+    """
+    if target_config.kernel_config_whiteouts & set(_INFINIBAND_SYMBOLS):
+        return True
+    for line in _build_config_fragment(target_config).splitlines():
+        line = line.strip()
+        if _config_key(line) in _INFINIBAND_SYMBOLS and line.endswith("=n"):
+            return True
+        if any(line == f"# {s} is not set" for s in _INFINIBAND_SYMBOLS):
+            return True
+    return False
+
+
 def _stage_config_inputs(target_config: TargetConfig, staging: Path) -> None:
     """Write the config fragment and overlay, and the shared shell
     helpers every inner build script sources, into the staging dir."""
@@ -1120,6 +1144,7 @@ def _finalize_kernel_build(
         # matches the vmcore it is about to be paired with.
         "kernel_build_id": kernel_build_id,
         "config_overlay_missed": overlay_missed,
+        "infiniband_opt_out": infiniband_opt_out(target_config),
         "built_at": datetime.now(timezone.utc).isoformat(),
         **extra_meta,
     }

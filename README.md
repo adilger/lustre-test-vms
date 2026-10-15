@@ -239,10 +239,13 @@ timeout = 7200
 Kernel and image builds have no limit.
 
 Lustre is configured `--with-o2ib=yes`, building ko2iblnd against the
-kernel's own InfiniBand stack, unless the kernel was built without one
-(no rdma_cm symbols in its Module.symvers): then the build says so and
-uses `--with-o2ib=no`.  `--configure --with-o2ib=...`, or the same in a
-target's `configure_args`, always overrides that choice.
+kernel's own InfiniBand stack, which every kernel gets from the shared
+config overlay.  A kernel whose target turns InfiniBand off on purpose
+(`CONFIG_INFINIBAND: n` in its `kernels.config`) gets `--with-o2ib=no`,
+with a note.  Any other kernel without it -- built before the overlay,
+or one the overlay could not change -- is refused, with what to do:
+rebuild the kernel, or pass `--configure --with-o2ib=no`.  That flag, or
+the same in a target's `configure_args`, always overrides the choice.
 
 `target` sub-actions:
 

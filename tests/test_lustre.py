@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -949,9 +950,11 @@ class TestRegisterGitExclude:
 
 
 class TestO2ibDetection:
-    """--with-o2ib=yes is the default, but configure fails outright on a
-    kernel built without InfiniBand, so such a kernel gets =no -- unless
-    a target or the user named an o2ib setting, which always wins."""
+    """--with-o2ib=yes is the default, and configure fails outright on a
+    kernel built without InfiniBand.  Such a kernel gets =no only when
+    its meta.json records that its target turned IB off on purpose;
+    otherwise the build is refused.  An o2ib setting a target or the
+    user named always wins."""
 
     IB_SYMVERS = (
         "0x1\trdma_destroy_id\tdrivers/infiniband/core/rdma_cm\t"
@@ -1002,16 +1005,60 @@ class TestO2ibDetection:
         # ... and keeps the default rather than guessing.
         assert o2ib_configure_flag(tmp_path, None) == "--with-o2ib=yes"
 
-    def test_no_ib_falls_back_with_a_note(
+    def _no_ib_tree(self, tmp_path: Path, meta: dict | None) -> Path:
+        tree = tmp_path / "build-tree"
+        tree.mkdir()
+        (tree / "Module.symvers").write_text(self.NO_IB_SYMVERS)
+        if meta is not None:
+            (tmp_path / "meta.json").write_text(json.dumps(meta))
+        return tree
+
+    def test_opt_out_configures_no_with_a_note(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        (tmp_path / "Module.symvers").write_text(self.NO_IB_SYMVERS)
-        assert o2ib_configure_flag(tmp_path, ["--enable-gss"]) == (
-            "--with-o2ib=no"
+        tree = self._no_ib_tree(
+            tmp_path, {"config_overlay_missed": [], "infiniband_opt_out": True}
         )
+        assert o2ib_configure_flag(tree, ["--enable-gss"]) == "--with-o2ib=no"
         out = capsys.readouterr().out
         assert out.count("\n") == 1
         assert "configuring --with-o2ib=no" in out
+
+    @pytest.mark.parametrize(
+        "meta,cause",
+        [
+            (None, "nothing in its target turns InfiniBand off"),
+            ({"kernel_version": "x"}, "built before the shared config overlay"),
+            (
+                {
+                    "config_overlay_missed": [
+                        "CONFIG_INFINIBAND=m (got n)",
+                        "CONFIG_DRM=n (got m)",
+                    ]
+                },
+                "could not turn on CONFIG_INFINIBAND=m (got n)",
+            ),
+            (
+                {"config_overlay_missed": [], "infiniband_opt_out": False},
+                "nothing in its target turns InfiniBand off",
+            ),
+        ],
+    )
+    def test_no_ib_without_opt_out_is_refused(
+        self, tmp_path: Path, meta: dict | None, cause: str
+    ) -> None:
+        tree = self._no_ib_tree(tmp_path, meta)
+        with pytest.raises(RuntimeError) as exc:
+            o2ib_configure_flag(tree, None, "rocky8", "aarch64")
+        msg = str(exc.value)
+        assert cause in msg
+        assert "CONFIG_DRM" not in msg
+        assert "ltvm build kernel rocky8 --arch aarch64" in msg
+        assert "--configure=--with-o2ib=no" in msg
+
+    def test_empty_symvers_cannot_tell(self, tmp_path: Path) -> None:
+        (tmp_path / "Module.symvers").write_text("")
+        assert kernel_has_o2ib(tmp_path)[0] is None
 
     @pytest.mark.parametrize(
         "explicit",
@@ -1034,9 +1081,17 @@ class TestO2ibDetection:
         assert o2ib_configure_flag(tmp_path, explicit) == "--with-o2ib=yes"
         assert capsys.readouterr().out == ""
 
-    def _script(self, tmp_path: Path, symvers: str, extra=None) -> str:
+    def _build(
+        self, tmp_path: Path, symvers: str, extra=None, opt_out=False
+    ) -> tuple[list[str], Exception | None]:
+        """The podman scripts build_lustre ran, and what it raised."""
         lustre, kernel = TestTreeClaim()._tree(tmp_path)
         (kernel / "Module.symvers").write_text(symvers)
+        (kernel.parent / "meta.json").write_text(
+            json.dumps(
+                {"config_overlay_missed": [], "infiniband_opt_out": opt_out}
+            )
+        )
         captured: list[str] = []
 
         def mock_run(cmd, *args, **kwargs):
@@ -1044,6 +1099,7 @@ class TestO2ibDetection:
                 captured.append(cmd[-1])
             return _make_completed(0)
 
+        raised = None
         with (
             patch("ltvm_pkg.lustre_build.subprocess.run", side_effect=mock_run),
             patch(
@@ -1063,16 +1119,28 @@ class TestO2ibDetection:
                     extra_configure=extra,
                     force=False,
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                raised = e
+        return captured, raised
+
+    def _script(self, tmp_path: Path, symvers: str, **kw) -> str:
+        captured, _ = self._build(tmp_path, symvers, **kw)
         assert captured, "podman run was not called"
         return captured[0]
 
-    def test_build_configures_no_for_a_kernel_without_ib(
+    def test_build_configures_no_for_an_opted_out_kernel(
         self, tmp_path: Path
     ) -> None:
-        script = self._script(tmp_path, self.NO_IB_SYMVERS)
+        script = self._script(tmp_path, self.NO_IB_SYMVERS, opt_out=True)
         assert "--with-linux=/kernel --with-o2ib=no" in script
+
+    def test_build_refuses_a_kernel_without_ib_by_accident(
+        self, tmp_path: Path
+    ) -> None:
+        captured, raised = self._build(tmp_path, self.NO_IB_SYMVERS)
+        assert captured == []
+        assert isinstance(raised, RuntimeError)
+        assert "Kernel has no InfiniBand" in str(raised)
 
     def test_build_keeps_yes_for_a_kernel_with_ib(self, tmp_path: Path) -> None:
         script = self._script(tmp_path, self.IB_SYMVERS)

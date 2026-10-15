@@ -61,6 +61,7 @@ class KernelMeta(_BaseMeta, total=False):
     built_at: str
     kernel_build_id: str
     config_overlay_missed: list[str]
+    infiniband_opt_out: bool
 
 
 class ImageMeta(_BaseMeta, total=False):

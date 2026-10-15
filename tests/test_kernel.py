@@ -24,6 +24,7 @@ from ltvm_pkg.kernel_build import (
     apply_srpm_override,
     diagnose_srpm_not_found,
     download_srpm,
+    infiniband_opt_out,
     kernel_status,
     parse_lustre_target,
     resolve_lustre_files,
@@ -721,6 +722,38 @@ class TestBuildConfigOverlay:
     def test_no_overlay_file(self, tmp_targets: Path) -> None:
         (tmp_targets / "targets" / "common" / "kernel-config.overlay").unlink()
         assert _build_config_overlay(_make_config(tmp_targets)) == ""
+
+
+class TestInfinibandOptOut:
+    """meta.json's infiniband_opt_out: the target turned IB off on
+    purpose, so the Lustre build may configure --with-o2ib=no."""
+
+    def test_default_target_does_not_opt_out(self, tmp_targets: Path) -> None:
+        assert infiniband_opt_out(_make_config(tmp_targets)) is False
+
+    @pytest.mark.parametrize(
+        "config",
+        [
+            {"CONFIG_INFINIBAND": "n"},
+            {"CONFIG_INFINIBAND": False},
+            {"CONFIG_INFINIBAND_ADDR_TRANS": "n"},
+            {"CONFIG_INFINIBAND": None},
+        ],
+    )
+    def test_target_turns_it_off(self, tmp_targets: Path, config: dict) -> None:
+        _with_kernel_config(tmp_targets, config)
+        assert infiniband_opt_out(_make_config(tmp_targets)) is True
+
+    def test_target_turning_it_on_is_not_an_opt_out(
+        self, tmp_targets: Path
+    ) -> None:
+        _with_kernel_config(tmp_targets, {"CONFIG_INFINIBAND": "m"})
+        assert infiniband_opt_out(_make_config(tmp_targets)) is False
+
+    def test_shared_fragment_not_set(self, tmp_targets: Path) -> None:
+        frag = tmp_targets / "targets" / "common" / "kernel-config.fragment"
+        frag.write_text(frag.read_text() + "# CONFIG_INFINIBAND is not set\n")
+        assert infiniband_opt_out(_make_config(tmp_targets)) is True
 
 
 class TestOverlayHelper:

@@ -749,19 +749,22 @@ def kernel_has_o2ib(build_tree: Path) -> tuple[bool | None, str]:
     symbol, built-in or modular, so rdma_cm's are there exactly when
     o2iblnd can link.  Without it, CONFIG_INFINIBAND and
     CONFIG_INFINIBAND_ADDR_TRANS in .config (or autoconf.h) stand in.
-    Returns (None, reason) when the tree says nothing either way.
+    An empty Module.symvers counts as none.  Returns (None, reason)
+    when the tree says nothing either way.
     """
     symvers = build_tree / "Module.symvers"
     try:
         with symvers.open(errors="replace") as fp:
-            found = {
-                f[1]
-                for line in fp
-                if len(f := line.split("\t")) > 1 and f[1] in _O2IB_SYMBOLS
-            }
+            lines = 0
+            found: set[str] = set()
+            for line in fp:
+                lines += 1
+                f = line.split("\t")
+                if len(f) > 1 and f[1] in _O2IB_SYMBOLS:
+                    found.add(f[1])
     except OSError:
-        pass
-    else:
+        lines = 0
+    if lines:
         if found:
             return (True, "rdma_cm symbols in Module.symvers")
         return (False, "no rdma_destroy_id in its Module.symvers")
@@ -796,25 +799,61 @@ def _names_o2ib(extra_configure: list[str] | None) -> bool:
     )
 
 
-def o2ib_configure_flag(
-    build_tree: Path, extra_configure: list[str] | None
+def _o2ib_refusal(
+    build_tree: Path, meta: dict, why: str, target: str, arch: str
 ) -> str:
-    """``--with-o2ib=yes``, or ``=no`` for a kernel without InfiniBand.
+    """Why a kernel without InfiniBand is not built --with-o2ib=no."""
+    missed = [
+        m for m in meta.get("config_overlay_missed") or [] if "INFINIBAND" in m
+    ]
+    if missed:
+        cause = "the shared config overlay could not turn on " + ", ".join(
+            missed
+        )
+    elif meta and "config_overlay_missed" not in meta:
+        cause = "it was built before the shared config overlay added it"
+    else:
+        cause = "nothing in its target turns InfiniBand off"
+    return (
+        f"Kernel has no InfiniBand ({why}), and {cause}.  "
+        f"Rebuild it (ltvm build kernel {target} --arch {arch} "
+        f"--kernel {build_tree.parent.name}), turn InfiniBand off in the "
+        f"target's kernels.config (CONFIG_INFINIBAND: n), or build without "
+        f"ko2iblnd: --configure=--with-o2ib=no"
+    )
 
-    yes is the default (ko2iblnd for SoftRoCE testing), but configure
-    fails outright on a kernel built without IB -- the locally built
-    rocky9 aarch64 kernels and ubuntu2604-server's first one are --
-    so such a kernel gets no, with a note.  An explicit --with-o2ib or
-    --without-o2ib from configure_args or --configure is never
-    overridden: it is appended later and wins either way.
+
+def o2ib_configure_flag(
+    build_tree: Path,
+    extra_configure: list[str] | None,
+    target: str = DEFAULT_TARGET,
+    arch: str = "x86_64",
+) -> str:
+    """``--with-o2ib=yes``, or ``=no`` for a kernel built without
+    InfiniBand on purpose.
+
+    Every kernel gets InfiniBand from the shared config overlay, so one
+    without it is stale or a missed overlay entry unless its meta.json
+    records ``infiniband_opt_out``; that is refused rather than quietly
+    built without ko2iblnd.  An explicit --with-o2ib or --without-o2ib
+    from configure_args or --configure is appended later and wins.
     """
     if _names_o2ib(extra_configure):
         return "--with-o2ib=yes"
     has, why = kernel_has_o2ib(build_tree)
-    if has is False:
-        print(f"  Kernel has no InfiniBand ({why}): configuring --with-o2ib=no")
+    if has is not False:
+        return "--with-o2ib=yes"
+    try:
+        meta = json.loads((build_tree.parent / "meta.json").read_text())
+    except (OSError, ValueError):
+        meta = {}
+    if meta.get("infiniband_opt_out"):
+        print(
+            f"  Kernel is built without InfiniBand ({why}): "
+            f"configuring --with-o2ib=no"
+        )
         return "--with-o2ib=no"
-    return "--with-o2ib=yes"
+    raise RuntimeError(_o2ib_refusal(build_tree, meta, why, target, arch))
 
 
 def _build_in_container(
@@ -1076,8 +1115,9 @@ def _build_in_container(
     # extra_configure is appended after this line, and autoconf takes
     # the last spelling of a flag, so a target's configure_args or
     # `--configure --with-o2ib=no` still opts out.  A kernel built
-    # without InfiniBand gets --with-o2ib=no (o2ib_configure_flag).
-    o2ib = o2ib_configure_flag(build_tree, extra_configure)
+    # without InfiniBand on purpose gets --with-o2ib=no, and any other
+    # kernel without it is refused (o2ib_configure_flag).
+    o2ib = o2ib_configure_flag(build_tree, extra_configure, target, arch)
     cfg = f"./configure --with-linux=/kernel {o2ib}"
     if cross_compiling:
         cfg += f" --host={xinfo.triple}"

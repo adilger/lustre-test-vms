@@ -1187,16 +1187,25 @@ target's kernel build tree.  Output goes to the Lustre
 tree's `.ltvm-staging/<target>/<arch>/<kernel>[/<variant>]/`.
 
 configure gets `--with-o2ib=yes` (the in-kernel ko2iblnd, for
-SoftRoCE), except on a kernel built without InfiniBand, where it fails
-outright: `lustre_build.o2ib_configure_flag` reads the build-tree --
-rdma_cm's `rdma_destroy_id` in Module.symvers, else
-`CONFIG_INFINIBAND` and `CONFIG_INFINIBAND_ADDR_TRANS` in .config or
-autoconf.h -- and switches to `--with-o2ib=no` with a one-line note.
-An o2ib setting in configure_args or `--configure` is never
-overridden; it is appended after the default and wins.  Every Lustre
-build goes through it: `build lustre`/`all`, deploy-lustre, cluster
-deploy and make-install.  The ZFS and MOFED-kmod builds do not
-configure Lustre.
+SoftRoCE), which fails outright on a kernel without InfiniBand.  Every
+kernel gets IB from the shared overlay (above), so one without it is
+either meant to be (its target sets `CONFIG_INFINIBAND` or
+`CONFIG_INFINIBAND_ADDR_TRANS` to n, or whites one out with null, in
+kernels.config or a shared fragment) or wrong: built before the
+overlay, or the overlay missed it.  The kernel build records the first
+as `infiniband_opt_out` in meta.json (`kernel_build.infiniband_opt_out`).
+`lustre_build.o2ib_configure_flag` reads the build-tree -- rdma_cm's
+`rdma_destroy_id` in Module.symvers, else `CONFIG_INFINIBAND` and
+`CONFIG_INFINIBAND_ADDR_TRANS` in .config or autoconf.h -- and for a
+kernel without IB configures `--with-o2ib=no` with a one-line note when
+the opt-out is recorded, and otherwise refuses the build, naming the
+cause (no record, predates the overlay, or the `config_overlay_missed`
+entry) and the fixes.  A refusal rather than a quiet `=no`, because a
+Lustre built without ko2iblnd surfaces much later, as an o2ib or
+SoftRoCE LNet setup with no LND.  An o2ib setting in configure_args or
+`--configure` skips all of it; it is appended after the default and
+wins.  Every Lustre build goes through it: `build lustre`/`all`,
+deploy-lustre, cluster deploy and make-install.
 
 The container runs under `podman run --timeout`, as the ZFS and
 MOFED-kmod builds do ([ltvm_pkg/build_timeout.py](ltvm_pkg/build_timeout.py)):
