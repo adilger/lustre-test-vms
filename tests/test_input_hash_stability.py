@@ -26,7 +26,7 @@ from ltvm_pkg.target_config import TargetConfig
 
 # (target, artifact, kernel, variant, expected)
 GOLDEN = [
-    ("rocky8", "container", None, None, "c2fdbaa66888488a"),
+    ("rocky8", "container", None, None, "05ec17e26c081652"),
     ("rocky8", "kernel", None, None, "a91e727a723c16f8"),
     ("rocky8", "image", None, None, "b4a8febae2397861"),
     ("rocky9", "container", None, None, "4a58226592cb2cf5"),

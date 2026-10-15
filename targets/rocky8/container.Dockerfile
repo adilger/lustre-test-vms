@@ -32,6 +32,16 @@ RUN dnf -y install gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu 2>/dev/null 
     && dnf -y install gcc-x86_64-linux-gnu binutils-x86_64-linux-gnu 2>/dev/null || true \
     && dnf clean all
 
+# EPEL8's aarch64 cross gcc (GCC 12) cannot build the EL8 kernel's
+# ARMv8.4 TLBI instructions with its plain assembler; see the script.
+COPY rocky8/aarch64-cross-as.sh /tmp/aarch64-cross-as.sh
+RUN d=/usr/aarch64-linux-gnu/bin \
+    && if [ -x $d/as ]; then \
+        mv $d/as $d/as.real \
+        && install -m 0755 /tmp/aarch64-cross-as.sh $d/as; \
+    fi \
+    && rm /tmp/aarch64-cross-as.sh
+
 ENV PATH="/usr/lib64/ccache:${PATH}"
 ENV CCACHE_DIR="/ccache"
 
