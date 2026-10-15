@@ -1076,6 +1076,7 @@ Per-target keys:
 | kernels.default | 5.14-rhel9.7 | Default kernel |
 | kernels.available | [5.14-rhel9.7, ...] | Buildable kernels |
 | kernels.config | {CONFIG_XEN_PVH: y} | Per-target config overrides (null whites out a shared entry) |
+| kernels.arch_config | {aarch64: {CONFIG_NFP: n}} | Overrides for one arch's kernel, on top of kernels.config; moves only that arch's kernel hash |
 | variants | {mofed-24: {...}} | Optional add-on variants |
 
 ### Package Lists

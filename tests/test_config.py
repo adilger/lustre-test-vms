@@ -1325,6 +1325,52 @@ class TestSchemaValidation:
         }
 
 
+class TestKernelArchConfig:
+    """kernels.arch_config: config for one arch's kernel, which moves
+    only that arch's kernel hash."""
+
+    @staticmethod
+    def _write(tmp_targets: Path, arch_config: dict | None) -> None:
+        import copy
+
+        data = copy.deepcopy(_ROCKY9_YAML)
+        if arch_config is not None:
+            data["targets"]["rocky9"]["kernels"]["arch_config"] = arch_config
+        _write_targets_yaml(tmp_targets / "targets", data)
+
+    def test_merged_for_its_arch_only(self, tmp_targets: Path) -> None:
+        self._write(
+            tmp_targets,
+            {"aarch64": {"CONFIG_NFP": False, "CONFIG_XEN_PVH": None}},
+        )
+        x86 = _make_config(tmp_targets)
+        arm = _make_config(tmp_targets, arch="aarch64")
+        assert x86.kernel_config_overrides == {"CONFIG_XEN_PVH": "y"}
+        assert x86.kernel_config_whiteouts == frozenset()
+        assert arm.kernel_config_overrides == {"CONFIG_NFP": "n"}
+        assert arm.kernel_config_whiteouts == {"CONFIG_XEN_PVH"}
+
+    def test_moves_only_its_arch_hashes(self, tmp_targets: Path) -> None:
+        self._write(tmp_targets, None)
+        before = {
+            (arch, art): _make_config(tmp_targets, arch=arch).input_hash(art)
+            for arch in ("x86_64", "aarch64")
+            for art in ("container", "kernel", "image")
+        }
+        self._write(tmp_targets, {"aarch64": {"CONFIG_NFP": "n"}})
+        after = {
+            (arch, art): _make_config(tmp_targets, arch=arch).input_hash(art)
+            for arch, art in before
+        }
+        moved = {k for k in before if before[k] != after[k]}
+        assert moved == {("aarch64", "kernel")}
+
+    def test_must_map_arch_to_config(self, tmp_targets: Path) -> None:
+        self._write(tmp_targets, {"aarch64": ["CONFIG_NFP=n"]})
+        with pytest.raises(ValueError, match="arch_config"):
+            _make_config(tmp_targets)
+
+
 class TestAmbiguousKernelResolution:
     """A short kernel name can mean more than one built kernel."""
 

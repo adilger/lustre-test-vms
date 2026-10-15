@@ -92,7 +92,9 @@ _KNOWN_TARGET_KEYS = frozenset(
         "zfs",
     }
 )
-_KNOWN_KERNELS_KEYS = frozenset({"available", "config", "default"})
+_KNOWN_KERNELS_KEYS = frozenset(
+    {"arch_config", "available", "config", "default"}
+)
 _KNOWN_KERNEL_ENTRY_KEYS = frozenset({"name", "srpm_version"})
 _KNOWN_LUSTRE_KEYS = frozenset({"mode"})
 _KNOWN_ZFS_KEYS = frozenset({"version"})
@@ -520,6 +522,14 @@ class TargetConfig:
                 f"target {name!r}: unrecognized key(s) under 'kernels': "
                 f"{', '.join(sorted(unknown))}"
             )
+        arch_config = self._kernels.get("arch_config", {})
+        if not isinstance(arch_config, dict) or not all(
+            isinstance(v, dict) for v in arch_config.values()
+        ):
+            raise ValueError(
+                f"target {name!r}: 'kernels.arch_config' must map an arch "
+                f"to its kernel config, e.g. {{aarch64: {{CONFIG_NFP: n}}}}"
+            )
         lustre_block = self._data.get("lustre")
         if isinstance(lustre_block, dict):
             unknown = set(lustre_block) - _KNOWN_LUSTRE_KEYS
@@ -871,14 +881,23 @@ class TargetConfig:
         return {}
 
     @property
+    def _kernel_config_raw(self) -> dict[str, Any]:
+        """kernels.config, with kernels.arch_config's entries for this
+        arch on top."""
+        raw = dict(self._kernels.get("config") or {})
+        raw.update(self._kernels.get("arch_config", {}).get(self.arch) or {})
+        return raw
+
+    @property
     def kernel_config_overrides(self) -> dict[str, str]:
-        """Kernel .config overrides from targets.yaml kernels.config.
+        """Kernel .config overrides from targets.yaml kernels.config and
+        this arch's kernels.arch_config.
 
         Values are normalized to kconfig syntax: YAML booleans (a bare
         ``yes``/``on``/``true`` loads as Python True) become y/n
         instead of leaking ``CONFIG_FOO=True`` into the fragment.
         """
-        raw = self._kernels.get("config", {})
+        raw = self._kernel_config_raw
         return {
             k: ("y" if v is True else "n" if v is False else str(v))
             for k, v in raw.items()
@@ -890,7 +909,7 @@ class TargetConfig:
         """Symbols kernels.config sets to null: the shared overlay and
         fragments do not set them for this target, so the kernel's own
         config decides."""
-        raw = self._kernels.get("config", {})
+        raw = self._kernel_config_raw
         return frozenset(k for k, v in raw.items() if v is None)
 
     def _short_kernel_name(self, name: str) -> str:
@@ -1150,6 +1169,12 @@ class TargetConfig:
         base_data = {
             k: v for k, v in self._data.items() if k not in ("variants", "zfs")
         }
+        # kernels.arch_config reaches the kernel hash through
+        # kernel_config_overrides, for its own arch only.
+        if "arch_config" in self._kernels:
+            base_data["kernels"] = {
+                k: v for k, v in self._kernels.items() if k != "arch_config"
+            }
         h.update(json.dumps(base_data, sort_keys=True).encode())
 
         if artifact == "container":

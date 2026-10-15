@@ -22,6 +22,12 @@ targets:
       - 4.18-rhel8.4
       config:
         CONFIG_XEN_PVH: y
+      arch_config:
+        aarch64:
+          # EPEL8's aarch64 cross gcc is GCC 12, which fails a FIELD_FIT
+          # BUILD_BUG_ON in nfp/bpf/jit.c that EL8's GCC 8 does not (fixed
+          # upstream in 5.9 by 444da3f52407).
+          CONFIG_NFP: n
       default: 4.18-rhel8.10
     lustre:
       mode: server_ldiskfs
