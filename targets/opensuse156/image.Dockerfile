@@ -71,11 +71,15 @@ RUN chmod 0755 /usr/local/sbin/setup-nic-softroce.sh \
 # Source-built tools: IOR, mdtest, iozone, pjdfstest, FlameGraph.  It
 # looks for EL's openmpi path; Leap's openmpi4 is elsewhere, and its
 # libraries are off the loader path for what mpicc builds.  Its drgn
-# install fails on Leap's Python 3.6; drgn goes in under 3.11.
+# install fails on Leap's Python 3.6; drgn goes in under 3.11.  PyPI
+# has no aarch64 drgn wheel for it, and the source build needs headers
+# the image lacks, so an aarch64 image goes without, as every other
+# cross-built image does.
 RUN echo /usr/lib64/mpi/gcc/openmpi4/lib64 > /etc/ld.so.conf.d/openmpi4.conf \
     && ldconfig
 RUN PATH=/usr/lib64/mpi/gcc/openmpi4/bin:$PATH bash /tmp/build-tools.sh
-RUN python3.11 -m pip install drgn && rm -rf /root/.cache/pip
+RUN { python3.11 -m pip install drgn || [ "$(uname -m)" != x86_64 ]; } \
+    && rm -rf /root/.cache/pip
 
 # Lustre-patched e2fsprogs (pinned release)
 RUN bash /tmp/build-e2fsprogs.sh

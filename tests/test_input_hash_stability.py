@@ -58,7 +58,7 @@ GOLDEN = [
     ("debian13", "image", None, None, "481d3564fb72aea1"),
     ("opensuse156", "container", None, None, "d9f755295c83a19c"),
     ("opensuse156", "kernel", None, None, "1535fe6f23487985"),
-    ("opensuse156", "image", None, None, "7404c0953ab8851a"),
+    ("opensuse156", "image", None, None, "deca3fde6fc9a5a2"),
     # A variant must not perturb the base hashes above, and must differ
     # from them.
     ("rocky9", "container", None, "mofed-24", "cc1a03c2d0fda310"),
