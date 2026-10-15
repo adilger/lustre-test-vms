@@ -1137,6 +1137,29 @@ class TestCrossPatchDockerfile:
             "usr/lib/pkgconfig/ext2fs.pc",
         ]
 
+    def test_internal_libblkid_in_lib64_is_dropped(
+        self, tmp_path: Path
+    ) -> None:
+        """Leap's site config puts e2fsprogs' libraries in usr/lib64."""
+        for f in (
+            "usr/lib64/libblkid.so.1",
+            "usr/lib64/libext2fs.so.2",
+            "usr/lib64/libblkid.a",
+            "sbin/blkid",
+            "usr/lib64/libuuid.so.1",
+            "usr/lib64/pkgconfig/uuid.pc",
+            "usr/bin/uuidgen",
+        ):
+            (tmp_path / f).parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / f).write_text("")
+        ib._drop_internal_blkid(tmp_path)
+        left = sorted(
+            str(p.relative_to(tmp_path))
+            for p in tmp_path.rglob("*")
+            if p.is_file()
+        )
+        assert left == ["usr/lib64/libext2fs.so.2"]
+
     def test_system_libblkid_build_is_left_alone(self, tmp_path: Path) -> None:
         """Without its own libblkid, e2fsprogs' fsck stays."""
         (tmp_path / "sbin").mkdir()

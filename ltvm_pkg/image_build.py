@@ -286,38 +286,52 @@ def _prebuild_tools_native(
     log.info("Pre-built tools at %s", output_dir)
 
 
-# e2fsprogs builds its own libblkid when configure finds none, as in a
-# RHEL cross sysroot, along with the tools util-linux also ships.
-_INTERNAL_BLKID = (
-    "lib/libblkid.so*",
-    "usr/lib/libblkid.*",
-    "usr/lib/pkgconfig/blkid.pc",
-    "usr/include/blkid",
-    "sbin/blkid",
-    "sbin/findfs",
-    "sbin/fsck",
-    "usr/share/man/man3/libblkid.3",
-    "usr/share/man/man8/blkid.8",
-    "usr/share/man/man8/findfs.8",
-    "usr/share/man/man8/fsck.8",
-)
+# e2fsprogs builds its own libblkid and libuuid when configure finds
+# none, as in a RHEL or Leap cross sysroot, along with the tools
+# util-linux also ships.
+_LIB_DIRS = ("lib", "lib64", "usr/lib", "usr/lib64")
+_INTERNAL_LIBS = {
+    "blkid": (
+        "usr/lib*/pkgconfig/blkid.pc",
+        "usr/include/blkid",
+        "sbin/blkid",
+        "sbin/findfs",
+        "sbin/fsck",
+        "usr/share/man/man3/libblkid.3",
+        "usr/share/man/man8/blkid.8",
+        "usr/share/man/man8/findfs.8",
+        "usr/share/man/man8/fsck.8",
+    ),
+    "uuid": (
+        "usr/lib*/pkgconfig/uuid.pc",
+        "usr/include/uuid",
+        "usr/bin/uuidgen",
+        "usr/share/man/man3/uuid*.3",
+        "usr/share/man/man1/uuidgen.1",
+    ),
+}
 
 
 def _drop_internal_blkid(prebuilt: Path) -> None:
-    """Remove e2fsprogs' own libblkid and its tools from a prebuild.
+    """Remove e2fsprogs' own libblkid and libuuid, and their tools, from
+    a prebuild.
 
-    It carries no symbol versions, and copied into the image it shadows
+    They carry no symbol versions, and copied into the image they shadow
     util-linux's: systemd's libmount then fails to find
     blkid_probe_lookup_value and init dies at boot.
     """
-    if not any((prebuilt / "lib").glob("libblkid.so*")):
-        return
-    for pattern in _INTERNAL_BLKID:
-        for path in prebuilt.glob(pattern):
-            if path.is_dir() and not path.is_symlink():
-                shutil.rmtree(path)
-            else:
-                path.unlink()
+    for name, extra in _INTERNAL_LIBS.items():
+        if not any(
+            p for d in _LIB_DIRS for p in (prebuilt / d).glob(f"lib{name}.so.*")
+        ):
+            continue
+        patterns = [f"{d}/lib{name}.*" for d in _LIB_DIRS] + list(extra)
+        for pattern in patterns:
+            for path in prebuilt.glob(pattern):
+                if path.is_dir() and not path.is_symlink():
+                    shutil.rmtree(path)
+                else:
+                    path.unlink()
 
 
 def cross_patch_dockerfile(
