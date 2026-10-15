@@ -26,6 +26,7 @@ from unittest.mock import patch
 
 import pytest
 
+from ltvm_pkg import podman_run
 from ltvm_pkg.podman_run import (
     _stderr_matches_cleanup_eof,
     run_podman_with_cleanup,
@@ -236,3 +237,117 @@ class TestCleanupEofDetection:
         r = run_podman_with_cleanup(["true"])
         assert r.returncode == 0
         assert getattr(r, "cleanup_eof", False) is False
+
+
+class TestReclaimOwnership:
+    """Subuid-owned entries a rootless container left go back to the user."""
+
+    def _tree(self, tmp_path: Path) -> Path:
+        root = tmp_path / "build-tree"
+        (root / "init").mkdir(parents=True)
+        (root / "init" / "utsversion-tmp.h").write_text("x")
+        (root / "link").symlink_to("init")
+        return root
+
+    def test_any_foreign_owned(self, tmp_path: Path) -> None:
+        root = self._tree(tmp_path)
+        assert not podman_run._any_foreign_owned(root)
+        assert not podman_run._any_foreign_owned(tmp_path / "gone")
+        real = os.lstat
+        leaf = str(root / "init" / "utsversion-tmp.h")
+
+        def subuid_leaf(p: str | Path) -> os.stat_result:
+            st = real(p)
+            if str(p) != leaf:
+                return st
+            fields = list(st)
+            fields[4] = 102000
+            return os.stat_result(fields)
+
+        with patch.object(podman_run.os, "lstat", side_effect=subuid_leaf):
+            assert podman_run._any_foreign_owned(root)
+
+    def test_nothing_foreign_runs_nothing(self, tmp_path: Path) -> None:
+        root = self._tree(tmp_path)
+        with (
+            patch.object(podman_run.sys, "platform", "linux"),
+            patch.object(podman_run.subprocess, "run") as run,
+        ):
+            podman_run.reclaim_ownership(root)
+        run.assert_not_called()
+
+    def test_chowns_subuid_entries_under_unshare(self, tmp_path: Path) -> None:
+        ok = subprocess.CompletedProcess([], 0, "", "")
+        with (
+            patch.object(podman_run.sys, "platform", "linux"),
+            patch.object(podman_run.os, "geteuid", return_value=1000),
+            patch.object(podman_run, "_any_foreign_owned", return_value=True),
+            patch.object(podman_run.subprocess, "run", return_value=ok) as run,
+        ):
+            podman_run.reclaim_ownership(tmp_path)
+        cmd = run.call_args.args[0]
+        assert cmd[:4] == ["podman", "unshare", "find", str(tmp_path)]
+        assert cmd[4:] == [
+            "!", "-uid", "0", "!", "-uid", "65534",
+            "-exec", "chown", "-h", "0:0", "{}", "+",
+        ]  # fmt: skip
+
+    def test_failure_warns(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        bad = subprocess.CompletedProcess([], 1, "", "no subuid mapping")
+        with (
+            patch.object(podman_run.sys, "platform", "linux"),
+            patch.object(podman_run.os, "geteuid", return_value=1000),
+            patch.object(podman_run, "_any_foreign_owned", return_value=True),
+            patch.object(podman_run.subprocess, "run", return_value=bad),
+        ):
+            podman_run.reclaim_ownership(tmp_path)
+        assert "no subuid mapping" in caplog.text
+
+    @pytest.mark.parametrize(
+        ("platform", "euid"), [("darwin", 501), ("linux", 0)]
+    )
+    def test_skipped_off_linux_and_as_root(
+        self, tmp_path: Path, platform: str, euid: int
+    ) -> None:
+        with (
+            patch.object(podman_run.sys, "platform", platform),
+            patch.object(podman_run.os, "geteuid", return_value=euid),
+            patch.object(podman_run, "_any_foreign_owned") as walk,
+            patch.object(podman_run.subprocess, "run") as run,
+        ):
+            podman_run.reclaim_ownership(tmp_path)
+        walk.assert_not_called()
+        run.assert_not_called()
+
+
+class TestRmtree:
+    def test_reclaims_and_retries_when_refused(self, tmp_path: Path) -> None:
+        target = tmp_path / "t"
+        target.mkdir()
+        real = podman_run.shutil.rmtree
+        calls: list[Path] = []
+
+        def refuse_once(p: Path) -> None:
+            calls.append(p)
+            if len(calls) == 1:
+                raise PermissionError(13, "Permission denied")
+            real(p)
+
+        with (
+            patch.object(podman_run.shutil, "rmtree", side_effect=refuse_once),
+            patch.object(podman_run, "reclaim_ownership") as reclaim,
+        ):
+            podman_run.rmtree(target)
+        reclaim.assert_called_once_with(target)
+        assert len(calls) == 2
+        assert not target.exists()
+
+    def test_no_reclaim_when_rmtree_succeeds(self, tmp_path: Path) -> None:
+        target = tmp_path / "t"
+        target.mkdir()
+        with patch.object(podman_run, "reclaim_ownership") as reclaim:
+            podman_run.rmtree(target)
+        reclaim.assert_not_called()
+        assert not target.exists()

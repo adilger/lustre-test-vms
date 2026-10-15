@@ -971,8 +971,7 @@ def cmd_clean(args: argparse.Namespace) -> int:
     arch (x86_64).  --arch narrows to a specific arch; --all-arches
     wipes the whole artifacts/<target>/ tree.
     """
-    import shutil
-
+    from ltvm_pkg.podman_run import rmtree as podman_rmtree
     from ltvm_pkg.target_config import ARTIFACTS_DIR
 
     use_json = args.json
@@ -1005,7 +1004,7 @@ def cmd_clean(args: argparse.Namespace) -> int:
         if p.exists():
             size = _dir_size_bytes(p)
             try:
-                shutil.rmtree(p)
+                podman_rmtree(p)
             except OSError as e:
                 return _error(f"Failed to remove {p}: {e}", use_json)
             wiped.append({"path": str(p), "bytes": size, "removed": True})

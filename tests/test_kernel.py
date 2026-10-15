@@ -1032,6 +1032,20 @@ class TestRunKernelPodman:
         ):
             _run_kernel_podman(["podman", "run", "foo"], tmp_path)
 
+    def test_reclaims_ownership_even_when_podman_fails(
+        self, tmp_path: Path
+    ) -> None:
+        with (
+            patch(
+                "ltvm_pkg.kernel_build.run_podman_with_cleanup",
+                side_effect=KeyboardInterrupt,
+            ),
+            patch("ltvm_pkg.kernel_build.reclaim_ownership") as reclaim,
+        ):
+            with pytest.raises(KeyboardInterrupt):
+                _run_kernel_podman(["podman", "run", "foo"], tmp_path)
+        reclaim.assert_called_once_with(tmp_path)
+
 
 class TestArchiveOutgoingVmlinux:
     """A rebuild must not destroy the vmlinux a running VM needs."""

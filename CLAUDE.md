@@ -272,6 +272,16 @@ The four inner scripts share the overlay logic through
 all inputs to every kernel's hash.  SRPMs cache under `artifacts/<target>/<arch>/cache/`
 with a Rocky-vault fallback for older minors.
 
+The container's tar and `rsync -a` run as container root and keep a
+source tarball's owners, so the Ubuntu trees' files (uid 2001 in the
+tarball) landed in build-tree/ as one of the user's subuids, which the
+user cannot delete.  `_run_kernel_podman` therefore hands them back
+after every build, failed ones included, and `target clean` and `ltvm
+clean` do the same when a removal is refused
+(`podman_run.reclaim_ownership`, `podman_run.rmtree`).  This is done in
+Python rather than in the inner scripts, whose bytes are in every
+kernel's hash.
+
 ### Image
 
 Built as a container via podman, exported to ext4 with

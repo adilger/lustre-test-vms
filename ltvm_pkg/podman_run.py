@@ -28,6 +28,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -336,3 +337,73 @@ def _tee_stderr(
             src.close()
         except OSError:
             pass
+
+
+def _any_foreign_owned(root: Path) -> bool:
+    """True when anything under *root*, itself included, is not ours."""
+    uid = os.geteuid()
+    try:
+        if os.lstat(root).st_uid != uid:
+            return True
+    except OSError:
+        return False
+    for dirpath, dirnames, filenames in os.walk(root):
+        for name in dirnames + filenames:
+            try:
+                if os.lstat(os.path.join(dirpath, name)).st_uid != uid:
+                    return True
+            except OSError:
+                pass
+    return False
+
+
+def reclaim_ownership(root: Path) -> None:
+    """Hand back what a rootless container left owned by a subuid.
+
+    Container root is the invoking user, but a file it writes with
+    another owner, as tar and ``rsync -a`` do when they keep a source
+    tarball's uid, lands owned by one of the user's subordinate uids,
+    and the user can then not delete entries in its directories.
+    Inside ``podman unshare`` the user is uid 0, those files have their
+    container uids, and other users' files are the overflow uid 65534.
+    """
+    if sys.platform != "linux" or os.geteuid() == 0:
+        return
+    if not _any_foreign_owned(root):
+        return
+    cmd = [
+        "podman",
+        "unshare",
+        "find",
+        os.path.abspath(root),
+        "!",
+        "-uid",
+        "0",
+        "!",
+        "-uid",
+        "65534",
+        "-exec",
+        "chown",
+        "-h",
+        "0:0",
+        "{}",
+        "+",
+    ]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True)
+    except OSError as e:
+        log.warning("Could not reclaim ownership under %s: %s", root, e)
+        return
+    if r.returncode != 0:
+        log.warning(
+            "Could not reclaim ownership under %s: %s", root, r.stderr.strip()
+        )
+
+
+def rmtree(path: Path) -> None:
+    """shutil.rmtree, reclaiming subuid-owned entries when refused."""
+    try:
+        shutil.rmtree(path)
+    except PermissionError:
+        reclaim_ownership(path)
+        shutil.rmtree(path)

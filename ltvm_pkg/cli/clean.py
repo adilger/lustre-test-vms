@@ -20,7 +20,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -33,6 +32,7 @@ from ltvm_pkg.cli.util import (
     _error,
 )
 from ltvm_pkg.paths import load_meta_safe
+from ltvm_pkg.podman_run import rmtree as podman_rmtree
 from ltvm_pkg.target_config import kernel_dir_version_key
 
 
@@ -522,7 +522,7 @@ def cmd_prune(args: argparse.Namespace) -> int:
                 continue
             try:
                 if c.path.is_dir() and not c.path.is_symlink():
-                    shutil.rmtree(c.path)
+                    podman_rmtree(c.path)
                 else:
                     c.path.unlink()
                 removed.append(c)

@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any, TypedDict
 from .cross_compile import host_podman_platform
 from .lustre_tree import kp_configs, kp_patches, kp_series, kp_targets
 from .paths import load_meta_safe
-from .podman_run import run_podman_with_cleanup
+from .podman_run import reclaim_ownership, run_podman_with_cleanup
 from .target_config import TARGETS_DIR
 
 
@@ -159,7 +159,12 @@ def _run_kernel_podman(container_cmd: list[str], kernel_out: Path) -> None:
     the build as a success if the expected kernel outputs are on disk.
     Genuine failures still propagate as ``CalledProcessError``.
     """
-    r = run_podman_with_cleanup(container_cmd, check=True)
+    try:
+        r = run_podman_with_cleanup(container_cmd, check=True)
+    finally:
+        # tar and rsync -a keep a source tarball's owners, which land
+        # in build-tree/ as the user's subuids.
+        reclaim_ownership(kernel_out)
     if r.returncode == 0:
         return
     if getattr(r, "cleanup_eof", False) and _kernel_outputs_complete(
