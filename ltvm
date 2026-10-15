@@ -2279,7 +2279,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--server-only",
         dest="server_only",
         action="store_true",
-        help="Deploy to server nodes only, skipping clients",
+        help="Build for and deploy to the server nodes (MGS, MDS, OSS) "
+        "only, leaving pure clients as they are; with --mount, mount the "
+        "servers only.  With --client-only, puts two Lustre trees on one "
+        "cluster, e.g. 2.15 servers and a master client",
+    )
+    cdpl.add_argument(
+        "--client-only",
+        dest="client_only",
+        action="store_true",
+        help="Build for and deploy to the pure client nodes only, leaving "
+        "the servers as they are",
     )
     cdpl.add_argument(
         "--userspace-only",

@@ -2544,3 +2544,112 @@ class TestClusterMemoryPreflight:
         """rocky10's default_mem is 4096."""
         with pytest.raises(SystemExit):
             self._check(None, [("co3-zil-test", 6144)])
+
+
+class TestCmdClusterDeployServersOrClients:
+    """--server-only and --client-only build for and deploy to part of the
+    cluster, so it can run two trees: 2.15 servers under a master client."""
+
+    def _deploy(
+        self, tmp_path: Path, **flags: object
+    ) -> tuple[list[list[str]], list[str], list[str]]:
+        cluster = ClusterInfo(
+            name="co3",
+            nodes=[
+                {"name": "co3-mds", "roles": ["mgs", "mds"], "mdt_disks": 1},
+                {"name": "co3-oss", "roles": ["oss"], "ost_disks": 2},
+                {"name": "co3-c1", "roles": ["client"]},
+            ],
+        )
+
+        class _TC:
+            os_family = "rhel"
+
+        def vm(name: str) -> MagicMock:
+            client = name.endswith("c1")
+            return MagicMock(
+                os_id="rocky9" if client else "rocky8",
+                arch="x86_64",
+                variant="base",
+                kernel=f"/a/kernels/{'k9' if client else 'k8'}/vmlinuz",
+                ip="10.0.0.5",
+                disk_size=500 << 20,
+            )
+
+        builds: list[list[str]] = []
+
+        def run(cmd: list[str], *a: object, **k: object) -> MagicMock:
+            if cmd[:3] == ["ltvm", "build", "lustre"]:
+                builds.append(cmd)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        deployed: list[str] = []
+        written: list[str] = []
+        with (
+            patch.object(ClusterInfo, "load", return_value=cluster),
+            patch.object(ClusterInfo, "save"),
+            patch.object(vm_cluster.VMInfo, "load", side_effect=vm),
+            patch.object(vm_cluster, "_validate_lustre_source"),
+            patch("ltvm_pkg.target_config.TargetConfig", return_value=_TC()),
+            patch.object(vm_cluster.subprocess, "run", side_effect=run),
+            patch.object(
+                vm_cluster,
+                "_deploy_one_node",
+                side_effect=lambda name, *a, **k: (
+                    deployed.append(name) or (name, 0, "")
+                ),
+            ),
+            patch.object(vm_cluster, "probe_mgs_lnet"),
+            patch.object(vm_cluster, "generate_local_sh", return_value=""),
+            patch.object(
+                vm_cluster,
+                "_write_cluster_local_sh",
+                side_effect=lambda name, *a, **k: (
+                    written.append(name) or (name, 0, "")
+                ),
+            ),
+            patch.object(
+                vm_cluster, "_distribute_cluster_hosts", return_value=[]
+            ),
+        ):
+            vm_cluster.cmd_cluster_deploy(
+                argparse.Namespace(
+                    name="co3",
+                    lustre_source=str(tmp_path),
+                    mount=False,
+                    **flags,
+                )
+            )
+        return builds, deployed, written
+
+    def test_server_only_skips_the_client_and_its_target(
+        self, tmp_path: Path
+    ) -> None:
+        builds, deployed, written = self._deploy(tmp_path, server_only=True)
+        assert [b[3] for b in builds] == ["rocky8"]
+        assert sorted(deployed) == ["co3-mds", "co3-oss"]
+        # Every node still gets the cluster's configuration.
+        assert sorted(written) == ["co3-c1", "co3-mds", "co3-oss"]
+
+    def test_client_only_skips_the_servers(self, tmp_path: Path) -> None:
+        builds, deployed, written = self._deploy(tmp_path, client_only=True)
+        assert [b[3] for b in builds] == ["rocky9"]
+        assert deployed == ["co3-c1"]
+        assert sorted(written) == ["co3-c1", "co3-mds", "co3-oss"]
+
+    def test_no_mount_needed_and_a_full_deploy_is_unchanged(
+        self, tmp_path: Path
+    ) -> None:
+        builds, deployed, _ = self._deploy(tmp_path)
+        assert sorted(b[3] for b in builds) == ["rocky8", "rocky9"]
+        assert sorted(deployed) == ["co3-c1", "co3-mds", "co3-oss"]
+
+    def test_both_or_zfs_for_clients_is_refused(self, tmp_path: Path) -> None:
+        with pytest.raises(SystemExit):
+            self._deploy(tmp_path, server_only=True, client_only=True)
+        with pytest.raises(SystemExit):
+            self._deploy(tmp_path, client_only=True, zfs=True)
+
+    def test_the_cli_refuses_both(self) -> None:
+        rc = cmd_cluster(_ns("deploy", "co1", "--server-only", "--client-only"))
+        assert rc != EXIT_OK

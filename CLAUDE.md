@@ -970,6 +970,15 @@ ltvm cluster list
 sudo ltvm cluster destroy co2
 ```
 
+`cluster deploy --server-only` and `--client-only` build for and deploy
+to the MGS/MDS/OSS nodes, or the pure clients, alone
+(`cmd_cluster_deploy`'s `deploy_nodes`): the rest keep the Lustre they
+have, so two trees share a cluster (2.15 servers, a master client).
+Every node still gets local.sh, /etc/hosts and pdsh.  `--server-only`
+used to mean only `llmount.sh --server-only` and required `--mount`,
+while still building the tree for every node's target, the client's
+included; with `--mount` it still mounts the servers only.
+
 `ltvm cluster krb5 <name>` sets up Kerberos for sanity-krb5
 ([ltvm_pkg/cluster_krb5.py](ltvm_pkg/cluster_krb5.py)): a KDC on the
 first MDS node, each node's lustre_{mgs,mds,oss,root} and host keys in

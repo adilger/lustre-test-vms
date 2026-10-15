@@ -1477,13 +1477,30 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
     except vm_claim.ClaimHeld as e:
         die(str(e))
 
-    # --server-only only affects the llmount.sh invocation, which only
-    # runs when --mount is set.  Reject the combination instead of
-    # silently dropping the flag.
-    if getattr(args, "server_only", False) and not getattr(
-        args, "mount", False
-    ):
-        die("--server-only requires --mount")
+    # The nodes built for and deployed to.  The rest of the cluster keeps
+    # the Lustre it has, which is how one cluster runs two trees (2.15
+    # servers under a master client): every node still gets the cluster's
+    # local.sh, /etc/hosts and pdsh.
+    server_only = bool(getattr(args, "server_only", False))
+    client_only = bool(getattr(args, "client_only", False))
+    if server_only and client_only:
+        die("--server-only and --client-only exclude each other")
+    deploy_nodes = nodes
+    if server_only:
+        deploy_nodes = [n for n in nodes if n.is_mgs or n.is_mds or n.is_oss]
+    elif client_only:
+        # A node that is also a server would lose its server build.
+        deploy_nodes = [
+            n
+            for n in nodes
+            if n.is_client and not (n.is_mgs or n.is_mds or n.is_oss)
+        ]
+    if not deploy_nodes:
+        die(
+            f"cluster {cluster.name!r} has no "
+            f"{'server' if server_only else 'client-only'} nodes to deploy to"
+        )
+    deploying = {n.name for n in deploy_nodes}
 
     # Before the build: a cluster whose MGS cannot name its NID is an
     # error to report now, not after every node is deployed.
@@ -1521,11 +1538,19 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
         # vm.kernel points at .../kernels/<name>/vmlinuz; extract <name>
         kernel_name = Path(vm.kernel).parent.name if vm.kernel else None
         key = (target, kernel_name, vm.arch or "x86_64", vm.variant)
-        groups.setdefault(key, []).append(n.name)
+        if n.name in deploying:
+            groups.setdefault(key, []).append(n.name)
     os_family = _cluster_os_family(node_families)
 
     print(f"=== Deploying to cluster '{cluster.name}' ===")
     print(f"    Build: {build}")
+    if len(deploy_nodes) < len(nodes):
+        kept = [n.name for n in nodes if n.name not in deploying]
+        print(
+            f"    {'Servers' if server_only else 'Clients'} only: "
+            f"{', '.join(sorted(deploying))}; leaving {', '.join(kept)} as "
+            f"they are"
+        )
 
     # Build Lustre from source before deploying, once per distinct
     # target+kernel+arch+variant: nodes sharing one rsync from the same
@@ -1555,13 +1580,21 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
             "userspace-only deploy ships no kernel modules (--fstype zfs "
             "alone keeps a cluster that already has ZFS on it)"
         )
+    if ship_zfs and client_only:
+        die(
+            "--zfs ships ZFS for the servers' targets, and --client-only "
+            "deploys to no server"
+        )
     if ship_zfs and fstype is None:
         fstype = "zfs"
     if fstype is None:
         fstype = cluster.fstype or _deployed_fstype(cluster, os_family)
     if fstype is None:
         fstype = "ldiskfs"
-    want_zfs = ship_zfs or (fstype == "zfs" and not userspace_only)
+    # A pure client never mounts a ZFS target.
+    want_zfs = ship_zfs or (
+        fstype == "zfs" and not userspace_only and not client_only
+    )
     ost_count_arg = getattr(args, "ost_count", None)
     if ost_count_arg is not None and ost_count_arg < 0:
         die("--ost-count must be 0 or more")
@@ -1665,12 +1698,12 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
             for m in members:
                 zfs_by_node[m] = zfs_staging
 
-        print(f"    Deploying to {len(nodes)} nodes in parallel...")
+        print(f"    Deploying to {len(deploy_nodes)} nodes in parallel...")
 
-        # Deploy to all nodes in parallel -- same as single-node deploy,
+        # Deploy to the nodes in parallel -- same as single-node deploy,
         # just run concurrently.
         failed = _parallel_cluster_op(
-            nodes,
+            deploy_nodes,
             lambda node: _deploy_one_node(
                 node.name,
                 build,
@@ -1697,7 +1730,7 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
 
     _now = int(_time.time())
     unrecorded: list[str] = []
-    for node in nodes:
+    for node in deploy_nodes:
         try:
             vm = VMInfo.load(node.name)
             vm.update_deploy(_now, build, vm.kver)
@@ -1818,7 +1851,7 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
             )
             timeout = llmount_timeout(targets, zfs=fstype == "zfs")
         _run_llmount(
-            cluster, os_family, server_only=args.server_only, timeout=timeout
+            cluster, os_family, server_only=server_only, timeout=timeout
         )
         print("=== Lustre mounted ===")
 

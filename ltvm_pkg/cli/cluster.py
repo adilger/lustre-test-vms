@@ -251,8 +251,13 @@ def cmd_cluster_stop(args: argparse.Namespace) -> int:
 
 
 def cmd_cluster_deploy(args: argparse.Namespace) -> int:
-    """Build and deploy Lustre to every node in a cluster."""
+    """Build and deploy Lustre to every node in a cluster, or to its
+    servers or its pure clients only."""
     use_json = args.json
+    if args.server_only and args.client_only:
+        return _error(
+            "--server-only and --client-only exclude each other", use_json
+        )
     return _call(
         _handler("cmd_cluster_deploy"),
         _qemu_ns(
@@ -261,6 +266,7 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> int:
             mount=args.mount,
             mount_timeout=args.mount_timeout,
             server_only=args.server_only,
+            client_only=args.client_only,
             userspace_only=args.userspace_only,
             force_compat=args.force_compat,
             configure=args.configure,

@@ -327,6 +327,24 @@ ltvm cluster create co7 rocky9 mgs+mds+oss:co7-srv:4 client:co7-c16k \
     --node-target co7-c16k=rocky10-16k
 ```
 
+### Two Lustre trees on one cluster (interop)
+
+`cluster deploy --server-only` builds for and deploys to the server
+nodes alone, and `--client-only` to the pure clients alone; the other
+nodes keep the Lustre they have, and every node still gets the
+cluster's local.sh.  So older servers under a master client is two
+deploys, with each tree built only for its own nodes' target:
+
+```bash
+ltvm cluster create co8 rocky8 mgs+mds:co8-mds:2 oss:co8-oss:4 client:co8-c1 \
+    --node-target co8-c1=rocky9
+ltvm cluster deploy co8 --build ~/worktrees/v2_15_8 --server-only
+ltvm cluster deploy co8 --build $CO/1 --client-only --mount
+```
+
+`--server-only --mount` mounts the servers only.  A node that is both a
+server and a client counts as a server.
+
 ### Page sizes larger than 4 KiB
 
 `rocky10-16k` (aarch64, 6.12-rhel10.2) is rocky10 with
