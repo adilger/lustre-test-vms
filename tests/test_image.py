@@ -427,6 +427,19 @@ class TestPrebuildToolsNative:
                 return cmd[cmd.index("-c") + 1]
         raise AssertionError(f"no `-c` invocation among {calls}")
 
+    def test_zypper_installs_its_own_cross_toolchain(
+        self, tmp_path: Path
+    ) -> None:
+        """The native container is reused when it exists, so it may
+        predate the cross gcc its Dockerfile now installs."""
+        script = self._script(tmp_path)
+        z = script[script.index("elif command -v zypper") :]
+        assert z.index("cross-aarch64-gcc7") < z.index(
+            "bash /input/build-tools.sh"
+        )
+        assert "/usr/bin/aarch64-linux-gnu-${t##*/aarch64-suse-linux-}" in z
+        assert "ports/aarch64/distribution/leap/$VER/repo/oss/" in z
+
     def test_script_aborts_on_a_failed_builder_script(
         self, tmp_path: Path
     ) -> None:

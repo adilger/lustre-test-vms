@@ -238,7 +238,14 @@ def _prebuild_tools_native(
         # Leap: an aarch64 sysroot from the ports tree, plus the target
         # libgcc and crt files its cross gcc7 lacks (see lustre_build).
         "elif command -v zypper >/dev/null; then\n"
-        f"  SYSROOT=/sysroot-{arch} && "
+        # The native container is reused when it exists, so it may
+        # predate the cross toolchain its Dockerfile now installs.
+        f"  zypper -n install --no-recommends cross-{arch}-gcc7 "
+        f"cross-{arch}-binutils >/dev/null && "
+        f"for t in /usr/bin/{arch}-suse-linux-*; do "
+        f'ln -sf "$t" "/usr/bin/{arch}-linux-gnu-${{t##*/{arch}-suse-linux-}}"; '
+        "done && "
+        f"SYSROOT=/sysroot-{arch} && "
         f"printf '[main]\\narch = {arch}\\n' > /tmp/zypp-{arch}.conf && "
         'VER=$(. /etc/os-release && echo "$VERSION_ID") && '
         f'Z="env ZYPP_CONF=/tmp/zypp-{arch}.conf zypper --root $SYSROOT -n '
