@@ -1086,6 +1086,16 @@ class TestCrossPatchDockerfile:
         )
         assert "COPY _prebuilt/lib/ /usr/lib64/\n" in out
 
+    def test_a_lib64_prebuild_goes_to_libdir(self, tmp_path: Path) -> None:
+        """A site config that sets lib64 (Leap's) installs there."""
+        (tmp_path / "lib64").mkdir()
+        out = ib.cross_patch_dockerfile(
+            "RUN bash /tmp/build-tools.sh\nRUN bash /tmp/build-e2fsprogs.sh\n",
+            tmp_path,
+            libdir="/usr/lib64/",
+        )
+        assert "COPY _prebuilt/lib64/ /usr/lib64/\n" in out
+
     def test_internal_libblkid_is_dropped(self, tmp_path: Path) -> None:
         for f in (
             "lib/libblkid.so.1",

@@ -12,18 +12,22 @@ COPY common/packages-debug.txt   /tmp/packages-debug.txt
 COPY common/packages-server.txt  /tmp/packages-server.txt
 COPY opensuse156/packages-os.txt /tmp/packages-os.txt
 COPY opensuse156/package-map.txt /tmp/package-map.txt
+COPY common/packages-skip-aarch64.txt /tmp/packages-skip-aarch64.txt
 
 # Translate the shared lists to SUSE names and install.  kernel-devel
 # is dropped (Lustre builds on the host).  --no-recommends keeps the
 # distro kernel out: crash, perf and others recommend kernel-default.
 # --force-resolution and the rpm check after it: see
-# container.Dockerfile.
-RUN zypper -q --gpg-auto-import-keys refresh \
+# container.Dockerfile.  packages-skip-<arch>.txt drops the known
+# per-arch gaps (numatop is x86_64-only).
+RUN SKIP_ARCH=/tmp/packages-skip-$(uname -m).txt \
+    && zypper -q --gpg-auto-import-keys refresh \
     && cat /tmp/packages-base.txt /tmp/packages-test.txt \
            /tmp/packages-debug.txt /tmp/packages-server.txt \
            /tmp/packages-os.txt \
         | grep -v '^\s*#' | grep -v '^\s*$' \
         | grep -v '^kernel-devel$' \
+        | { [ -s "$SKIP_ARCH" ] && grep -vFxf "$SKIP_ARCH" || cat; } \
         | sort -u \
         | awk 'NR==FNR { \
                  if ($0 ~ /^[[:space:]]*#/ || $0 ~ /^[[:space:]]*$/) next; \

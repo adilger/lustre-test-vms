@@ -834,20 +834,9 @@ def _build_in_container(
             f"echo '--- Installing {xinfo.triple} cross-compiler "
             f"and dev libs...'"
         )
-        script_parts.append(
-            f"if command -v dnf &>/dev/null; then "
-            f"dnf -y install gcc-{xinfo.triple} binutils-{xinfo.triple} "
-            f"2>&1 | tail -3 && "
-            f"RELEASE=$(rpm --eval %rhel) && "
-            f"dnf --forcearch={xinfo.target_arch} --releasever=$RELEASE "
-            f"--installroot={sysroot} -y "
-            f"--setopt=tsflags=nodocs --setopt=install_weak_deps=False "
-            f"install "
-            f"glibc-devel kernel-headers libgcc libmount-devel libyaml-devel "
-            f"libnl3-devel libaio-devel libselinux-devel zlib-devel "
-            f"json-c-devel keyutils-libs-devel libuuid-devel krb5-devel "
-            f"openssl-devel "
-            f"2>&1 | tail -5 && "
+        # After the dnf or zypper install: the same sysroot fixups and
+        # exports for either.
+        rpm_sysroot_tail = (
             # An absolute lib*.so link (EL10's libkeyutils.so) resolves
             # to the container's own host-arch library, which the cross
             # linker skips as incompatible.
@@ -894,7 +883,55 @@ def _build_in_container(
             f"SYSROOT={sysroot} bash /ltvm-common/build-e2fsprogs.sh "
             f"2>&1 | tail -5; "
             f"fi; "
-            f"elif command -v apt-get &>/dev/null; then "
+        )
+        script_parts.append(
+            f"if command -v dnf &>/dev/null; then "
+            f"dnf -y install gcc-{xinfo.triple} binutils-{xinfo.triple} "
+            f"2>&1 | tail -3 && "
+            f"RELEASE=$(rpm --eval %rhel) && "
+            f"dnf --forcearch={xinfo.target_arch} --releasever=$RELEASE "
+            f"--installroot={sysroot} -y "
+            f"--setopt=tsflags=nodocs --setopt=install_weak_deps=False "
+            f"install "
+            f"glibc-devel kernel-headers libgcc libmount-devel libyaml-devel "
+            f"libnl3-devel libaio-devel libselinux-devel zlib-devel "
+            f"json-c-devel keyutils-libs-devel libuuid-devel krb5-devel "
+            f"openssl-devel "
+            f"2>&1 | tail -5 && "
+            + rpm_sysroot_tail
+            + f"elif command -v zypper &>/dev/null; then "
+            f"zypper -n install --no-recommends cross-{xinfo.target_arch}-gcc7 "
+            f"cross-{xinfo.target_arch}-binutils 2>&1 | tail -3 && "
+            # zypper takes the arch from its config; ZYPP_CONF swaps it
+            # for these calls only.  Leap's non-x86 trees are under
+            # ports/.
+            f"printf '[main]\\narch = {xinfo.target_arch}\\n' "
+            f"> /tmp/zypp-{xinfo.target_arch}.conf && "
+            f'VER=$(. /etc/os-release && echo "$VERSION_ID") && '
+            f'Z="zypper --root {sysroot} -n --gpg-auto-import-keys" && '
+            f"export ZYPP_CONF=/tmp/zypp-{xinfo.target_arch}.conf && "
+            f"$Z addrepo -f http://download.opensuse.org/"
+            + (
+                ""
+                if xinfo.target_arch == "x86_64"
+                else f"ports/{xinfo.target_arch}/"
+            )
+            + f"distribution/leap/$VER/repo/oss/ oss >/dev/null && "
+            f"$Z addrepo -f http://download.opensuse.org/update/leap/$VER/sle/ "
+            f"sle-update >/dev/null && "
+            f"$Z install --no-recommends "
+            f"glibc-devel linux-glibc-devel libmount-devel libyaml-devel "
+            f"libnl3-devel libaio-devel libselinux-devel zlib-devel "
+            f"libjson-c-devel keyutils-devel libuuid-devel krb5-devel "
+            f"libopenssl-devel gcc7 2>&1 | tail -3 && "
+            f"unset ZYPP_CONF && "
+            # Leap's cross gcc carries no libgcc or crt files for its
+            # target; take them from the sysroot's own gcc7.
+            f"G=/usr/lib64/gcc/{xinfo.target_arch}-suse-linux/7 && "
+            f"for f in {sysroot}$G/crt*.o {sysroot}$G/libgcc*; do "
+            f'ln -sf "$f" "$G/"; done && '
+            + rpm_sysroot_tail
+            + f"elif command -v apt-get &>/dev/null; then "
             f"apt-get update -qq && "
             f"apt-get install -y gcc-{xinfo.apt_triple} 2>&1 | tail -3 && "
             f"dpkg --add-architecture {xinfo.deb_arch} && "
@@ -1002,7 +1039,12 @@ def _build_in_container(
         # Plain space-join would split a quoted value into multiple
         # configure args -- or worse, a metachar in the value would be
         # re-interpreted by the container shell.
-        cfg += " " + " ".join(shlex.quote(a) for a in extra_configure)
+        args = extra_configure
+        if cross_compiling:
+            # A target's own --enable-mpitests (opensuse156 names its
+            # mpicc) would win over --disable-mpitests above.
+            args = [a for a in args if not a.startswith("--enable-mpitests")]
+        cfg += " " + " ".join(shlex.quote(a) for a in args)
 
     cfg_hash = configure_stamp_hash(cfg, zfs_version)
     cfg_stamp = lustre_tree / f".ltvm-configure-{_stamp_suffix(target, arch)}"

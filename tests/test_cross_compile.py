@@ -233,6 +233,37 @@ class TestCrossBuildScript:
         assert 'CROSS_CONFIGURE=""' in apt
         assert " $CROSS_CONFIGURE" in script[script.index("bash autogen.sh") :]
 
+    def test_suse_builds_an_aarch64_sysroot_with_zypper(self, tmp_path) -> None:
+        script = self._script(tmp_path)
+        z = script[
+            script.index("elif command -v zypper") : script.index(
+                "elif command -v apt-get"
+            )
+        ]
+        assert "arch = aarch64" in z
+        assert "ports/aarch64/distribution/leap/$VER/repo/oss/" in z
+        assert "--root /sysroot-aarch64" in z
+        # Leap's cross gcc7 has no target libgcc or crt files.
+        assert "G=/usr/lib64/gcc/aarch64-suse-linux/7" in z
+        assert 'CROSS_CONFIGURE="--with-krb5=/sysroot-aarch64/usr"' in z
+        assert "Cross-building e2fsprogs" in z
+
+    def test_a_targets_mpicc_is_dropped_when_crossing(self, tmp_path) -> None:
+        """opensuse156 names its mpicc, which is the host's."""
+        from tests.test_zfs_wiring import _capture_container_build
+
+        with patch("platform.machine", return_value="x86_64"):
+            cmd = _capture_container_build(
+                tmp_path,
+                arch="aarch64",
+                extra_configure=[
+                    "--enable-mpitests=/usr/lib64/mpi/gcc/openmpi4/bin/mpicc",
+                    "--enable-gss=yes",
+                ],
+            )
+        assert "--enable-mpitests" not in cmd[-1]
+        assert "--enable-gss=yes" in cmd[-1]
+
     def test_mpi_tests_are_off(self, tmp_path) -> None:
         """The container's mpicc builds for the host."""
         script = self._script(tmp_path)

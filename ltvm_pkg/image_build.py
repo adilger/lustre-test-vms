@@ -235,6 +235,27 @@ def _prebuild_tools_native(
         f"-y --setopt=tsflags=nodocs --setopt=install_weak_deps=False "
         f"install glibc-devel kernel-headers libgcc libuuid-devel "
         f"2>&1 | tail -3 && export SYSROOT\n"
+        # Leap: an aarch64 sysroot from the ports tree, plus the target
+        # libgcc and crt files its cross gcc7 lacks (see lustre_build).
+        "elif command -v zypper >/dev/null; then\n"
+        f"  SYSROOT=/sysroot-{arch} && "
+        f"printf '[main]\\narch = {arch}\\n' > /tmp/zypp-{arch}.conf && "
+        'VER=$(. /etc/os-release && echo "$VERSION_ID") && '
+        f'Z="env ZYPP_CONF=/tmp/zypp-{arch}.conf zypper --root $SYSROOT -n '
+        f'--gpg-auto-import-keys" && '
+        "$Z addrepo -f http://download.opensuse.org/"
+        + ("" if arch == "x86_64" else f"ports/{arch}/")
+        + "distribution/leap/$VER/repo/oss/ oss >/dev/null && "
+        "$Z addrepo -f http://download.opensuse.org/update/leap/$VER/sle/ "
+        "sle-update >/dev/null && "
+        "$Z install --no-recommends glibc-devel linux-glibc-devel "
+        "libuuid-devel gcc7 2>&1 | tail -3 && "
+        f"G=/usr/lib64/gcc/{arch}-suse-linux/7 && "
+        "for f in $SYSROOT$G/crt*.o $SYSROOT$G/libgcc*; do "
+        'ln -sf "$f" "$G/"; done && '
+        "for l in $SYSROOT/usr/lib64/lib*.so; do "
+        't=$(readlink "$l") || continue; case "$t" in '
+        '/*) ln -sf "$SYSROOT$t" "$l" ;; esac; done && export SYSROOT\n'
         "fi\n"
         "bash /input/build-tools.sh\n"
         "bash /input/build-e2fsprogs.sh\n"
@@ -305,16 +326,17 @@ def cross_patch_dockerfile(
     lib/ and sbin/, build-tools.sh puts compilebench under opt/.
 
     ``libdir`` is where the image's own libext2fs lives, which the
-    patched one must replace: /usr/lib64 on RHEL, where a native build
-    installs it and ld.so looks, and nothing else does.
+    patched one must replace: /usr/lib64 on RHEL and SUSE, where a
+    native build installs it and ld.so looks, and nothing else does.
     """
     copies = {
         "build-tools.sh": ["usr/local", "opt"],
-        "build-e2fsprogs.sh": ["usr", "lib", "sbin", "etc"],
+        "build-e2fsprogs.sh": ["usr", "lib", "lib64", "sbin", "etc"],
     }
     # lib/ and sbin/ land under /usr: every target is merged-/usr, and
     # COPY onto the /lib symlink itself is not something to rely on.
-    dest = {"lib": libdir, "sbin": "/usr/sbin/"}
+    # lib64/ is where a site config that sets lib64 (Leap's) puts them.
+    dest = {"lib": libdir, "lib64": libdir, "sbin": "/usr/sbin/"}
     lines = text.splitlines(keepends=True)
     out: list[str] = []
     i = 0
@@ -809,7 +831,7 @@ def build_image(
             dockerfile.read_text(),
             prebuilt_dir,
             libdir="/usr/lib64/"
-            if target_config.os_family == "rhel"
+            if target_config.os_family in ("rhel", "suse")
             else "/usr/lib/",
         )
 

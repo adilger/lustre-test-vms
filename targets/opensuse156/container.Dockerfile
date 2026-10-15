@@ -53,6 +53,19 @@ RUN zypper -n install --no-recommends site-config \
     && zypper clean -a
 ENV CONFIG_SITE=/usr/share/site/native
 
+# Cross toolchain for aarch64 builds on an x86_64 host, under the
+# aarch64-linux-gnu- names the cross scripts use.  Leap has GCC 7 for
+# it, the compiler SUSE builds these kernels with; lustre_build.py adds
+# the target's libgcc and crt files from an aarch64 sysroot.
+RUN if [ "$(uname -m)" = x86_64 ]; then \
+        zypper -n install --no-recommends \
+            cross-aarch64-gcc7 cross-aarch64-binutils \
+        && for t in /usr/bin/aarch64-suse-linux-*; do \
+               ln -s "$t" "/usr/bin/aarch64-linux-gnu-${t##*/aarch64-suse-linux-}"; \
+           done \
+        && zypper clean -a; \
+    fi
+
 ENV PATH="/usr/lib64/ccache:${PATH}"
 ENV CCACHE_DIR="/ccache"
 
