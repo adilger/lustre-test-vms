@@ -78,18 +78,27 @@ with `ltvm target list --all-kernels`.
 
 | Target | Arch | Lustre | Default kernel | Fetchable |
 |--------|------|--------|----------------|-----------|
-| rocky8 | aarch64, x86_64 | server (ldiskfs) + client | 4.18-rhel8.10 | rhel8.10 |
+| rocky8 | aarch64, x86_64 | server (ldiskfs) + client | 4.18-rhel8.10 | rhel8.10 (aarch64: built before the kernel config overlay) |
 | rocky9 | aarch64 | server (ldiskfs) + client | 5.14-rhel9.7 | rhel9.5, 9.7, 9.8 |
 | rocky9 | x86_64 | server (ldiskfs) + client | 5.14-rhel9.7 | rhel9.7, 9.8 |
-| rocky10 | aarch64, x86_64 | server (ldiskfs) + client | 6.12-rhel10.0 | rhel10.0, 10.1 |
-| ubuntu2404 | x86_64 | client only | 6.8-ubuntu2404 | 6.8-ubuntu2404 |
+| rocky10 | aarch64 | server (ldiskfs) + client | 6.12-rhel10.0 | rhel10.0, 10.1 |
+| rocky10 | x86_64 | server (ldiskfs) + client | 6.12-rhel10.0 | rhel10.0, 10.1, 10.2 |
+| ubuntu2404 | aarch64, x86_64 | client only | 6.8-ubuntu2404 | 6.8-ubuntu2404 |
 | rocky9-64k | aarch64 | server (ldiskfs) + client | 5.14-rhel9.7 | no -- build locally |
 | rocky10-16k* | aarch64 | server (ldiskfs) + client | 6.12-rhel10.2 | no -- build locally |
 | mainline* | x86_64 | server (ldiskfs) + client | see below | no -- build locally |
-| ubuntu2604* | x86_64 | client only | 7.0-ubuntu2604 | 7.0-ubuntu2604 |
-| opensuse156* | x86_64 | client only | 6.4-sles15sp7 | 6.4-sles15sp7, sles15sp6 |
-| ubuntu2604-server* | aarch64 | server (ldiskfs) + client | 7.0.0-14-ubuntu26 | 7.0.0-14-ubuntu26 |
-| debian13* | x86_64 | server (ldiskfs) + client | 6.12-debian13 | 6.12-debian13 |
+| ubuntu2604* | aarch64, x86_64 | client only | 7.0-ubuntu2604 | 7.0-ubuntu2604 |
+| opensuse156* | aarch64, x86_64 | client only | 6.4-sles15sp7 | 6.4-sles15sp7, sles15sp6 |
+| ubuntu2604-server* | aarch64, x86_64 | server (ldiskfs) + client | 7.0.0-14-ubuntu26 | 7.0.0-14-ubuntu26 |
+| debian13* | aarch64, x86_64 | server (ldiskfs) + client | 6.12-debian13 | 6.12-debian13 |
+
+`ltvm target fetch` takes the host's arch, or the one a target
+declares in targets.yaml (`ubuntu2604-server` declares aarch64, so
+an x86_64 host fetches that one with `--arch x86_64`).
+The aarch64 releases, all but rocky8's, are cross-built on x86_64,
+and a cross-built image carries no IOR, mdtest, iozone or drgn.  On
+an x86_64 host an aarch64 VM runs emulated, which `ltvm create` waits
+out (a Debian or Ubuntu guest spends minutes in kdump-tools at boot).
 
 `rocky9-64k` is rocky9 with `CONFIG_ARM64_64K_PAGES`, for testing
 Lustre against a 64K page size.  It is aarch64-only: on an x86_64 host
