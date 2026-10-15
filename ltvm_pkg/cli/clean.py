@@ -33,6 +33,7 @@ from ltvm_pkg.cli.util import (
     _error,
 )
 from ltvm_pkg.paths import load_meta_safe
+from ltvm_pkg.target_config import kernel_dir_version_key
 
 
 @dataclass
@@ -235,9 +236,9 @@ def _scan_target(
     pruned_kernel_names: set[str] = set()
 
     for prefix, dirs in groups.items():
-        # Lex sort (matches TargetConfig.resolve_kernel's "latest"
-        # picker so we keep what an unmodified `ltvm build` would pick).
-        dirs_sorted = sorted(dirs, key=lambda p: p.name)
+        # Version order, as TargetConfig.resolve_kernel picks "latest":
+        # as strings, 553.155.1 sorts below 553.89.1.
+        dirs_sorted = sorted(dirs, key=lambda p: kernel_dir_version_key(p.name))
         on_list = prefix in declared_shorts
         is_protected_group = prefix in protected_shorts
 

@@ -134,6 +134,23 @@ class TestCmdPrune:
         assert old.exists()
         assert new.exists()
 
+    def test_supersession_goes_by_version_not_string(
+        self,
+        tmp_targets: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """As strings 553.155.1 sorts below 553.89.1, which marked the
+        newer, published kernel superseded."""
+        arch_dir = tmp_targets / "artifacts" / "rocky9" / "x86_64"
+        old = _make_kernel_dir(arch_dir, "5.14-rhel9.7-5.14.0-553.89.1.el9_7")
+        new = _make_kernel_dir(arch_dir, "5.14-rhel9.7-5.14.0-553.155.1.el9_7")
+
+        rc = _run_prune(tmp_targets, target="rocky9")
+        assert rc == EXIT_OK
+        out = capsys.readouterr().out
+        assert str(old) in out
+        assert str(new) not in out
+
     def test_apply_actually_deletes(
         self,
         tmp_targets: Path,
