@@ -279,6 +279,10 @@ targets:
       - 6.8-ubuntu2404
       config:
         CONFIG_PVH: y
+        # libcfs finds kallsyms_lookup_name through a kprobe; arm64's
+        # defconfig, unlike x86_64's, leaves them off
+        CONFIG_KPROBES: y
+        CONFIG_KRETPROBES: y
         # Nested KVM, bridges, tun/tap
         CONFIG_VIRTUALIZATION: y
         CONFIG_KVM: m
@@ -379,6 +383,10 @@ targets:
       - 7.0-ubuntu2604
       config: &ubuntu2604_config
         CONFIG_PVH: y
+        # libcfs finds kallsyms_lookup_name through a kprobe; arm64's
+        # defconfig, unlike x86_64's, leaves them off
+        CONFIG_KPROBES: y
+        CONFIG_KRETPROBES: y
         # Nested KVM, bridges, tun/tap
         CONFIG_VIRTUALIZATION: y
         CONFIG_KVM: m
