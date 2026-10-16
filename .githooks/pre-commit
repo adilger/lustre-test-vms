@@ -1,5 +1,5 @@
 #!/bin/bash
-# Pre-commit hook: lint + format check via ruff
+# Pre-commit hook: ruff, mypy and the input hash goldens
 # Install: git config core.hooksPath .githooks
 
 set -e
@@ -17,5 +17,11 @@ uv run ruff format --check .
 
 echo "pre-commit: mypy..."
 uv run mypy ltvm
+
+# A change to anything an artifact's input hash reads makes every built
+# artifact on every host stale; the goldens make that a deliberate edit.
+echo "pre-commit: input hash goldens..."
+uv run pytest -q --no-cov -p no:cacheprovider \
+	tests/test_input_hash_stability.py
 
 echo "pre-commit: all checks passed"

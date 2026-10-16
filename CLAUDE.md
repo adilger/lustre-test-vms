@@ -51,9 +51,11 @@ The tracked hooks in `.githooks/` are enabled per clone:
 make hooks        # git config core.hooksPath .githooks
 ```
 
-`pre-commit` runs ruff and mypy.  `post-commit` bakes the version into
-`ltvm_pkg/_build_info.py` (gitignored), as `ltvm update` does after a
-pull, so `ltvm --version` does not run git on every invocation.
+`pre-commit` runs ruff, mypy and the input hash goldens
+(`tests/test_input_hash_stability.py`).  `post-commit` bakes the
+version into `ltvm_pkg/_build_info.py` (gitignored), as `ltvm update`
+does after a pull, so `ltvm --version` does not run git on every
+invocation.
 
 ## Agent Skills
 
