@@ -115,7 +115,6 @@ class TestGate:
 class TestTarget:
     def test_pinned_to_the_exact_upload(self) -> None:
         tc = TargetConfig("ubuntu2604-server")
-        assert tc.arch == "aarch64"
         assert tc.kernel_deb_source == "linux-source-7.0.0=7.0.0-14.14"
         assert deb_abi(tc.kernel_deb_source) == "14"
 

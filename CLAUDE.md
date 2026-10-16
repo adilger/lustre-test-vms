@@ -461,9 +461,18 @@ second field.  So the target pins the exact source upload
 `CONFIG_LOCALVERSION="-14-lustre"`, and `kernel_build._mark_ubuntu_abi`
 adds the line to the build-tree.  Miss either and Lustre quietly
 builds the vanilla `ldiskfs-7.0-ml` series instead.  The kernel is
-defconfig plus ubuntu2604's options plus the target's own -- notably
+defconfig plus ubuntu2604's options plus the target's own.  It needs
 `CONFIG_KPROBES`, without which every Lustre module fails to load with
--EOPNOTSUPP (libcfs finds `kallsyms_lookup_name` through a kprobe).
+-EOPNOTSUPP (libcfs finds `kallsyms_lookup_name` through a kprobe);
+the shared overlay sets it for every target, since arm64's defconfig
+leaves it off.
+
+**Debian's kernel config** (`debian13`).  The container stages
+Debian's own config for both arches, from the linux-image packages of
+the upload the source is pinned to, in `$KERNEL_DEB_CONFIG_DIR`
+(`config-amd64`, `config-arm64`); `kernel-build-inner-deb.sh` starts
+from `config-<deb arch>` there instead of defconfig.  Containers that
+do not stage one (the Ubuntu targets) keep defconfig.
 
 **SLES kernels** (`opensuse156`).  A target with `kernel_suse_source`
 (the GitHub organisation) builds a SLES kernel from SUSE's own release

@@ -13,6 +13,12 @@ CONFIG_INFINIBAND_USER_ACCESS=m
 CONFIG_INFINIBAND_ADDR_TRANS=y
 CONFIG_RDMA_RXE=m
 
+# libcfs finds kallsyms_lookup_name through a kprobe: without them
+# every Lustre module fails to load with -EOPNOTSUPP.  arm64's
+# defconfig leaves them off.
+CONFIG_KPROBES=y
+CONFIG_KRETPROBES=y
+
 # Hardware a headless virtio microvm never has.  Each takes the
 # drivers under it along; from a 46 minute debian13 build they were
 # about 6300 of the module compiles.

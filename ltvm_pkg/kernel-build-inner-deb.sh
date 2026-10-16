@@ -9,6 +9,9 @@
 # Expected environment:
 #   JOBS              -- parallel make jobs (default: nproc)
 #   KERNEL_DEB_SOURCE -- deb package name (e.g., linux-source-6.8.0)
+#   KERNEL_DEB_CONFIG_DIR -- optional; a distro kernel config per
+#                        arch (config-amd64, config-arm64) staged by
+#                        the container, used instead of defconfig
 #
 # Expected bind mounts:
 #   /input/staging/config.fragment   -- microvm config overrides
@@ -126,6 +129,8 @@ fi
 
 echo "--- Configuring kernel..."
 
+DISTRO_CONFIG="${KERNEL_DEB_CONFIG_DIR:-/nonexistent}/config-${DEB_ARCH}"
+
 # Use the Ubuntu default config as starting point.
 # Ubuntu's config is in debian.master/config/ or we can use the
 # running config from the deb package.
@@ -138,7 +143,10 @@ UBUNTU_CONFIG2=$(find "$BUILD" -path "*/debian.master/config/${DEB_ARCH}/config.
 UBUNTU_ANNOTATIONS=$(find "$BUILD" -path "*/debian.master/config/annotations" \
 	2>/dev/null | head -1)
 
-if [[ -n "$UBUNTU_ANNOTATIONS" ]] && [[ -f "$BUILD/debian.master/config/annotations" ]]; then
+if [[ -f "$DISTRO_CONFIG" ]]; then
+	echo "    Using the container's distro config: $DISTRO_CONFIG"
+	cp "$DISTRO_CONFIG" .config
+elif [[ -n "$UBUNTU_ANNOTATIONS" ]] && [[ -f "$BUILD/debian.master/config/annotations" ]]; then
 	echo "    Using Ubuntu annotations-based config..."
 	# Ubuntu 24.04 uses an annotations file + config script to
 	# generate the actual .config. Use make defconfig as base
@@ -274,7 +282,10 @@ rm -rf "$BUILD_TREE"
 mkdir -p "$BUILD_TREE"
 
 echo "--- Populating build tree (full source)..."
-rsync -a \
+# --no-inc-recursive: with incremental recursion rsync can get ahead of
+# itself on a large built tree (6.12) and fail a mkdir whose parent is
+# not there yet.
+rsync -a --no-inc-recursive \
 	--exclude='*.o' \
 	--exclude='*.ko' \
 	--exclude='*.cmd' \

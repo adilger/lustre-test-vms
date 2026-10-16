@@ -93,8 +93,7 @@ with `ltvm target list --all-kernels`.
 | debian13* | aarch64, x86_64 | server (ldiskfs) + client | 6.12-debian13 | 6.12-debian13 |
 
 `ltvm target fetch` takes the host's arch, or the one a target
-declares in targets.yaml (`ubuntu2604-server` declares aarch64, so
-an x86_64 host fetches that one with `--arch x86_64`).
+declares in targets.yaml (rocky9-64k and rocky10-16k declare aarch64).
 The aarch64 releases, all but rocky8's, are cross-built on x86_64,
 and a cross-built image carries no IOR, mdtest, iozone or drgn.  On
 an x86_64 host an aarch64 VM runs emulated, which `ltvm create` waits
@@ -144,8 +143,8 @@ without them it would build the vanilla `ldiskfs-7.0-ml` instead.
 
 `debian13` (experimental) is Debian 13 as an ldiskfs server, built
 from Debian's patched kernel source (linux-source 6.12.107, pinned:
-the ldiskfs series stops applying at 6.12.111) with defconfig plus
-`ubuntu2604-server`'s options rather than Debian's own config.
+the ldiskfs series stops applying at 6.12.111) with Debian's own
+kernel config, taken from the linux-image packages of the same upload.
 Lustre's configure has no Debian case, so it builds the vanilla
 `ldiskfs-6.12-ml` series.
 

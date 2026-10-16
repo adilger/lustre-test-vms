@@ -39,6 +39,33 @@ RUN apt-get update \
     && rm -f /tmp/packages-dev.txt /tmp/package-map.txt \
     && rm -rf /var/lib/apt/lists/*
 
+# Debian's own kernel config, from the linux-image packages of the same
+# upload as the source, for both arches: the container is the host's
+# arch whichever arch the kernel is built for.  The kernel build uses
+# $KERNEL_DEB_CONFIG_DIR/config-<deb arch> instead of defconfig.
+# Debian's x86_64 config compresses the bzImage with zstd.
+RUN ver=$(dpkg-query -W -f '${Version}' "${KERNEL_DEB_SOURCE%%=*}") \
+    && host=$(dpkg --print-architecture) \
+    && for a in amd64 arm64; do \
+           [ "$a" = "$host" ] || dpkg --add-architecture "$a"; \
+       done \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends zstd \
+    && mkdir -p /usr/src/debian-config /tmp/kimg \
+    && cd /tmp/kimg \
+    && for a in amd64 arm64; do \
+           apt-get download "linux-image-${ver%-*}+deb13-${a}:${a}=${ver}" \
+           && dpkg-deb -x linux-image-*_"${a}".deb "x-${a}" \
+           && cp x-"${a}"/boot/config-* "/usr/src/debian-config/config-${a}" \
+           || exit 1; \
+       done \
+    && cd / && rm -rf /tmp/kimg \
+    && for a in amd64 arm64; do \
+           [ "$a" = "$host" ] || dpkg --remove-architecture "$a"; \
+       done \
+    && rm -rf /var/lib/apt/lists/*
+ENV KERNEL_DEB_CONFIG_DIR=/usr/src/debian-config
+
 # Whamcloud-patched e2fsprogs (needed for Lustre userspace tools).
 # Pinned via build-e2fsprogs.sh's DEFAULT_E2FS_TAG.
 COPY common/build-e2fsprogs.sh /tmp/build-e2fsprogs.sh
