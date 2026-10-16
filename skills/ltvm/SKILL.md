@@ -133,6 +133,12 @@ Lustre code is then reported when the object is freed or reused, with
 its allocation and free stacks, rather than surfacing as unrelated
 corruption.
 
+Kernels built with the shared overlay also carry more debug facilities
+that stay off until enabled: fault injection (failslab,
+fail_page_alloc, fail_make_request, fail_function via debugfs),
+`kmemleak=on`, `debug_pagealloc=on`, the `jbd2_debug` parameter, and the
+dm-dust/dm-delay targets (`targets/common/kernel-config.overlay`).
+
 ltvm refuses `root=`, `console=` and `fc_*`, which it sets itself.
 `cluster create` takes the same flag for every node.
 
