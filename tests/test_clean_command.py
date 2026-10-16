@@ -382,3 +382,258 @@ class TestUserZfs:
             tmp_targets
             / "artifacts/rocky9/x86_64/kernels/5.14-rhel9.7-5.14.0-611.13.1.el9_7"
         ).exists()
+
+
+# The autouse _neutralize_host_clean_state stubs these out; collection
+# runs before it, so the real ones are kept here.
+from ltvm_pkg.cli import clean as _clean_mod  # noqa: E402
+
+_REAL_IDLE_VMS = _clean_mod._idle_vms
+_REAL_VM_KERNEL_DIRS = _clean_mod._vm_kernel_dirs
+
+
+class TestVmKernels:
+    """A kernel a VM boots is never offered, --force or not."""
+
+    @pytest.mark.parametrize("force", [False, True])
+    def test_kernel_a_vm_boots_is_kept(
+        self,
+        tmp_targets: Path,
+        capsys: pytest.CaptureFixture[str],
+        force: bool,
+    ) -> None:
+        import os
+
+        arch_dir = tmp_targets / "artifacts" / "rocky9" / "x86_64"
+        old = _make_kernel_dir(arch_dir, "5.14-rhel9.7-5.14.0-503.40.1.el9_7")
+        _make_kernel_dir(arch_dir, "5.14-rhel9.7-5.14.0-611.49.1.el9_7")
+        with patch(
+            "ltvm_pkg.cli.clean._vm_kernel_dirs",
+            return_value={os.path.realpath(old)},
+        ):
+            rc = _run_prune(
+                tmp_targets, target="rocky9", apply=True, force=force
+            )
+        assert rc == EXIT_OK
+        assert old.exists()
+        assert "Nothing to prune" in capsys.readouterr().out
+
+    def test_vm_kernel_dirs_reads_each_vm(self, tmp_path: Path) -> None:
+        from types import SimpleNamespace
+
+        from ltvm_pkg import vm_state
+
+        k = tmp_path / "kernels" / "k1"
+        k.mkdir(parents=True)
+        vms = {
+            "co1-a": SimpleNamespace(kernel=str(k / "vmlinuz")),
+            "co1-b": SimpleNamespace(kernel=""),
+        }
+
+        def load(name: str) -> SimpleNamespace:
+            if name == "co1-bad":
+                raise ValueError("corrupt")
+            return vms[name]
+
+        with (
+            patch.object(
+                vm_state.VMInfo,
+                "all_names",
+                return_value=["co1-a", "co1-b", "co1-bad"],
+            ),
+            patch.object(vm_state.VMInfo, "load", side_effect=load),
+        ):
+            assert _REAL_VM_KERNEL_DIRS() == {str(k.resolve())}
+
+
+class TestPodmanImages:
+    def _dead(self) -> list:
+        from ltvm_pkg.podman_gc import TagInfo
+
+        now = datetime.now(tz=timezone.utc).timestamp()
+        return [
+            (
+                TagInfo("ltvm-image-rocky9-final", 3 * 1024**3, now - 86400),
+                "image build's export stage; nothing reads it after",
+            ),
+            (
+                TagInfo(
+                    "ltvm-build-rocky9-mofed", 2 * 1024**3, now - 90 * 86400
+                ),
+                "no target, arch or variant in targets.yaml builds it",
+            ),
+        ]
+
+    def test_full_scan_previews_dead_images(
+        self, tmp_targets: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with (
+            patch("ltvm_pkg.podman_gc.dead_tags", return_value=self._dead()),
+            patch(
+                "ltvm_pkg.cli.clean.shutil.which", return_value="/bin/podman"
+            ),
+            patch("ltvm_pkg.podman_gc.remove_tag") as rmi,
+        ):
+            rc = _run_prune(tmp_targets)
+        assert rc == EXIT_OK
+        out = capsys.readouterr().out
+        assert "ltvm-image-rocky9-final" in out
+        assert "ltvm-build-rocky9-mofed" in out
+        assert "--apply" in out
+        rmi.assert_not_called()
+
+    def test_apply_removes_and_older_than_filters(
+        self, tmp_targets: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with (
+            patch("ltvm_pkg.podman_gc.dead_tags", return_value=self._dead()),
+            patch(
+                "ltvm_pkg.cli.clean.shutil.which", return_value="/bin/podman"
+            ),
+            patch("ltvm_pkg.podman_gc.remove_tag", return_value=True) as rmi,
+        ):
+            rc = _run_prune(
+                tmp_targets, apply=True, older_than="30", use_json=True
+            )
+        assert rc == EXIT_OK
+        payload = json.loads(capsys.readouterr().out)
+        assert [p["tag"] for p in payload["podman_images"]] == [
+            "ltvm-build-rocky9-mofed"
+        ]
+        assert payload["removed_podman"] == ["ltvm-build-rocky9-mofed"]
+        rmi.assert_called_once_with("ltvm-build-rocky9-mofed")
+
+    def test_refused_rmi_is_an_error(
+        self, tmp_targets: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with (
+            patch("ltvm_pkg.podman_gc.dead_tags", return_value=self._dead()),
+            patch(
+                "ltvm_pkg.cli.clean.shutil.which", return_value="/bin/podman"
+            ),
+            patch("ltvm_pkg.podman_gc.remove_tag", return_value=False),
+        ):
+            rc = _run_prune(tmp_targets, apply=True, use_json=True)
+        assert rc != EXIT_OK
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["removed_podman"] == []
+        assert len(payload["errors"]) == 2
+
+    def test_one_target_leaves_podman_alone(
+        self, tmp_targets: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with patch("ltvm_pkg.podman_gc.dead_tags") as dead:
+            _run_prune(tmp_targets, target="rocky9")
+        dead.assert_not_called()
+
+
+class TestIdleVms:
+    def _seed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        import os
+        from types import SimpleNamespace
+
+        from ltvm_pkg import qemu_run, vm_state
+
+        overlays = tmp_path / "overlays"
+        overlays.mkdir()
+        monkeypatch.setattr(vm_state, "OVERLAYS", overlays)
+        now = int(datetime.now(tz=timezone.utc).timestamp())
+        day = 86400
+
+        def vm(name: str, last: int, running: bool = False):
+            ov = overlays / f"{name}.qcow2"
+            ov.write_bytes(b"x" * 8192)
+            os.utime(ov, (last, last))
+            disk = overlays / f"{name}-disk0.img"
+            disk.write_bytes(b"y" * 4096)
+            os.utime(disk, (last, last))
+            return SimpleNamespace(
+                name=name,
+                created=last - day,
+                last_boot=last,
+                last_deploy=0,
+                overlay_path=ov,
+                running=running,
+            )
+
+        vms = {
+            v.name: v
+            for v in (
+                vm("co1-old", now - 40 * day),
+                vm("co2-mds", now - 30 * day),
+                vm("co2-oss", now - 30 * day),
+                vm("co3-new", now - 2 * day),
+                vm("co4-up", now - 40 * day, running=True),
+            )
+        }
+        monkeypatch.setattr(
+            vm_state.VMInfo, "all_names", staticmethod(lambda: sorted(vms))
+        )
+        monkeypatch.setattr(
+            vm_state.VMInfo, "load", staticmethod(lambda n: vms[n])
+        )
+        monkeypatch.setattr(qemu_run, "is_running", lambda v: v.running)
+        cluster = SimpleNamespace(
+            get_nodes=lambda: [
+                SimpleNamespace(name="co2-mds"),
+                SimpleNamespace(name="co2-oss"),
+            ]
+        )
+        monkeypatch.setattr(
+            vm_state.ClusterInfo, "all_names", staticmethod(lambda: ["co2"])
+        )
+        monkeypatch.setattr(
+            vm_state.ClusterInfo, "load", staticmethod(lambda n: cluster)
+        )
+
+    def test_lists_stopped_vms_idle_past_the_threshold(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._seed(tmp_path, monkeypatch)
+        idle = {v["name"]: v for v in _REAL_IDLE_VMS(14)}
+        assert set(idle) == {"co1-old", "co2-mds", "co2-oss"}
+        assert idle["co1-old"]["cluster"] is None
+        assert idle["co2-mds"]["cluster"] == "co2"
+        assert 39 < idle["co1-old"]["idle_days"] < 41
+        assert idle["co1-old"]["bytes"] > 0
+
+    def test_report_names_whole_clusters_and_lone_vms(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        self._seed(tmp_path, monkeypatch)
+        _clean_mod._print_idle_vms(_REAL_IDLE_VMS(14), 14)
+        out = capsys.readouterr().out
+        assert "clean never removes a VM" in out
+        assert "remove: ltvm cluster destroy co2" in out
+        assert "remove: ltvm destroy co1-old\n" in out
+
+    def test_cluster_with_a_busy_member_is_not_whole(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        self._seed(tmp_path, monkeypatch)
+        idle = [v for v in _REAL_IDLE_VMS(14) if v["name"] != "co2-oss"]
+        _clean_mod._print_idle_vms(idle, 14)
+        out = capsys.readouterr().out
+        assert "cluster destroy" not in out
+        assert "remove: ltvm destroy co1-old co2-mds" in out
+
+    def test_prune_prints_them_and_removes_nothing(
+        self,
+        tmp_targets: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        idle = [
+            {"name": "co1-old", "idle_days": 40.0, "bytes": 1, "cluster": None}
+        ]
+        with patch("ltvm_pkg.cli.clean._idle_vms", return_value=idle):
+            rc = _run_prune(tmp_targets, apply=True)
+        assert rc == EXIT_OK
+        out = capsys.readouterr().out
+        assert "co1-old" in out
+        assert "Nothing to prune" in out

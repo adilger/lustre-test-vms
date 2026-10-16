@@ -16,6 +16,7 @@ import json
 import os
 import platform
 import shlex
+import shutil
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -53,6 +54,42 @@ from ltvm_pkg.kernel_build import kernel_status
 from ltvm_pkg.lustre_build import staging_path
 from ltvm_pkg.target_config import LustreMode, TargetConfig
 
+# A kernel build writes its debug-info objects into podman's storage,
+# then a ~4 GiB artifact; an image build its rootfs three times over
+# (tarball, tree, ext4).
+LOW_DISK_BYTES = 30 * 1024**3
+
+
+def _warn_low_disk() -> None:
+    """Warn when the artifacts or podman filesystem is nearly full.
+
+    A build that runs out of space fails late, deep in make or
+    podman, with nothing pointing at the cause.
+    """
+    from ltvm_pkg.target_config import ARTIFACTS_DIR
+
+    roots = [ARTIFACTS_DIR, Path.home() / ".local/share/containers"]
+    seen: set[int] = set()
+    for root in roots:
+        p = root
+        while not p.exists() and p != p.parent:
+            p = p.parent
+        try:
+            dev = p.stat().st_dev
+            free = shutil.disk_usage(p).free
+        except OSError:
+            continue
+        if dev in seen:
+            continue
+        seen.add(dev)
+        if free < LOW_DISK_BYTES:
+            print(
+                f"WARNING: only {free / 1024**3:.1f} GiB free on the "
+                f"filesystem holding {root}; a kernel or image build may "
+                f"run out.  `ltvm clean` lists what can go.",
+                file=sys.stderr,
+            )
+
 
 def _preflight_podman(use_json: bool) -> int | None:
     """Check podman is usable; return an error code if not, else None."""
@@ -60,6 +97,7 @@ def _preflight_podman(use_json: bool) -> int | None:
         check_podman_machine_macos()
     except PodmanMachineError as e:
         return _error(str(e), use_json)
+    _warn_low_disk()
     return None
 
 

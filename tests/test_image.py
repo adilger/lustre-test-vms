@@ -1193,3 +1193,50 @@ class TestCrossPatchDockerfile:
             ib.cross_patch_dockerfile(
                 "RUN bash /tmp/build-tools.sh\n", self._prebuilt(tmp_path)
             )
+
+
+class TestBuildImageCleansUp:
+    """A successful image build leaves no -final image or stale files."""
+
+    def test_final_image_and_superseded_go_after_success(
+        self, tmp_targets: Path
+    ) -> None:
+        import ltvm_pkg.image_build as image
+        from tests.conftest import _make_config, _make_kernel_outputs
+
+        tc = _make_config(tmp_targets)
+        kdir = _make_kernel_outputs(tc)
+        (kdir / "modules" / "lib" / "modules" / "5.14.0-foo").mkdir()
+        out_dir = tc.image_output_dir(None)
+        built: list[str] = []
+
+        def run(cmd: list[str], **_kw: object) -> MagicMock:
+            if cmd[:2] == ["podman", "build"]:
+                built.append(cmd[cmd.index("-t") + 1])
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        def export(tag: str, d: Path) -> Path:
+            d.mkdir(parents=True, exist_ok=True)
+            f = d / "base-20260101T000000-abcdef.ext4"
+            f.write_bytes(b"img")
+            return f
+
+        superseded = MagicMock()
+        with (
+            patch.object(image, "_check_mke2fs"),
+            patch.object(image, "_run", side_effect=run),
+            patch.object(image, "_export_to_ext4", side_effect=export),
+            patch.object(image, "_get_package_manifest", return_value=[]),
+            patch.object(image, "Superseded", return_value=superseded),
+            patch.object(image, "remove_tag") as rmi,
+            patch.object(image, "prune_superseded", return_value=0) as prune,
+        ):
+            image.build_image(tc, force=True)
+
+        assert built[0] == "ltvm-image-rocky9"
+        final = built[-1]
+        assert final.startswith("ltvm-image-rocky9-final-")
+        rmi.assert_called_once_with(final)
+        superseded.note.assert_called_once_with("ltvm-image-rocky9")
+        superseded.drop.assert_called_once_with()
+        prune.assert_called_once_with(out_dir)

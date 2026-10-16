@@ -609,6 +609,12 @@ owner metadata identifies the session rather than a pid; read it back with
 member VMs, and each VM row names its `cluster`; destroy a cluster with
 `ltvm cluster destroy`, not node by node.
 
+Destroy the VMs a task made when it is done: a stopped VM keeps its
+disks, a few GB each. A build warns when the disk is nearly full;
+`ltvm clean` then previews what can go (superseded kernels and images,
+dead ltvm podman images) and lists VMs idle for two weeks, and
+`ltvm clean --apply` removes all but the VMs.
+
 ## Sharing VMs with other sessions
 
 Other sessions on the host see the same VMs, and one deploying over

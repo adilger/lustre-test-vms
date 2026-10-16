@@ -231,9 +231,43 @@ ltvm clean --keep 2 --apply     # keep 2 most recent per group
 ```
 
 Always preserved (unless `--force`): the target's default
-kernel and any variant-pinned kernel.  Distinct from
-`ltvm target clean`, which wipes a single target's whole
-arch dir in one shot.
+kernel and any variant-pinned kernel.  Preserved even with
+`--force`: any kernel a VM on this host boots (its `.info`
+`KERNEL`), and any image file an overlay is backed by.
+Distinct from `ltvm target clean`, which wipes a single
+target's whole arch dir in one shot.
+
+A scan of every target also offers the dead ltvm podman
+images (`podman_gc.dead_tags`): an image build's `-final`
+stage, and tags no target, arch or variant in targets.yaml
+builds.  It lists VMs stopped and untouched for
+`--idle-days` (14) with the `ltvm destroy` / `ltvm cluster
+destroy` lines that would remove them, and never removes
+one itself.  A tag another ltvm checkout's targets.yaml
+still builds looks dead here; removing it costs that
+checkout a rebuild, nothing more.
+
+What a build makes dead it removes itself, so none of this
+piles up between cleans:
+
+- **Superseded podman images.**  A rebuild moves the tag;
+  `podman_gc.Superseded` notes each tag's image before the
+  `podman build` and `podman rmi`s the old one (no `-f`)
+  once the build succeeds, variant before base.
+- **The `-final` image.**  An image build's kernel-module
+  stage is tagged `-final-<hex>`, one per build -- the other
+  tags are per target, so two builds of one target for
+  different kernels share them -- and is removed after the
+  export and package manifest have read it.
+- **Superseded image files.**  After a build makes a new
+  `base-*.ext4` current, the dir's other image files that no
+  overlay is backed by go (`image_store.prune_superseded`;
+  nothing while any overlay's backing file is unknown).
+
+Kernels are left to `ltvm clean`: an older minor is a choice.
+Every build warns when the artifacts or podman filesystem has
+under 30 GiB free (`cli.build._warn_low_disk`), since a build
+that runs out fails late with nothing naming the cause.
 
 ### Kernel build inputs (from Lustre tree)
 

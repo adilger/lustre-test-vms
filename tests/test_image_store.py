@@ -434,6 +434,41 @@ class TestReferencedImages:
         assert unknown == ["co1-z"]
 
 
+class TestPruneSuperseded:
+    """An image build removes the files it superseded that no VM uses."""
+
+    def test_keeps_current_and_backing_files(
+        self, tmp_path: Path, vmdir: Path
+    ) -> None:
+        d = tmp_path / "img"
+        used = _new_image(d, b"used")
+        unused = _new_image(d, b"unused-" * 10)
+        legacy = d / LEGACY
+        legacy.write_bytes(b"legacy")
+        current = _new_image(d, b"current")
+        _qcow2(vmdir / "co1-a.qcow2", str(used))
+        freed = image_store.prune_superseded(d)
+        assert freed == len(b"unused-" * 10) + len(b"legacy")
+        assert set(image_files(d)) == {used, current}
+        assert not unused.exists() and not legacy.exists()
+        assert current_image(d) == current
+
+    def test_unknown_backing_file_keeps_everything(
+        self, tmp_path: Path, vmdir: Path
+    ) -> None:
+        d = tmp_path / "img"
+        old = _new_image(d, b"old")
+        _new_image(d, b"new")
+        (vmdir / "co1-z.qcow2").write_bytes(b"garbage")
+        assert image_store.prune_superseded(d) == 0
+        assert old.exists()
+
+    def test_no_current_image_removes_nothing(self, tmp_path: Path) -> None:
+        d = tmp_path / "img"
+        d.mkdir()
+        assert image_store.prune_superseded(d) == 0
+
+
 class TestFetchInstallsVersioned:
     def test_fetched_image_does_not_replace_the_legacy_file(
         self, tmp_path: Path

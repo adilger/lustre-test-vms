@@ -404,3 +404,32 @@ def _neutralize_ensure_pdsh() -> object:
         side_effect=lambda name, *a, **k: (name, 0, ""),
     ):
         yield
+
+
+@pytest.fixture(autouse=True)
+def _neutralize_podman_gc() -> object:
+    """Keep the builds' and clean's podman image cleanup off real podman.
+
+    Every podman call in podman_gc goes through _podman; with it
+    returning None the store looks empty.  tests/test_podman_gc.py
+    patches it again for its own cases.
+    """
+    with patch("ltvm_pkg.podman_gc._podman", return_value=None):
+        yield
+
+
+@pytest.fixture(autouse=True)
+def _neutralize_host_clean_state() -> object:
+    """Keep the host's VMs, disk and image files out of clean and builds.
+
+    `ltvm clean` lists the host's idle VMs and protects their kernels,
+    builds warn on a nearly full disk, and an image build prunes the
+    image files no overlay on the host uses.  Each has its own tests.
+    """
+    with (
+        patch("ltvm_pkg.cli.clean._idle_vms", return_value=[]),
+        patch("ltvm_pkg.cli.clean._vm_kernel_dirs", return_value=set()),
+        patch("ltvm_pkg.cli.build._warn_low_disk"),
+        patch("ltvm_pkg.image_build.prune_superseded", return_value=0),
+    ):
+        yield

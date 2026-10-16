@@ -166,6 +166,31 @@ def referenced_images() -> tuple[set[str], list[str]]:
     return refs, unknown
 
 
+def prune_superseded(image_dir: Path) -> int:
+    """Remove *image_dir*'s image files that are neither current nor used.
+
+    Returns the bytes freed.  Removes nothing while any overlay's
+    backing file is unknown.
+    """
+    current = current_image(image_dir)
+    if current is None:
+        return 0
+    refs, unknown = referenced_images()
+    if unknown:
+        return 0
+    freed = 0
+    for f in image_files(image_dir):
+        if f == current or os.path.realpath(f) in refs:
+            continue
+        try:
+            size = f.stat().st_size
+            f.unlink()
+        except OSError:
+            continue
+        freed += size
+    return freed
+
+
 def _has_no_backing(overlay: Path) -> bool:
     """True for a readable qcow2 that names no backing file at all."""
     try:

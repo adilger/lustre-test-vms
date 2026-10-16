@@ -12,7 +12,12 @@ Always preserved (unless --force):
   - Any variant-pinned kernel (latest within its short-prefix group).
 
 Always preserved, --force or not: any image file a VM overlay on this
-host is backed by, and the current image of every image directory.
+host is backed by, the current image of every image directory, and any
+kernel a VM on this host boots.
+
+A full scan (no target named) also offers the dead ltvm podman images
+(podman_gc.dead_tags) and lists VMs left stopped for --idle-days, which
+it never removes.
 """
 
 from __future__ import annotations
@@ -20,12 +25,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ltvm_pkg import podman_gc
 from ltvm_pkg.cli.util import (
     EXIT_ERROR,
     EXIT_OK,
@@ -149,6 +156,7 @@ def _scan_target(
     older_than_days: float | None,
     force: bool,
     referenced: tuple[set[str], list[str]] | None = None,
+    vm_kernels: set[str] | None = None,
 ) -> _TargetReport | None:
     """Walk artifacts/<target>/<arch>/{kernels,images} and produce a
     report.  Returns None when the target/arch dir doesn't exist.
@@ -172,6 +180,8 @@ def _scan_target(
     refs, unknown_refs = (
         referenced if referenced is not None else referenced_images()
     )
+    if vm_kernels is None:
+        vm_kernels = _vm_kernel_dirs()
 
     def _in_use(files: list[Path]) -> bool:
         return bool(unknown_refs) or any(
@@ -273,6 +283,9 @@ def _scan_target(
             doomed = [d for d in doomed if d != latest]
 
         for d in doomed:
+            if os.path.realpath(d) in vm_kernels:
+                report.skipped += 1
+                continue
             age = _entry_age_days(d)
             if older_than_days is not None and (
                 age is None or age < older_than_days
@@ -385,6 +398,115 @@ def _scan_target(
     return report
 
 
+def _vm_kernel_dirs() -> set[str]:
+    """Real paths of the kernel dirs the VMs on this host boot from."""
+    from ltvm_pkg import vm_state
+
+    dirs: set[str] = set()
+    for name in vm_state.VMInfo.all_names():
+        try:
+            kernel = vm_state.VMInfo.load(name).kernel
+        except (vm_state.VMNotFound, ValueError, OSError):
+            continue
+        if kernel:
+            dirs.add(os.path.realpath(Path(kernel).parent))
+    return dirs
+
+
+def _allocated_bytes(paths: list[Path]) -> int:
+    total = 0
+    for p in paths:
+        try:
+            total += p.stat().st_blocks * 512
+        except OSError:
+            pass
+    return total
+
+
+def _idle_vms(idle_days: float) -> list[dict[str, Any]]:
+    """Stopped VMs nothing has booted, deployed to or written for *idle_days*.
+
+    Listed for the user to decide on, never removed: a VM is state, and
+    an idle one may be kept on purpose.
+    """
+    from ltvm_pkg import vm_state
+    from ltvm_pkg.qemu_run import is_running
+
+    clusters: dict[str, str] = {}
+    for cname in vm_state.ClusterInfo.all_names():
+        try:
+            for n in vm_state.ClusterInfo.load(cname).get_nodes():
+                clusters[n.name] = cname
+        except Exception:
+            continue
+
+    now = datetime.now(tz=timezone.utc).timestamp()
+    idle: list[dict[str, Any]] = []
+    for name in vm_state.VMInfo.all_names():
+        try:
+            vm = vm_state.VMInfo.load(name)
+        except (vm_state.VMNotFound, ValueError, OSError):
+            continue
+        if is_running(vm):
+            continue
+        files = [
+            vm.overlay_path,
+            *sorted(vm_state.OVERLAYS.glob(f"{name}-disk*.img")),
+        ]
+        last = max(vm.created, vm.last_boot, vm.last_deploy)
+        for f in files:
+            try:
+                last = max(last, int(f.stat().st_mtime))
+            except OSError:
+                pass
+        days = (now - last) / 86400.0
+        if days < idle_days:
+            continue
+        idle.append(
+            {
+                "name": name,
+                "idle_days": round(days, 1),
+                "bytes": _allocated_bytes(files),
+                "cluster": clusters.get(name),
+            }
+        )
+    return idle
+
+
+def _print_idle_vms(idle: list[dict[str, Any]], idle_days: float) -> None:
+    from ltvm_pkg import vm_state
+
+    total = sum(v["bytes"] for v in idle)
+    print(
+        f"VMs stopped and untouched for {idle_days:g}+ days "
+        f"({_format_bytes(total)} of disk; clean never removes a VM):"
+    )
+    for v in sorted(idle, key=lambda v: -v["idle_days"]):
+        where = f"  cluster {v['cluster']}" if v["cluster"] else ""
+        print(
+            f"  {v['name']:<24} {v['idle_days']:>5.0f}d "
+            f"{_format_bytes(v['bytes']):>10}{where}"
+        )
+    idle_names = {v["name"] for v in idle}
+    whole: list[str] = []
+    for cname in sorted({v["cluster"] for v in idle if v["cluster"]}):
+        try:
+            members = {
+                n.name for n in vm_state.ClusterInfo.load(cname).get_nodes()
+            }
+        except Exception:
+            continue
+        if members <= idle_names:
+            whole.append(cname)
+    singles = [
+        v["name"] for v in idle if not v["cluster"] or v["cluster"] not in whole
+    ]
+    for cname in whole:
+        print(f"  remove: ltvm cluster destroy {cname}")
+    if singles:
+        print(f"  remove: ltvm destroy {' '.join(sorted(singles))}")
+
+
 def _arches_for_target(target: str, arch_flag: str | None) -> list[str]:
     """Return the list of arches to scan for a target.
 
@@ -487,6 +609,7 @@ def cmd_prune(args: argparse.Namespace) -> int:
             f"{', '.join(referenced[1])} is backed by; keeping every image",
             file=sys.stderr,
         )
+    vm_kernels = _vm_kernel_dirs() if targets else set()
     for t in targets:
         for a in _arches_for_target(t, arch_flag):
             r = _scan_target(
@@ -496,12 +619,29 @@ def cmd_prune(args: argparse.Namespace) -> int:
                 older_than_days=older_than_days,
                 force=force,
                 referenced=referenced,
+                vm_kernels=vm_kernels,
             )
             if r is not None:
                 reports.append(r)
 
     all_candidates = [c for r in reports for c in r.candidates]
     total_bytes = sum(c.bytes for c in all_candidates)
+
+    # Host-wide extras, only on a full scan of the shared artifacts.
+    full_scan = not target_arg and not getattr(args, "user_zfs", False)
+    podman_dead: list[tuple[podman_gc.TagInfo, str]] = []
+    idle: list[dict[str, Any]] = []
+    idle_days = float(getattr(args, "idle_days", 14))
+    if full_scan:
+        if shutil.which("podman"):
+            now = datetime.now(tz=timezone.utc).timestamp()
+            podman_dead = [
+                (t, why)
+                for t, why in podman_gc.dead_tags()
+                if older_than_days is None
+                or (now - t.created) / 86400.0 >= older_than_days
+            ]
+        idle = _idle_vms(idle_days)
 
     # ---- Apply phase ----
     # Sort deepest-first so a base-variant kdir that contains nested
@@ -528,6 +668,15 @@ def cmd_prune(args: argparse.Namespace) -> int:
                 removed.append(c)
             except OSError as e:
                 apply_errors.append((c.path, str(e)))
+    removed_podman: list[str] = []
+    if apply:
+        for t, _why in podman_dead:
+            if podman_gc.remove_tag(t.tag):
+                removed_podman.append(t.tag)
+            else:
+                apply_errors.append(
+                    (Path(t.tag), "podman rmi refused (a container uses it?)")
+                )
 
     # ---- Output ----
     payload: dict[str, Any] = {
@@ -547,15 +696,45 @@ def cmd_prune(args: argparse.Namespace) -> int:
         "removed": [str(c.path) for c in removed],
         "errors": [{"path": str(p), "error": msg} for p, msg in apply_errors],
         "total_bytes": total_bytes,
+        "podman_images": [
+            {
+                "tag": t.tag,
+                "bytes": t.size,
+                "reason": why,
+                "age_days": round(
+                    (datetime.now(tz=timezone.utc).timestamp() - t.created)
+                    / 86400.0,
+                    1,
+                ),
+            }
+            for t, why in podman_dead
+        ],
+        "removed_podman": removed_podman,
+        "idle_vms": idle,
     }
 
     if use_json:
         print(json.dumps(payload, indent=2))
         return EXIT_ERROR if apply_errors else EXIT_OK
 
+    if idle:
+        _print_idle_vms(idle, idle_days)
+        print()
+
+    if podman_dead:
+        print("Dead ltvm podman images (sizes include layers they share):")
+        for t, why in podman_dead:
+            print(f"  {t.tag:<44} {_format_bytes(t.size):>10}  {why}")
+        print()
+
     if not all_candidates:
-        print("Nothing to prune.")
-        return EXIT_OK
+        if not podman_dead:
+            print("Nothing to prune.")
+        elif apply:
+            print(f"Removed {len(removed_podman)} podman images.")
+        else:
+            print("Re-run with --apply to remove them.")
+        return EXIT_ERROR if apply_errors else EXIT_OK
 
     # Human table
     hdr = (
@@ -584,7 +763,12 @@ def cmd_prune(args: argparse.Namespace) -> int:
         else:
             print(
                 f"Removed {len(removed)} entries, "
-                f"freed {_format_bytes(total_bytes)}."
+                f"freed {_format_bytes(total_bytes)}"
+                + (
+                    f", and {len(removed_podman)} podman images."
+                    if removed_podman
+                    else "."
+                )
             )
         return EXIT_ERROR if apply_errors else EXIT_OK
 

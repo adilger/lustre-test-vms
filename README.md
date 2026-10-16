@@ -181,7 +181,8 @@ ltvm make-uninstall             Remove what make-install put here
 ltvm make-reinstall             make-uninstall + make-install
 ltvm llmount <vm>               Mount Lustre in a VM
 ltvm llumount <vm>              Unmount (same as llmount --cleanup)
-ltvm clean                      Prune superseded artifacts (dry-run by default)
+ltvm clean                      Prune superseded artifacts and dead podman
+                                images, list idle VMs (dry-run by default)
 ltvm completion                 Print/install shell tab completion
 ltvm doctor                     Host health check (--fix on request)
 ltvm skills                     Link the agent skill into ~/.claude/skills

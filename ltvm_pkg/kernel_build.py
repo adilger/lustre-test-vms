@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any, TypedDict
 from .cross_compile import host_podman_platform
 from .lustre_tree import kp_configs, kp_patches, kp_series, kp_targets
 from .paths import load_meta_safe
+from .podman_gc import Superseded
 from .podman_run import reclaim_ownership, run_podman_with_cleanup
 from .target_config import TARGETS_DIR
 
@@ -872,15 +873,19 @@ def _ensure_container_image(target_config: TargetConfig) -> str:
         str(base_dockerfile),
         str(TARGETS_DIR),
     ]
+    superseded = Superseded()
+    superseded.note(base_tag)
     subprocess.run(cmd, check=True)
 
     if variant == DEFAULT_VARIANT:
+        superseded.drop()
         return base_tag
 
     v = target_config.variant(variant)
     overlay = v.container_overlay
     if overlay is None:
         # Image-only variant: it builds in the base container.
+        superseded.drop()
         return base_tag
     if not overlay.exists():
         raise RuntimeError(
@@ -914,7 +919,9 @@ def _ensure_container_image(target_config: TargetConfig) -> str:
     # the arch is ltvm's own, so pass it explicitly.
     v_cmd += ["--build-arg", f"MOFED_ARCH={target_config.arch}"]
     v_cmd += ["-f", str(overlay), str(TARGETS_DIR)]
+    superseded.note(variant_tag)
     subprocess.run(v_cmd, check=True)
+    superseded.drop()
 
     return variant_tag
 

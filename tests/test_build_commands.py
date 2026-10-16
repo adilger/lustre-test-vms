@@ -1524,3 +1524,54 @@ def test_image_only_variant_shares_base_lustre_staging(tmp_path: Path) -> None:
 
     assert at("rocky10", "gce") == at("rocky10", "base")
     assert at("rocky9", "mofed-24").name == "K__mofed-24"
+
+
+# The autouse _neutralize_host_clean_state stubs this out; collection
+# runs before it, so the real one is kept here.
+from ltvm_pkg.cli import build as _build_mod  # noqa: E402
+
+_REAL_WARN_LOW_DISK = _build_mod._warn_low_disk
+
+
+class TestWarnLowDisk:
+    def _usage(self, free: int) -> object:
+        from types import SimpleNamespace
+
+        return SimpleNamespace(free=free)
+
+    def test_warns_once_per_filesystem(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        import ltvm_pkg.target_config as cfg
+
+        monkeypatch.setattr(cfg, "ARTIFACTS_DIR", tmp_path / "artifacts")
+        monkeypatch.setattr(_build_mod.Path, "home", lambda: tmp_path)
+        with patch.object(
+            _build_mod.shutil,
+            "disk_usage",
+            return_value=self._usage(5 * 1024**3),
+        ):
+            _REAL_WARN_LOW_DISK()
+        err = capsys.readouterr().err
+        assert err.count("WARNING: only 5.0 GiB free") == 1
+        assert "ltvm clean" in err
+
+    def test_quiet_with_room(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        import ltvm_pkg.target_config as cfg
+
+        monkeypatch.setattr(cfg, "ARTIFACTS_DIR", tmp_path / "artifacts")
+        with patch.object(
+            _build_mod.shutil,
+            "disk_usage",
+            return_value=self._usage(_build_mod.LOW_DISK_BYTES),
+        ):
+            _REAL_WARN_LOW_DISK()
+        assert capsys.readouterr().err == ""

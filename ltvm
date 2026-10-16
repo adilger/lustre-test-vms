@@ -1740,6 +1740,15 @@ def build_parser() -> argparse.ArgumentParser:
         "(~/.cache/ltvm/zfs, ~900 MB each) for kernels no longer in "
         "artifacts",
     )
+    sp.add_argument(
+        "--idle-days",
+        dest="idle_days",
+        type=float,
+        default=14,
+        metavar="DAYS",
+        help="List VMs stopped and untouched this long (default: 14); "
+        "they are listed, never removed",
+    )
     sp.set_defaults(func=cmd_prune)
 
     # -- deploy-lustre --

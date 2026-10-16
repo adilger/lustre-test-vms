@@ -576,6 +576,31 @@ class TestEnsureContainerImage:
         cmd = mock_run.call_args[0][0]
         assert dockerfile in cmd
 
+    def test_drops_the_image_a_rebuild_replaced(self, tmp_path: Path) -> None:
+        cfg = self._make_target_config(tmp_path)
+        superseded = MagicMock()
+        with (
+            patch("ltvm_pkg.kernel_build.subprocess.run"),
+            patch("ltvm_pkg.kernel_build.Superseded", return_value=superseded),
+        ):
+            _ensure_container_image(cfg)
+        superseded.note.assert_called_once_with("ltvm-build-rocky9")
+        superseded.drop.assert_called_once_with()
+
+    def test_failed_build_drops_nothing(self, tmp_path: Path) -> None:
+        cfg = self._make_target_config(tmp_path)
+        superseded = MagicMock()
+        with (
+            patch(
+                "ltvm_pkg.kernel_build.subprocess.run",
+                side_effect=subprocess.CalledProcessError(1, "podman"),
+            ),
+            patch("ltvm_pkg.kernel_build.Superseded", return_value=superseded),
+            pytest.raises(subprocess.CalledProcessError),
+        ):
+            _ensure_container_image(cfg)
+        superseded.drop.assert_not_called()
+
     def _platform_after(self, cmd: list[str]) -> str:
         assert "--platform" in cmd
         return cmd[cmd.index("--platform") + 1]

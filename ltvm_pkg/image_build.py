@@ -21,8 +21,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .image_store import current_image, install_image
+from .image_store import current_image, install_image, prune_superseded
 from .paths import load_meta_safe
+from .podman_gc import Superseded, final_image_tag, remove_tag
 from .target_config import TARGETS_DIR
 
 if TYPE_CHECKING:
@@ -899,7 +900,9 @@ def build_image(
     else:
         build_context = TARGETS_DIR
 
+    superseded = Superseded()
     log.info("Building container image %s ...", tag)
+    superseded.note(tag)
     _run(
         [
             "podman",
@@ -956,6 +959,7 @@ def build_image(
         # variant param; the arch is ltvm's own, so pass it explicitly.
         v_cmd += ["--build-arg", f"MOFED_ARCH={target_config.arch}"]
         v_cmd += ["-f", str(v.image_overlay), str(TARGETS_DIR)]
+        superseded.note(overlay_tag)
         _run(v_cmd, capture_output=False)
         tag = overlay_tag  # downstream stages layer on top of the overlay
 
@@ -1133,7 +1137,9 @@ def build_image(
             inject_dockerfile = inject_dir / "Dockerfile"
             inject_dockerfile.write_text("\n".join(lines) + "\n")
 
-            final_tag = f"{tag}-final"
+            # Per build: another build of this target, for another
+            # kernel or artifacts dir, shares every other tag.
+            final_tag = final_image_tag(tag)
             log.info("Building final image with kernel modules...")
             _run(
                 [
@@ -1153,8 +1159,8 @@ def build_image(
     # ── Step 2: Export to ext4 ──
     # If the export fails, the injected image (when we built one)
     # would otherwise leak as a podman layer on every retry.  Wrap
-    # so we can rmi it on failure.  We don't rmi on success because
-    # the next build pass benefits from layer caching.
+    # so we can rmi it on failure.  On success it goes once the
+    # package manifest below has been read from it.
     log.info("Exporting container to ext4 ...")
     try:
         image_path = _export_to_ext4(final_tag, out_dir)
@@ -1174,7 +1180,7 @@ def build_image(
     # `tag` omitted everything the final stage installs -- notably the
     # MOFED kmod RPMs -- so meta.json's package list under-reported
     # what shipped in the image.  final_tag == tag when no second
-    # stage ran, and it is only rmi'd on the failure path above.
+    # stage ran.
     pkg_manifest = _get_package_manifest(final_tag, target_config.os_family)
 
     lustre_version: str | None = None
@@ -1223,6 +1229,16 @@ def build_image(
         packages=pkg_manifest,
         kernel_name=kernel_name,
     )
+
+    if final_tag != tag:
+        remove_tag(final_tag)
+    superseded.drop()
+    freed = prune_superseded(out_dir)
+    if freed:
+        log.info(
+            "Removed superseded image files no VM uses (%.0f MiB)",
+            freed / (1024 * 1024),
+        )
 
     log.info("Image built: %s (%.0f MiB, %.0fs)", image_path, size_mb, elapsed)
     return image_path
