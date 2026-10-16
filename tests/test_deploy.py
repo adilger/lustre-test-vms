@@ -1272,7 +1272,8 @@ class TestCmdDeployBundledSnapshot:
     def test_bundled_snapshot_used_when_no_build_arg(
         self, tmp_sockets: Path, tmp_path: Path
     ) -> None:
-        """No --build + bundled snapshot present -> snapshot is the source."""
+        """No --build + bundled snapshot present -> the snapshot is
+        deployed as it stands, with nothing written under it."""
         from ltvm_pkg import cli as cli_mod
 
         tc_out = tmp_path / "tc-out"
@@ -1290,17 +1291,13 @@ class TestCmdDeployBundledSnapshot:
         def fake_deploy_to_vm(vm_arg, staging_arg, **kwargs):
             captured["staging"] = Path(staging_arg)
 
-        rsync_calls: list = []
-
-        def fake_run(cmd, *args, **kwargs):
-            rsync_calls.append(cmd)
-            return MagicMock(returncode=0, stdout="", stderr="")
-
         args = _deploy_args(vm="co1-bundled", lustre_tree=None)
-        # Run from snapshot dir so cwd-fallback wouldn't trigger; but
-        # since the snapshot marker exists, snapshot path wins regardless.
         import os as _os
 
+        before = sorted(p for p in tc_out.rglob("*"))
+        # The artifacts dir is read-only on a shared host.
+        for p in [tc_out, *before]:
+            p.chmod(p.stat().st_mode & ~0o222)
         old = _os.getcwd()
         try:
             _os.chdir(tmp_path)
@@ -1310,49 +1307,112 @@ class TestCmdDeployBundledSnapshot:
                     "ltvm_pkg.cli.deploy_to_vm",
                     side_effect=fake_deploy_to_vm,
                 ),
-                patch("subprocess.run", side_effect=fake_run),
+                patch("subprocess.run") as run_mock,
+            ):
+                rc = cli_mod.cmd_deploy(args)
+        finally:
+            _os.chdir(old)
+            for p in [tc_out, *before]:
+                p.chmod(p.stat().st_mode | 0o200)
+
+        assert rc == 0
+        assert captured["staging"] == snap
+        run_mock.assert_not_called()
+        assert sorted(p for p in tc_out.rglob("*")) == before
+
+    def test_bundled_snapshot_for_the_vms_kernel_not_the_default(
+        self, tmp_sockets: Path, tmp_path: Path
+    ) -> None:
+        """A VM booting a non-default kernel gets that kernel's bundle,
+        never the default kernel's."""
+        from ltvm_pkg import cli as cli_mod
+
+        tc_out = tmp_path / "tc-out"
+        self._make_snapshot(tc_out, kernel="5.14-rhel9.7")
+        snap = self._make_snapshot(tc_out, kernel="5.14-rhel9.8")
+
+        vm = _make_vm(name="co1-bundled98", ip="10.0.0.20")
+        vm.os_id = "rocky9"
+        vm.kernel = str(tc_out / "kernels" / "5.14-rhel9.8" / "vmlinuz")
+        vm.save()
+
+        tc = _stub_tc()
+        tc.output_dir = tc_out
+        captured: dict = {}
+
+        def fake_deploy_to_vm(vm_arg, staging_arg, **kwargs):
+            captured["staging"] = Path(staging_arg)
+
+        args = _deploy_args(vm="co1-bundled98", lustre_tree=None)
+        with (
+            patch.object(cli_mod, "TargetConfig", return_value=tc),
+            patch("ltvm_pkg.cli.deploy_to_vm", side_effect=fake_deploy_to_vm),
+        ):
+            rc = cli_mod.cmd_deploy(args)
+
+        assert rc == 0
+        assert captured["staging"] == snap
+
+    def test_no_bundle_for_the_vms_kernel_names_the_ones_there_are(
+        self,
+        tmp_sockets: Path,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from ltvm_pkg import cli as cli_mod
+
+        tc_out = tmp_path / "tc-out"
+        self._make_snapshot(tc_out, kernel="5.14-rhel9.7")
+        (tc_out / "kernels" / "5.14-rhel9.8").mkdir()
+
+        vm = _make_vm(name="co1-nobundle", ip="10.0.0.21")
+        vm.os_id = "rocky9"
+        vm.kernel = str(tc_out / "kernels" / "5.14-rhel9.8" / "vmlinuz")
+        vm.save()
+
+        tc = _stub_tc()
+        tc.output_dir = tc_out
+        args = _deploy_args(vm="co1-nobundle", lustre_tree=None)
+        import os as _os
+
+        old = _os.getcwd()
+        try:
+            _os.chdir(tmp_path)
+            with (
+                patch.object(cli_mod, "TargetConfig", return_value=tc),
+                patch("ltvm_pkg.cli.deploy_to_vm") as deploy_mock,
             ):
                 rc = cli_mod.cmd_deploy(args)
         finally:
             _os.chdir(old)
 
-        assert rc == 0
-        # First subprocess.run is the rsync mirror
-        assert rsync_calls, "expected rsync to be invoked"
-        rsync = rsync_calls[0]
-        assert rsync[0] == "rsync"
-        assert "--delete" in rsync
-        assert str(snap) + "/" in rsync
-        # Staging should be in build_path tree, not under tc.output_dir.
-        # build_path was set to the snapshot itself, so staging lives
-        # under snapshot/.ltvm-staging/.
-        staging = captured["staging"]
-        assert ".ltvm-staging" in str(staging)
-        assert staging.name == "5.14-rhel9.7"
+        assert rc == 1
+        deploy_mock.assert_not_called()
+        err = capsys.readouterr().err
+        assert "boots 5.14-rhel9.8" in err
+        assert "for 5.14-rhel9.7 only" in err
 
-    def test_bundled_snapshot_rsync_failure_returns_error(
+    def test_bundle_recording_another_kernel_is_refused(
         self, tmp_sockets: Path, tmp_path: Path
     ) -> None:
         from ltvm_pkg import cli as cli_mod
 
         tc_out = tmp_path / "tc-out"
-        self._make_snapshot(tc_out)
+        snap = self._make_snapshot(tc_out)
+        (snap / ".ltvm-snapshot.json").write_text(
+            '{"kernel": "5.14-rhel9.5-5.14.0-503.40.1.el9_5"}'
+        )
 
-        vm = _make_vm(name="co1-rsync-fail", ip="10.0.0.18")
+        vm = _make_vm(name="co1-snapkern", ip="10.0.0.22")
         vm.os_id = "rocky9"
         vm.save()
 
         tc = _stub_tc()
         tc.output_dir = tc_out
-
-        def fake_run(cmd, *args, **kwargs):
-            return MagicMock(returncode=23, stdout="", stderr="rsync: nope")
-
-        args = _deploy_args(vm="co1-rsync-fail", lustre_tree=None)
+        args = _deploy_args(vm="co1-snapkern", lustre_tree=None)
         with (
             patch.object(cli_mod, "TargetConfig", return_value=tc),
             patch("ltvm_pkg.cli.deploy_to_vm") as deploy_mock,
-            patch("subprocess.run", side_effect=fake_run),
         ):
             rc = cli_mod.cmd_deploy(args)
 

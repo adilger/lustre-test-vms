@@ -1281,12 +1281,23 @@ mtime-preserving copy slips past the `find -newer` fast path.
 counts only files git tracks.
 
 Each staging dir has a flock beside it (`.<kernel>[__<variant>].lock`,
-`lustre_build.staging_lock`): `build lustre`, the refresh and the
-bundled-snapshot mirror take it exclusive, and streaming into VMs
-(`deploy-lustre`, `cluster deploy`) takes it shared, so deploys of one
-tree stream side by side but never while another rewrites the staging.
-A deploy holds no lock while its child `build lustre` runs -- that
-child's exclusive request would wait on it forever.
+`lustre_build.staging_lock`): `build lustre` and the refresh take it
+exclusive, and streaming into VMs (`deploy-lustre`, `cluster deploy`)
+takes it shared, so deploys of one tree stream side by side but never
+while another rewrites the staging.  A deploy holds no lock while its
+child `build lustre` runs -- that child's exclusive request would wait
+on it forever.
+
+`deploy-lustre` without `--lustre-tree` deploys the bundled Lustre from
+`ltvm fetch` (`kernels/<kver>/lustre-artifacts[/<variant>]/`, marked by
+`.ltvm-snapshot.json`) for the kernel the VM boots, straight from the
+artifacts dir, with no lock and nothing written there: on a shared host
+or in a Patch Watcher run that dir is read-only.  It used to look under
+the target's default kernel whatever the VM booted, and to mirror the
+snapshot into a staging dir beneath itself, which failed with EROFS.
+With no bundle for the VM's kernel it falls back to the current
+directory, and if that is no Lustre tree, the error names the kernels
+that do have one.
 
 Incremental by default: repeating the command rebuilds
 only what changed.  `make distclean` runs for `--force`,

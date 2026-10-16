@@ -11,6 +11,7 @@ cmd_llmount is a thin wrapper around vm_commands.cmd_llmount.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import subprocess
 import sys
@@ -171,6 +172,26 @@ def _refresh_staged_sources(
     return None
 
 
+def _bundled_snapshot(tc: Any, kernel: str, variant: str | None) -> Path | None:
+    """The Lustre that `ltvm fetch` unpacked for this kernel and variant.
+
+    Identified by the .ltvm-snapshot.json marker snapshot_lustre writes;
+    a non-base variant's snapshot nests under its own name.
+    """
+    root = tc.output_dir / "kernels" / kernel / "lustre-artifacts"
+    snap = root if variant in (None, "", "base") else root / variant
+    return snap if (snap / ".ltvm-snapshot.json").is_file() else None
+
+
+def _bundled_kernels(tc: Any, variant: str | None) -> list[str]:
+    """The kernels of this target that have a bundled Lustre."""
+    try:
+        names = sorted(p.name for p in (tc.output_dir / "kernels").iterdir())
+    except OSError:
+        return []
+    return [n for n in names if _bundled_snapshot(tc, n, variant) is not None]
+
+
 def cmd_deploy(args: argparse.Namespace) -> int:
     use_json = args.json
     target = getattr(args, "target", None)
@@ -233,32 +254,52 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     resolved_kernel = tc.resolve_kernel(kernel)
     os_family = tc.os_family
 
+    # The kernel the VM boots, falling back to the target's default:
+    # both the staging and a bundled snapshot are per kernel, and modules
+    # built for any other kernel will not load.
+    deploy_kernel = resolved_kernel
+    if vm.kernel:
+        vm_kernel_name = Path(vm.kernel).parent.name
+        if vm_kernel_name:
+            deploy_kernel = tc.resolve_kernel(vm_kernel_name)
+
     # Resolve build path:
     #   1. Explicit --lustre-tree PATH wins (including --lustre-tree .)
-    #   2. Otherwise, if a bundled snapshot from `ltvm fetch` exists,
-    #      copy it into staging and use it directly (no source rebuild)
+    #   2. Otherwise the bundled snapshot from `ltvm fetch` for the VM's
+    #      kernel, deployed straight from the artifacts dir, which may be
+    #      read-only: nothing is written there.
     #   3. Otherwise, fall back to cwd
     build_arg = getattr(args, "lustre_tree", None)
     bundled_snapshot: Path | None = None
     if build_arg is not None:
         build_path = Path(build_arg).resolve()
     else:
-        # Use tc.output_dir (arch-qualified) instead of a hand-built
-        # ltvm_root/artifacts/<target>/ path so the bundled-snapshot lookup
-        # honors LTVM_ROOT and the /usr/local/bin/ltvm symlink resolution
-        # AND finds the correct arch-qualified subdirectory.
-        packaged = (
-            tc.output_dir / "kernels" / resolved_kernel / "lustre-artifacts"
-        )
-        # A bundled snapshot is identified by the .ltvm-snapshot.json marker
-        # written by snapshot_lustre.  It already has DESTDIR layout
-        # (usr/, lib/modules/), so we can deploy it directly without
-        # going through build-lustre.
-        if packaged.is_dir() and (packaged / ".ltvm-snapshot.json").exists():
-            bundled_snapshot = packaged
-            build_path = packaged
+        bundled_snapshot = _bundled_snapshot(tc, deploy_kernel, vm_variant)
+        if bundled_snapshot is not None:
+            build_path = bundled_snapshot
+            from ltvm_pkg.paths import load_meta_safe
+
+            snap_meta = load_meta_safe(bundled_snapshot / ".ltvm-snapshot.json")
+            snap_kernel = (
+                snap_meta.get("kernel") if isinstance(snap_meta, dict) else None
+            )
+            if snap_kernel and not (
+                deploy_kernel == snap_kernel
+                or deploy_kernel.startswith(f"{snap_kernel}-")
+            ):
+                return _error(
+                    f"The bundled Lustre at {bundled_snapshot} was built "
+                    f"for kernel {snap_kernel}, but {args.vm} boots "
+                    f"{deploy_kernel}",
+                    use_json,
+                    hint="Pass --lustre-tree <Lustre source tree> to build "
+                    "for the VM's kernel.",
+                )
             if not use_json:
-                print("  Using bundled Lustre (from ltvm fetch)")
+                print(
+                    f"  Using bundled Lustre (from ltvm fetch) for "
+                    f"{deploy_kernel}"
+                )
         else:
             build_path = Path(".").resolve()
 
@@ -277,6 +318,28 @@ def cmd_deploy(args: argparse.Namespace) -> int:
             for n in ("configure.ac", "lustre", "lnet")
             if not (build_path / n).exists()
         ]
+        if missing and build_arg is None:
+            others = _bundled_kernels(tc, vm_variant)
+            bundles = (
+                f"the bundled Lustre from `ltvm fetch` is for "
+                f"{', '.join(others)} only"
+                if others
+                else "there is no bundled Lustre from `ltvm fetch`"
+            )
+            return _error(
+                f"Nothing to deploy to {args.vm}: it boots {deploy_kernel}, "
+                f"{bundles}, and no --lustre-tree was given (the current "
+                f"directory {build_path} is not a Lustre source tree)",
+                use_json,
+                hint="Pass --lustre-tree <Lustre source tree> to build for "
+                "this kernel"
+                + (
+                    ", or create the VM with --kernel naming a kernel "
+                    "that has a bundled Lustre."
+                    if others
+                    else "."
+                ),
+            )
         if missing:
             return _error(
                 f"--lustre-tree:'{build_path}' does not look like a Lustre "
@@ -336,64 +399,24 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                 use_json,
             )
 
-    # Staging now lives inside the lustre tree at
+    # Staging lives inside the lustre tree at
     # <build_path>/.ltvm-staging/<target>/<arch>/<kernel>/, per-kernel
     # so two kernels' userland (usr/sbin, etc.) coexist without
-    # clobbering each other.  The kernel key comes from the VM's
-    # actual kernel (falling back to the target's default) so a VM
-    # created with a non-default kernel deploys the Lustre that was
-    # built against that kernel.
+    # clobbering each other.  A bundled snapshot is already a staging
+    # tree for the VM's kernel, and is deployed as it stands.
     from ltvm_pkg.lustre_build import staging_lock
     from ltvm_pkg.lustre_build import staging_path as _staging_path
 
-    deploy_kernel = resolved_kernel
-    if vm.kernel:
-        vm_kernel_name = Path(vm.kernel).parent.name
-        if vm_kernel_name:
-            deploy_kernel = tc.resolve_kernel(vm_kernel_name)
-    staging = _staging_path(
-        build_path,
-        target,
-        arch=vm_arch,
-        kernel=deploy_kernel,
-        variant=vm.variant,
-    )
-    # If the bundled-snapshot path is involved we DON'T require a
-    # pre-existing per-kernel staging -- the snapshot rsync below
-    # populates it.  Otherwise, if the user is deploying against a
-    # source tree without having built Lustre for this kernel, refuse
-    # with a clear hint rather than falling through to an automatic
-    # `ltvm build lustre` that might target the wrong kernel.
-    # If we picked up a bundled snapshot, mirror it into staging
-    # unconditionally.  Previously we skipped the mirror whenever
-    # staging already contained .ko files, but that silently shipped
-    # stale modules from an earlier `ltvm build lustre` run under the
-    # "Using bundled Lustre" banner -- the user thought they were
-    # deploying what they fetched but actually got what was last built
-    # locally.  rsync --delete is the right tool here: the bundled
-    # snapshot is the declared source of truth when bundled_snapshot
-    # is not None.
     if bundled_snapshot is not None:
-        if not use_json:
-            print(f"  Mirroring bundled snapshot into staging: {staging}")
-        staging.mkdir(parents=True, exist_ok=True)
-        with staging_lock(staging, exclusive=True):
-            r = subprocess.run(
-                [
-                    "rsync",
-                    "-a",
-                    "--delete",
-                    str(bundled_snapshot) + "/",
-                    str(staging) + "/",
-                ],
-                capture_output=True,
-                text=True,
-            )
-        if r.returncode != 0:
-            return _error(
-                f"Failed to mirror bundled snapshot: {r.stderr.strip()}",
-                use_json,
-            )
+        staging = bundled_snapshot
+    else:
+        staging = _staging_path(
+            build_path,
+            target,
+            arch=vm_arch,
+            kernel=deploy_kernel,
+            variant=vm.variant,
+        )
 
     def _staging_matches_kernel_and_flags(staging: Path) -> bool:
         """Was this staging built against the kernel and flags in play now?
@@ -620,7 +643,13 @@ def cmd_deploy(args: argparse.Namespace) -> int:
 
     # Shared from here to the end of the stream: other deploys of this
     # staging may stream alongside, but none may rebuild or refresh it.
-    with staging_lock(staging, exclusive=False):
+    # Nothing rewrites a bundled snapshot but `ltvm fetch`.
+    stream_lock = (
+        contextlib.nullcontext()
+        if bundled_snapshot is not None
+        else staging_lock(staging, exclusive=False)
+    )
+    with stream_lock:
         # Which ZFS to ship is the staged build's decision, not the
         # command line's: osd_zfs.ko is linked against one specific ZFS
         # build, so shipping any other would produce a module that won't
