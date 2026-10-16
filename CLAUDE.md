@@ -1023,6 +1023,21 @@ used to mean only `llmount.sh --server-only` and required `--mount`,
 while still building the tree for every node's target, the client's
 included; with `--mount` it still mounts the servers only.
 
+A servers-only mount (`cluster deploy --server-only --mount`, `cluster
+llmount --server-only`) runs on the MGS node with the servers' own test
+scripts, since the clients may hold another tree or none
+(`_SERVER_ONLY_MOUNT`).  llmount.sh took `--server-only` in 2.15.56; an
+older one, every 2.15.x release included, hands it to init_test_env,
+which prints its usage and exits 0 with nothing mounted.  So when the
+node's llmount.sh lacks the option, ltvm sources test-framework.sh
+and runs `formatall; setupall server_only` itself, which setupall has
+long supported.  Every cluster mount is then checked
+(`_check_mounted`): the targets mounted across the server nodes must
+number `expected_targets()` and, unless servers-only, the node it ran
+on must have a client, or the command fails.  llmount.sh's exit status
+alone proves nothing: master's prints its usage and exits 0 on an
+option it does not know.
+
 `ltvm cluster krb5 <name>` sets up Kerberos for sanity-krb5
 ([ltvm_pkg/cluster_krb5.py](ltvm_pkg/cluster_krb5.py)): a KDC on the
 first MDS node, each node's lustre_{mgs,mds,oss,root} and host keys in

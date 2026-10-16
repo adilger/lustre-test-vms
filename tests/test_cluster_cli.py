@@ -23,6 +23,8 @@ import argparse
 import contextlib
 import io
 import json
+import os
+import subprocess
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -1238,7 +1240,9 @@ class TestCmdClusterLlmountBehavior:
             run.return_value = MagicMock(returncode=0)
             self.run = run
             self.kept = kept
-            yield
+            with patch.object(vm_cluster, "_check_mounted") as checked:
+                self.checked = checked
+                yield
 
     def test_refuses_without_the_cluster_block(self) -> None:
         """Regression: with no cluster block in the first client's
@@ -1356,6 +1360,153 @@ class TestCmdClusterLlmountBehavior:
             with pytest.raises(SystemExit) as exc:
                 vm_cluster.cmd_cluster_llmount(self._ns())
         assert exc.value.code == EXIT_ERROR
+        assert not self.checked.called
+
+    @pytest.mark.parametrize("server_only", [False, True])
+    def test_a_mount_is_checked(self, server_only: bool) -> None:
+        with patch.object(vm_cluster, "_node_state", return_value="up"):
+            vm_cluster.cmd_cluster_llmount(self._ns(server_only=server_only))
+        assert self.checked.call_args.kwargs["server_only"] is server_only
+
+    def test_cleanup_is_not_checked(self) -> None:
+        with patch.object(vm_cluster, "_node_state", return_value="up"):
+            vm_cluster.cmd_cluster_llmount(self._ns(cleanup=True))
+        assert not self.checked.called
+
+    def test_server_only_mounts_from_the_mgs(self) -> None:
+        """The clients of an interop cluster may hold another Lustre, or
+        none, so the servers mount with their own scripts.  The cluster
+        still comes down first from the node llumount uses."""
+        with patch.object(vm_cluster, "_node_state", return_value="up"):
+            vm_cluster.cmd_cluster_llmount(self._ns(server_only=True))
+        calls = [c.args[0] for c in self.run.call_args_list]
+        assert calls[0][-2] == "root@10.0.0.12"
+        assert "llmountcleanup.sh" in calls[0][-1]
+        assert calls[-1][-2] == "root@10.0.0.10"
+        assert "setupall server_only" in calls[-1][-1]
+
+
+class TestServerOnlyMountScript:
+    """What `cluster llmount --server-only` runs in the guest, run here
+    against stand-in scripts."""
+
+    _FRAMEWORK = (
+        "init_test_env() { echo init; }\n"
+        "formatall() { echo formatall; }\n"
+        'setupall() { echo "setupall $*"; }\n'
+    )
+
+    def _run(self, tmp_path: Path, llmount: str) -> str:
+        tests = tmp_path / "tests"
+        tests.mkdir()
+        (tests / "llmount.sh").write_text(llmount)
+        (tests / "test-framework.sh").write_text(self._FRAMEWORK)
+        r = subprocess.run(
+            ["bash", "-c", vm_cluster._SERVER_ONLY_MOUNT, "llmount.sh"],
+            cwd=tests,
+            env={"LUSTRE": str(tmp_path), "PATH": os.environ["PATH"]},
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return r.stdout
+
+    def test_a_llmount_that_knows_the_option_gets_it(
+        self, tmp_path: Path
+    ) -> None:
+        out = self._run(
+            tmp_path,
+            '# --server-only) set -- "$@" -S;;\necho "llmount $*"\n',
+        )
+        assert out == "llmount --server-only\n"
+
+    def test_an_older_llmount_is_done_without_it(self, tmp_path: Path) -> None:
+        """v2_15_8's llmount.sh passes --server-only to init_test_env,
+        which prints its usage and exits 0 having mounted nothing."""
+        out = self._run(tmp_path, "echo 'never run'\n")
+        assert "never run" not in out
+        assert out.splitlines()[1:] == [
+            "init",
+            "formatall",
+            "setupall server_only",
+        ]
+
+
+class TestCheckMounted:
+    """llmount.sh exiting 0 is not proof: v2_15_8's ignored --server-only,
+    and master's prints its usage and exits 0 on an option it lacks."""
+
+    @pytest.fixture(autouse=True)
+    def _cluster(self) -> Any:
+        self.cluster = ClusterInfo(
+            name="co1",
+            nodes=[
+                {"name": "co1-mds", "roles": ["mgs", "mds"], "mdt_disks": 1},
+                {"name": "co1-oss", "roles": ["oss"], "ost_disks": 2},
+                {"name": "co1-cli", "roles": ["client"]},
+            ],
+        )
+        self.mounts = {
+            "co1-mds": "1 0",
+            "co1-oss": "2 0",
+            "co1-cli": "0 1",
+        }
+        ips = {"co1-mds": "10.0.0.1", "co1-oss": "10.0.0.2", "co1-cli": "c"}
+        names = {v: k for k, v in ips.items()}
+
+        def fake_run(argv: list[str], **kw: Any) -> MagicMock:
+            name = names[argv[-2].removeprefix("root@")]
+            return MagicMock(returncode=0, stdout=self.mounts[name] + "\n")
+
+        with (
+            patch.object(
+                vm_cluster.VMInfo,
+                "load",
+                side_effect=lambda n: MagicMock(ip=ips[n]),
+            ),
+            patch.object(vm_cluster, "run", side_effect=fake_run),
+        ):
+            yield
+
+    def _check(self, server_only: bool = False, ost_count: int = 0) -> None:
+        vm_cluster._check_mounted(
+            self.cluster,
+            self.cluster.local_node(),
+            server_only=server_only,
+            ost_count=ost_count,
+        )
+
+    def test_all_mounted(self) -> None:
+        self._check()
+
+    def test_a_missing_target(self, capsys: pytest.CaptureFixture[str]) -> None:
+        self.mounts["co1-oss"] = "1 0"
+        with pytest.raises(SystemExit):
+            self._check()
+        assert "2 of 3 targets" in capsys.readouterr().err
+
+    def test_no_client(self, capsys: pytest.CaptureFixture[str]) -> None:
+        self.mounts["co1-cli"] = "0 0"
+        with pytest.raises(SystemExit):
+            self._check()
+        assert "no client is mounted on co1-cli" in capsys.readouterr().err
+
+    def test_server_only_needs_no_client(self) -> None:
+        self.mounts["co1-cli"] = "0 0"
+        self._check(server_only=True)
+
+    def test_expected_targets(self) -> None:
+        assert vm_cluster.expected_targets(self.cluster) == 3
+        assert vm_cluster.expected_targets(self.cluster, ost_count=5) == 6
+        apart = ClusterInfo(
+            name="co2",
+            nodes=[
+                {"name": "co2-mgs", "roles": ["mgs"]},
+                {"name": "co2-mds", "roles": ["mds", "oss"], "mdt_disks": 2},
+                {"name": "co2-oss", "roles": ["oss"], "ost_disks": 3},
+            ],
+        )
+        assert vm_cluster.expected_targets(apart) == 6
 
 
 class TestCmdClusterDeployMountLimit:

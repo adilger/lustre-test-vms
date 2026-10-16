@@ -348,8 +348,11 @@ ltvm cluster deploy co8 --build ~/worktrees/v2_15_8 --server-only
 ltvm cluster deploy co8 --build $CO/1 --client-only --mount
 ```
 
-`--server-only --mount` mounts the servers only.  A node that is both a
-server and a client counts as a server.
+`--server-only --mount` mounts the servers only, from the MGS node with
+the servers' own scripts; a 2.15.x llmount.sh lacks `--server-only`,
+and ltvm does what it does instead.  A node that is both a server and a
+client counts as a server.  A mount that leaves a target, or the
+client, unmounted fails even when llmount.sh exits 0.
 
 ### Page sizes larger than 4 KiB
 

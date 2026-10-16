@@ -1871,9 +1871,17 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
             )
             timeout = llmount_timeout(targets, zfs=fstype == "zfs")
         _run_llmount(
-            cluster, os_family, server_only=server_only, timeout=timeout
+            cluster,
+            os_family,
+            server_only=server_only,
+            timeout=timeout,
+            ost_count=ost_count,
         )
-        print("=== Lustre mounted ===")
+        print(
+            "=== Lustre servers mounted ==="
+            if server_only
+            else "=== Lustre mounted ==="
+        )
 
     print(f"\n=== Cluster '{cluster.name}' deployed ===")
 
@@ -1898,6 +1906,85 @@ def _require_cluster_block(cluster: ClusterInfo, os_family: str) -> None:
         )
 
 
+# llmount.sh --server-only, or what that does for a llmount.sh without
+# the option (before 2.15.56, so every 2.15.x release), which hands its
+# arguments to init_test_env: that prints its usage and exits 0, having
+# mounted nothing.  setupall's server_only argument is older.
+_SERVER_ONLY_MOUNT = (
+    "if grep -q -e --server-only llmount.sh; then "
+    "exec bash llmount.sh --server-only; fi; "
+    'echo "ltvm: this llmount.sh has no --server-only; mounting the '
+    'servers through test-framework.sh"; '
+    '. "$LUSTRE/tests/test-framework.sh"; init_test_env; '
+    '[ -z "$NOFORMAT" ] && formatall; '
+    "setupall server_only"
+)
+
+# Lustre mounts on a node: its targets, and its clients (whose device is
+# the MGS NID and fsname, nid:/fsname).
+_COUNT_MOUNTS = (
+    'awk \'$3 == "lustre" || $3 == "lustre_tgt" '
+    '{ if (index($1, ":/")) c++; else t++ } '
+    "END { print t + 0, c + 0 }' /proc/mounts"
+)
+
+
+def expected_targets(cluster: ClusterInfo, ost_count: int = 0) -> int:
+    """How many targets llmount.sh mounts, as the cluster block counts
+    them: the MDTs, the OSTs, and an MGS that is not on the MDS."""
+    mdts = sum(n.mdt_disks for n in cluster.mds_nodes())
+    osts = ost_count or sum(n.ost_disks for n in cluster.oss_nodes())
+    return mdts + osts + (0 if cluster.mgs_node().is_mds else 1)
+
+
+def _check_mounted(
+    cluster: ClusterInfo,
+    node: ClusterNode,
+    *,
+    server_only: bool,
+    ost_count: int,
+) -> None:
+    """Die unless the cluster's targets, and unless ``server_only`` a
+    client on ``node``, are mounted.
+
+    llmount.sh's exit status is not enough: one that does not know an
+    option may print its usage and exit 0, or ignore it and mount
+    something else.
+    """
+    servers = {
+        n.name for n in cluster.get_nodes() if n.is_mgs or n.is_mds or n.is_oss
+    }
+    targets: dict[str, int] = {}
+    clients = 0
+    for name in sorted(servers | {node.name}):
+        try:
+            r = run(
+                sshpass_ssh_argv(VMInfo.load(name).ip, _COUNT_MOUNTS),
+                capture_output=True,
+                timeout=60,
+            )
+            t, c = (int(x) for x in r.stdout.split())
+        except (subprocess.TimeoutExpired, ValueError) as e:
+            die(f"cannot read the Lustre mounts on {name}: {e}")
+        if name in servers:
+            targets[name] = t
+        if name == node.name:
+            clients = c
+    want = expected_targets(cluster, ost_count)
+    found = sum(targets.values())
+    problems = []
+    if found < want:
+        per_node = ", ".join(f"{k} {v}" for k, v in sorted(targets.items()))
+        problems.append(f"{found} of {want} targets are mounted ({per_node})")
+    if not server_only and not clients:
+        problems.append(f"no client is mounted on {node.name}")
+    if problems:
+        die(
+            f"the mount exited 0, but {' and '.join(problems)}; the output "
+            f"above says why"
+        )
+
+
 def _run_llmount(
     cluster: ClusterInfo,
     os_family: str,
@@ -1905,6 +1992,7 @@ def _run_llmount(
     cleanup: bool = False,
     server_only: bool = False,
     timeout: int = 300,
+    ost_count: int | None = None,
 ) -> None:
     """Run llmount.sh, or with ``cleanup`` llmountcleanup.sh, for the cluster.
 
@@ -1913,8 +2001,13 @@ def _run_llmount(
     It runs on the first client, the node that block treats as local: run
     anywhere else, llmount.sh also mounts a client there that
     llmountcleanup.sh never unmounts, and lustre_rmmod then fails on it.
+    A servers-only mount mounts no client, so it runs on the MGS node
+    with the servers' own scripts: the clients may hold another Lustre,
+    or none yet.
     """
     node = cluster.local_node()
+    if server_only and not cleanup:
+        node = cluster.mgs_node()
     node_vm = VMInfo.load(node.name)
     lustre_dir = lustre_libdir(os_family)
     script = "llmountcleanup.sh" if cleanup else "llmount.sh"
@@ -1922,7 +2015,10 @@ def _run_llmount(
     if cleanup:
         cmd += " && lustre_rmmod"
     elif server_only:
-        cmd += " --server-only"
+        cmd = (
+            f"cd {lustre_dir}/tests && LUSTRE={lustre_dir} bash -c "
+            f"{shlex.quote(_SERVER_ONLY_MOUNT)} llmount.sh"
+        )
 
     if not cleanup:
         # A mounted cluster first comes down as llumount takes it down,
@@ -1931,11 +2027,12 @@ def _run_llmount(
         # the format in llmount.sh.
         from .deploy import premount_sweep_script
 
-        print(f"Cleaning up previous Lustre state from {node.name}...")
+        down = cluster.local_node()
+        print(f"Cleaning up previous Lustre state from {down.name}...")
         with contextlib.suppress(subprocess.TimeoutExpired):
             run(
                 sshpass_ssh_argv(
-                    node_vm.ip,
+                    VMInfo.load(down.name).ip,
                     f"cd {lustre_dir}/tests && LUSTRE={lustre_dir} "
                     "bash llmountcleanup.sh; true",
                 ),
@@ -1970,6 +2067,13 @@ def _run_llmount(
         )
     if r.returncode != 0:
         die(f"{script} failed (rc={r.returncode})")
+    if not cleanup:
+        _check_mounted(
+            cluster,
+            node,
+            server_only=server_only,
+            ost_count=cluster.ost_count if ost_count is None else ost_count,
+        )
 
 
 def cmd_cluster_llmount(args: argparse.Namespace) -> None:
