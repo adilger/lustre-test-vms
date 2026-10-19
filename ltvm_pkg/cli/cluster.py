@@ -326,7 +326,9 @@ def cmd_cluster_status(args: argparse.Namespace) -> int:
     """Show a cluster's nodes and their state."""
     use_json = args.json
     return _call(
-        _handler("cmd_cluster_status"), _qemu_ns(name=args.name), use_json
+        _handler("cmd_cluster_status"),
+        _qemu_ns(name=args.name, wait_recovery=args.wait_recovery),
+        use_json,
     )
 
 

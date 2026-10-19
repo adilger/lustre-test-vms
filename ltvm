@@ -2469,6 +2469,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _csp_name = csp.add_argument("name", help="Cluster name")
     _csp_name.completer = complete_clusters  # type: ignore[attr-defined]
+    csp.add_argument(
+        "--wait-recovery",
+        type=int,
+        metavar="SECS",
+        help="Wait up to SECS for every target to end recovery; exit 1 "
+        "if one has not",
+    )
     csp.set_defaults(func=cmd_cluster_status)
 
     cep = cluster_sub.add_parser(

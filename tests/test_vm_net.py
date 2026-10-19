@@ -664,6 +664,19 @@ class TestRunSsh:
         assert r.returncode == 255
         assert run.call_count == 1 + len(vm_net.SSH_CONNECT_RETRY_DELAYS)
 
+    def test_a_probe_can_skip_the_retries(self) -> None:
+        failed = subprocess.CompletedProcess(
+            [], 255, "", "ssh: connect to host 10.0.0.5 port 22: timed out\n"
+        )
+        with (
+            patch("ltvm_pkg.vm_net.run", return_value=failed) as run,
+            patch.object(vm_net.time, "sleep") as sleep,
+        ):
+            r = vm_net.run_ssh("10.0.0.5", "true", retry_connect=False)
+        assert r.returncode == 255
+        assert run.call_count == 1
+        sleep.assert_not_called()
+
     def test_no_stream_captures(self) -> None:
         with patch.object(
             vm_net, "sshpass_ssh_argv", return_value=["sh", "-c", "echo hi"]

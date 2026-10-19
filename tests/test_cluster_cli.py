@@ -841,6 +841,12 @@ class TestClusterStatusArgs:
             cmd_cluster(_ns("status", "co7"))
         ns = m.call_args.args[0]
         assert ns.name == "co7"
+        assert ns.wait_recovery is None
+
+    def test_status_passes_wait_recovery(self) -> None:
+        with patch("ltvm_pkg.vm_cluster.cmd_cluster_status") as m:
+            cmd_cluster(_ns("status", "co7", "--wait-recovery", "90"))
+        assert m.call_args.args[0].wait_recovery == 90
 
 
 class TestClusterDestroyArgs:

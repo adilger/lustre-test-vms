@@ -865,6 +865,7 @@ def run_ssh(
     timeout: int = 120,
     *,
     stream: IO[str] | None = None,
+    retry_connect: bool = True,
 ) -> subprocess.CompletedProcess:
     """Run a command on a VM via SSH with timeout.
 
@@ -875,7 +876,8 @@ def run_ssh(
     its output would arrive all at once when it finished.
 
     A captured run whose connection never got in is retried, with
-    SSH_CONNECT_RETRY_DELAYS between the tries.
+    SSH_CONNECT_RETRY_DELAYS between the tries, unless *retry_connect*
+    is False: a probe that must give up on a dead node at once.
     """
     ssh_cmd = sshpass_ssh_argv(
         ip,
@@ -885,7 +887,7 @@ def run_ssh(
     try:
         if stream is None:
             r = run(ssh_cmd, timeout=timeout)
-            for delay in SSH_CONNECT_RETRY_DELAYS:
+            for delay in SSH_CONNECT_RETRY_DELAYS if retry_connect else ():
                 if not ssh_never_connected(r.returncode, r.stderr):
                     break
                 print(

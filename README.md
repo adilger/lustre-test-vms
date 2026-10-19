@@ -288,7 +288,8 @@ ltvm cluster stop <name>...     Stop every node
 ltvm cluster deploy <name>      Build + deploy Lustre to every node
 ltvm cluster llmount <name>     Mount Lustre across the cluster
 ltvm cluster llumount <name>    Unmount it and unload the modules
-ltvm cluster status <name>      Nodes and their state
+ltvm cluster status <name>      Nodes, targets, recovery and client imports
+                                (--wait-recovery SECS waits for recovery)
 ltvm cluster exec <name> <role> <cmd>...   Run on every node with that role
 ltvm cluster ssh  <name> <role> Interactive ssh to one node
 ltvm cluster list               List all clusters

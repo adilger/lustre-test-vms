@@ -303,6 +303,13 @@ ltvm cluster stop co2                      # start to bring it back
 ltvm cluster destroy co2
 ```
 
+`cluster status` also shows the Lustre targets of each server, with
+their recovery state.  For each client, it lists the imports that are
+not FULL or IDLE.  `--json` gives the same data under `lustre`.  To wait
+for recovery, add `--wait-recovery SECS`.  The command then exits 1
+if a target still recovers after SECS.  A node that does not answer in
+10 seconds shows as unreachable.
+
 `cluster create` and `cluster destroy` need `sudo` in front on a host
 that is not set up for unprivileged VMs (see Root).
 

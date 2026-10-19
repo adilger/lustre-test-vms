@@ -2390,6 +2390,17 @@ def cmd_cluster_status(args: argparse.Namespace) -> None:
         }
         for node in nodes
     ]
+    from .cluster_lustre_state import (
+        lustre_state,
+        print_lustre_state,
+        wait_recovery,
+    )
+
+    wait = getattr(args, "wait_recovery", None)
+    if wait is None:
+        lustre, recovered = lustre_state(cluster), None
+    else:
+        lustre, recovered = wait_recovery(cluster, wait)
 
     if use_json:
         print(
@@ -2400,10 +2411,14 @@ def cmd_cluster_status(args: argparse.Namespace) -> None:
                     "ip_family": cluster.ip_family or "ipv4",
                     "ost_count": cluster.ost_count or None,
                     "nodes": rows,
+                    "lustre": lustre,
+                    **({} if recovered is None else {"recovered": recovered}),
                 },
                 indent=2,
             )
         )
+        if recovered is False:
+            raise SystemExit(1)
         return
 
     print(f"cluster: {cluster.name}")
@@ -2432,6 +2447,9 @@ def cmd_cluster_status(args: argparse.Namespace) -> None:
         print(
             f"  {node.name:<20} {node.ip:<18} {status:<8} {roles:<12}{disks}",
         )
+    print_lustre_state(lustre)
+    if recovered is False:
+        die(f"recovery did not end in {wait}s")
 
 
 def cmd_cluster_ssh(args: argparse.Namespace) -> None:
