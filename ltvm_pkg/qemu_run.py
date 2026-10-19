@@ -422,6 +422,63 @@ def smp_args(vcpus: int, mem: int, nodes: int) -> list[str]:
     return args
 
 
+# The cache mode of a disk that two QEMUs open at once.  Both must use
+# the same one: a write one process holds in the host page cache is
+# invisible to the other's O_DIRECT reads, and the MMP block is exactly
+# such a write.  "none" bypasses the host cache on both sides, as a
+# shared SAN LUN would.
+SHARED_DISK_CACHE = "none"
+
+
+def data_disk_args(vm: VMInfo, blk_driver: str = "virtio-blk-pci") -> list[str]:
+    """The -device/-drive pairs for *vm*'s data disks (vdb, vdc, ...).
+
+    A failover partner (``disks_from``) has no disks of its own and
+    attaches its primary's, in the primary's order, so /dev/vdb is the
+    same target on both guests.  QEMU locks an image against a second
+    writer unless every QEMU that opens it says share-rw=on, so the
+    primary (``share_disks``) and the partner both do.  A VM with
+    neither gets its own disks exactly as before.
+    """
+    if vm.disks_from:
+        try:
+            owner = VMInfo.load(vm.disks_from)
+        except VMNotFound:
+            die(
+                f"'{vm.name}' attaches the disks of '{vm.disks_from}', "
+                f"which does not exist"
+            )
+        if not owner.share_disks:
+            die(
+                f"'{vm.name}' attaches the disks of '{owner.name}', which "
+                f"was not created with --share-disks"
+            )
+        disks = [
+            owner.disk_path(n)
+            for n in range(1, owner.mdt_disks + owner.ost_disks + 1)
+        ]
+        shared = True
+    else:
+        disks = [
+            vm.disk_path(n) for n in range(1, vm.mdt_disks + vm.ost_disks + 1)
+        ]
+        shared = vm.share_disks
+    args: list[str] = []
+    for n, disk in enumerate(disks, start=1):
+        if not disk.exists():
+            die(f"disk{n} missing for '{vm.name}': {disk}")
+        device = f"{blk_driver},drive=disk{n}"
+        drive = (
+            f"id=disk{n},file={disk},format=raw,if=none,"
+            "discard=unmap,detect-zeroes=unmap"
+        )
+        if shared:
+            device += ",share-rw=on"
+            drive += f",cache={SHARED_DISK_CACHE}"
+        args += ["-device", device, "-drive", drive]
+    return args
+
+
 def _pidfile_pid(vm: VMInfo) -> int:
     try:
         return int(vm.pid_path.read_text().strip())
@@ -1048,18 +1105,7 @@ def _start_qemu(vm: VMInfo) -> None:
                 f"{_nic_type!r} on VM {vm.name!r}"
             )
 
-    total_disks = vm.mdt_disks + vm.ost_disks
-    for n in range(1, total_disks + 1):
-        disk = vm.disk_path(n)
-        if not disk.exists():
-            die(f"disk{n} missing for '{vm.name}'")
-        qemu_args += [
-            "-device",
-            f"{blk_driver},drive=disk{n}",
-            "-drive",
-            f"id=disk{n},file={disk},format=raw,if=none,"
-            "discard=unmap,detect-zeroes=unmap",
-        ]
+    qemu_args += data_disk_args(vm, blk_driver)
 
     try:
         _prepare_log(vm)

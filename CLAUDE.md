@@ -1076,6 +1076,17 @@ node whose older image lacks it (`_ensure_pdsh`).
 exits non-zero if any node did; `cluster ssh <role>` opens a session on
 the first, since it execs a single interactive ssh.
 
+**Shared data disks.**  `ltvm create A --share-disks` and `ltvm create B
+--disks-from A` give 2 VMs one set of data disks.  B has no disks of
+its own.  Thus both guests see the same `/dev/vd*` names
+(`qemu_run.data_disk_args`).
+
+- Both QEMUs need `share-rw=on` and `cache=none`.  QEMU refuses a mix.
+  With host caching, one QEMU does not see the writes of the other.
+- `_validate_failover_disks` limits a share to 2 VMs.
+- `_refuse_orphaned_partners` stops `destroy` of a primary alone.  Its
+  partner would keep writing to unlinked images.
+
 Each action is a real subparser, so `ltvm cluster <action> --help`
 works and every action's flags validate and tab-complete.  Two
 consequences worth knowing:

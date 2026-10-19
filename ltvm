@@ -1301,6 +1301,28 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     _vm_create_args.add_argument(
+        "--share-disks",
+        dest="share_disks",
+        action="store_true",
+        help=(
+            "Let one failover partner (a VM made with --disks-from "
+            "this one) open this VM's data disks at the same time.  "
+            "The disks bypass the host page cache (cache=none)."
+        ),
+    )
+    _vm_disks_from = _vm_create_args.add_argument(
+        "--disks-from",
+        dest="disks_from",
+        default=None,
+        metavar="VM",
+        help=(
+            "Make a failover partner: attach the data disks of VM, "
+            "which needs --share-disks, in the same order (vdb, ...) "
+            "instead of disks of its own"
+        ),
+    )
+    _vm_disks_from.completer = complete_vms  # type: ignore[attr-defined]
+    _vm_create_args.add_argument(
         "--root-size",
         dest="root_size",
         default=None,

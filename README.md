@@ -303,6 +303,16 @@ deploy --mount` run llmount.sh from the first client node (the MGS node
 when there is no client), the node the generated `cfg/local.sh` treats
 as local.
 
+`ltvm create A --share-disks`, then `ltvm create B --disks-from A`,
+gives 2 VMs one set of data disks, for a failover pair. B has no data
+disks of its own. The QEMU of B opens the data disks of A in the same
+order. Thus both guests see each disk under one name (`/dev/vdb`,
+`/dev/vdc`). Both QEMUs open these disks with `share-rw=on` and
+`cache=none`. A share has at most 2 VMs. `ltvm destroy A` refuses
+while B exists, because B would lose its disks: destroy both together.
+On Linux, the VM directory must be on a filesystem that supports
+`O_DIRECT`.
+
 `vm` sub-actions:
 
 ```

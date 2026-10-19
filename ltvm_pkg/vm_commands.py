@@ -831,6 +831,8 @@ def _allocate_and_persist_vm(
             passthrough_drivers={},
             kernel_args=getattr(args, "kernel_args", ""),
             numa_nodes=getattr(args, "numa_nodes", 0) or 0,
+            share_disks=bool(getattr(args, "share_disks", False)),
+            disks_from=getattr(args, "disks_from", None) or "",
         )
         problem = numa_problem(vm.vcpus, vm.mem, vm.numa_nodes)
         if problem:
@@ -863,7 +865,12 @@ def _print_create_report(vm: VMInfo, args: argparse.Namespace) -> None:
             f"  ip:    {vm.ip}\n"
             f"  pid:   {vm.pid}\n"
             f"  owner: {vm.owner_id}\n"
-            f"  disks: {vm.mdt_disks} MDT + {vm.ost_disks} OST"
+            + (
+                f"  disks: those of {vm.disks_from}, shared"
+                if vm.disks_from
+                else f"  disks: {vm.mdt_disks} MDT + {vm.ost_disks} OST"
+                + (", shared" if vm.share_disks else "")
+            )
         )
 
 
@@ -907,6 +914,8 @@ def _print_create_plan(
         "extra_nics": list(extra_nic_types),
         "kernel_args": getattr(args, "kernel_args", ""),
         "numa_nodes": getattr(args, "numa_nodes", 0) or 0,
+        "share_disks": bool(getattr(args, "share_disks", False)),
+        "disks_from": getattr(args, "disks_from", None) or "",
         "owner_id": getattr(args, "owner_id", None),
     }
     if args.json:
@@ -926,10 +935,14 @@ def _print_create_plan(
     print(f"  cpu/mem: {args.vcpus} vcpus, {args.mem} MB")
     if getattr(args, "numa_nodes", 0):
         print(f"  numa:    {args.numa_nodes} nodes")
-    print(
-        f"  disks:   {args.mdt_disks} MDT + {args.ost_disks} OST "
-        f"@ {size_mb}M each"
-    )
+    if getattr(args, "disks_from", None):
+        print(f"  disks:   those of {args.disks_from}, shared")
+    else:
+        print(
+            f"  disks:   {args.mdt_disks} MDT + {args.ost_disks} OST "
+            f"@ {size_mb}M each"
+            + (", shared" if getattr(args, "share_disks", False) else "")
+        )
     print(f"  root:    {_size_label(root_size)}")
     # The IP is claimed under a lock by the step this stops short of, so
     # there is no honest way to name the one a real run would get.
@@ -1094,6 +1107,63 @@ def _validate_create_bounds(
         _check_passthrough_conflicts(passthrough_bdfs)
 
     return extra_nic_types, passthrough_bdfs
+
+
+def _validate_failover_disks(args: argparse.Namespace) -> VMInfo | None:
+    """Check --share-disks and --disks-from; return the VM whose disks
+    a failover partner attaches, or None.
+
+    A partner gets no disks of its own, so its /dev/vd* names match its
+    primary's.  It refuses a chain (a partner of a partner) and a
+    primary that another partner already shares: QEMU's share-rw lets
+    any number of writers in, and only this check keeps it at two.
+    """
+    share = bool(getattr(args, "share_disks", False))
+    owner_name = getattr(args, "disks_from", None) or ""
+    if not owner_name:
+        return None
+    if share:
+        die("--share-disks and --disks-from exclude each other")
+    _validate_vm_name_for_lookup(owner_name)
+    if owner_name == args.name:
+        die(f"--disks-from {owner_name}: a VM cannot share its own disks")
+    typed = _explicit_flags() & {"mdt_disks", "ost_disks"}
+    if any(getattr(args, d, 0) for d in typed):
+        die(
+            "--disks-from attaches the other VM's disks; it takes no "
+            "--mdt-disks or --ost-disks of its own"
+        )
+    args.mdt_disks = 0
+    args.ost_disks = 0
+    try:
+        owner = VMInfo.load(owner_name)
+    except VMNotFound:
+        die(f"--disks-from {owner_name}: no such VM")
+    if owner.disks_from:
+        die(
+            f"--disks-from {owner_name}: that VM attaches the disks of "
+            f"{owner.disks_from!r}; name {owner.disks_from!r} instead"
+        )
+    if not owner.share_disks:
+        die(
+            f"--disks-from {owner_name}: that VM was not created with "
+            f"--share-disks, so its QEMU locks its disks against a second "
+            f"writer"
+        )
+    if not owner.mdt_disks + owner.ost_disks:
+        die(f"--disks-from {owner_name}: that VM has no data disks")
+    for other in VMInfo.all_names():
+        if other in (args.name, owner_name):
+            continue
+        try:
+            if VMInfo.load(other).disks_from == owner_name:
+                die(
+                    f"--disks-from {owner_name}: {other!r} already "
+                    f"shares its disks; a failover pair has two VMs"
+                )
+        except (VMNotFound, ValueError):
+            continue
+    return owner
 
 
 def _check_passthrough_conflicts(bdfs: list[str]) -> None:
@@ -1395,6 +1465,7 @@ def cmd_create(args: argparse.Namespace) -> None:
         return
 
     extra_nic_types, passthrough_bdfs = _validate_create_bounds(args)
+    shared_owner = _validate_failover_disks(args)
 
     # Refuse now rather than letting two VMs fight over one host TAP
     # once they are both running (see check_tap_collision).  Read-only,
@@ -1412,6 +1483,9 @@ def cmd_create(args: argparse.Namespace) -> None:
     os_id = os_target
 
     disk_size = _parse_disk_size(getattr(args, "disk_size", None))
+    if shared_owner is not None:
+        # The partner's disks are the owner's; record their real size.
+        disk_size = shared_owner.disk_size
     root_size = _parse_root_size(getattr(args, "root_size", None))
     _check_root_size_fits(root_size, image)
 
@@ -1653,7 +1727,29 @@ def _destroy_vm_artifacts(name: str) -> None:
         )
 
 
+def _refuse_orphaned_partners(names: list[str]) -> None:
+    """Refuse to destroy a VM whose disks a partner that stays still uses.
+
+    The partner's QEMU would go on writing to unlinked images, and the
+    data would be gone when it exits.  Destroying both together is fine.
+    """
+    going = set(names)
+    for other in VMInfo.all_names():
+        if other in going:
+            continue
+        try:
+            owner = VMInfo.load(other).disks_from
+        except (VMNotFound, ValueError):
+            continue
+        if owner in going:
+            die(
+                f"destroy {owner}: {other!r} uses its disks (--disks-from); "
+                f"destroy both together: ltvm destroy {owner} {other}"
+            )
+
+
 def cmd_destroy(args: argparse.Namespace) -> None:
+    _refuse_orphaned_partners(args.names)
     for name in args.names:
         _validate_vm_name_for_lookup(name)
         existed = (SOCKETS / f"{name}.info").exists()
