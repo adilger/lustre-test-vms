@@ -325,10 +325,14 @@ ltvm suite run co2 replay-single --only '0a 0b' --wait
 The single-VM form is `ltvm create A --share-disks`, then `ltvm create
 B --disks-from A`. `ltvm destroy A` refuses while B exists, because B
 would lose its disks: destroy both together. A primary has at most one
-partner. MMP stops a second
-Lustre mount, but it does not stop a raw write to the device. The tests
-so far used ldiskfs only. On Linux, the VM directory must be on a filesystem
+partner. MMP stops a second Lustre mount, but it does not stop a raw
+write to the device. On Linux, the VM directory must be on a filesystem
 that supports `O_DIRECT`.
+
+On ZFS, mkfs.lustre partitions each disk after the partner booted, and
+the partner's kernel does not see the new partitions. Thus `local.sh`
+sets `ZPOOL=/usr/sbin/ltvm-zpool`, which rereads the partition table of
+a data disk that shows none before a `zpool import`.
 
 `vm` sub-actions:
 

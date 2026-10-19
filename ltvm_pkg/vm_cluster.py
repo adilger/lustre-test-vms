@@ -43,6 +43,12 @@ from .vm_state import (
     lustre_libdir,
 )
 
+# Guest helpers that local.sh names: ZPOOL.
+ZPOOL_HELPER = "/usr/sbin/ltvm-zpool"
+GUEST_HELPERS = {
+    ZPOOL_HELPER: Path(__file__).parent / "ltvm-zpool.sh",
+}
+
 
 def _sudo_prefix() -> list[str]:
     """``["sudo"]`` unless we are already root or VMs need no root here.
@@ -523,6 +529,11 @@ def generate_local_sh(
 
     lines.append("LCTL=/usr/sbin/lctl")
     lines.append("LFS=/usr/bin/lfs")
+    lines.append("")
+
+    # A failover partner must reread the partitions before an import;
+    # see ltvm-zpool.sh.
+    lines.append(f"ZPOOL={ZPOOL_HELPER}")
     lines.append("")
 
     lines.append('PDSH="pdsh -S -Rssh -w"')
@@ -1359,6 +1370,37 @@ _PDSH_SCRIPTS = {
 }
 
 
+def _install_guest_helpers(
+    node_name: str, node_ip: str
+) -> tuple[str, int, str]:
+    """Install the helpers that local.sh names (GUEST_HELPERS).
+
+    Every node gets them: the framework runs $ZPOOL on the servers, and
+    on the node that drives the suite.  Returns
+    (node_name, returncode, output).
+    """
+    from ltvm_pkg.deploy import step_timeout
+
+    for dest, src in GUEST_HELPERS.items():
+        try:
+            r = subprocess.run(
+                sshpass_ssh_argv(
+                    node_ip,
+                    f"cat > {dest} && chmod 755 {dest}",
+                    extra_opts=SSH_KEEPALIVE_OPTS,
+                ),
+                input=src.read_text(),
+                capture_output=True,
+                text=True,
+                timeout=step_timeout(),
+            )
+        except subprocess.TimeoutExpired as e:
+            return node_name, 1, f"timed out after {e.timeout}s writing {dest}"
+        if r.returncode != 0:
+            return node_name, r.returncode, (r.stdout + r.stderr).rstrip("\n")
+    return node_name, 0, ""
+
+
 def _ensure_pdsh(
     node_name: str, node_ip: str, os_family: str
 ) -> tuple[str, int, str]:
@@ -1950,6 +1992,14 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
             f"it.  Rebuild the image (ltvm build image <target>) and "
             f"recreate the cluster."
         )
+    failed_helpers = _parallel_cluster_op(
+        nodes,
+        lambda node: _install_guest_helpers(node.name, node_ips[node.name]),
+        success_verb="helpers installed",
+        failure_verb="helper install FAILED",
+    )
+    if failed_helpers:
+        die(f"guest helper install failed for: {', '.join(failed_helpers)}")
     failed_links = _link_lustre_libdirs(nodes, node_ips, node_families)
     if failed_links:
         die(f"Lustre directory links failed for: {', '.join(failed_links)}")

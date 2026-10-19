@@ -431,3 +431,23 @@ class TestLocalShFailover:
             lnet = vm_cluster.probe_mgs_lnet(c)
         assert lnet.mgsnid == "10.0.0.10@tcp"
         assert ssh.call_count == 1
+
+
+# ── guest helpers ────────────────────────────────────────
+
+
+class TestGuestHelpers:
+    def _text(self) -> str:
+        return vm_cluster.generate_local_sh(
+            _cluster(
+                ("g-mds1", ["mgs", "mds"], 1, 0, "10.0.0.10"),
+                ("g-c", ["client"], 0, 0, "10.0.0.12"),
+            )
+        )
+
+    def test_local_sh_names_the_zpool_helper(self) -> None:
+        assert f"ZPOOL={vm_cluster.ZPOOL_HELPER}" in self._text()
+
+    def test_every_helper_has_a_source(self) -> None:
+        for src in vm_cluster.GUEST_HELPERS.values():
+            assert src.is_file()

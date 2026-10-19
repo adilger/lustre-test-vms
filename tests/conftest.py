@@ -407,6 +407,16 @@ def _neutralize_ensure_pdsh() -> object:
 
 
 @pytest.fixture(autouse=True)
+def _neutralize_guest_helpers() -> object:
+    """Keep cluster deploy from writing the guest helpers over ssh."""
+    with patch(
+        "ltvm_pkg.vm_cluster._install_guest_helpers",
+        side_effect=lambda name, *a, **k: (name, 0, ""),
+    ):
+        yield
+
+
+@pytest.fixture(autouse=True)
 def _neutralize_podman_gc() -> object:
     """Keep the builds' and clean's podman image cleanup off real podman.
 

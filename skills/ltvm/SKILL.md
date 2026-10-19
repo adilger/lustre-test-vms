@@ -437,15 +437,17 @@ NIDs in `MGSNID`.  The framework formats the target with `--failnode`,
 which turns on ldiskfs MMP.  MMP stops a second Lustre mount on the
 partner with EBUSY after about 11 seconds.  MMP does not stop a raw
 `dd` to the device, so do not write to the device from the passive
-node.  After a hard stop of the active node, the partner can mount the
-target once the MMP check passes:
+node.  ZFS works too: `multihost=on` stops the second import.
+
+After a hard stop of the active node, the partner can mount the target
+once the MMP check passes:
 
 ```bash
 kill -9 <primary QEMU pid>    # or: ltvm stop co2-mds1 --force
 ssh co2-mds2 'mount -t lustre /dev/vdb /mnt/mdt'
 ```
 
-A primary has one partner at most.  The tests so far used ldiskfs only.
+A primary has one partner at most.
 
 ## Running tests
 
