@@ -245,10 +245,38 @@ Where the difference comes from:
   19.8 s in the UTM VM and 20 s in a guest nested in it.  Whether the
   UTM VM's nested virtualization option causes it has not been tested.
 
+#### Building Lustre
+
 In this layout builds are not nested: `ltvm build` runs podman
 directly in the L1, against a Lustre tree on its own disk, and only
 the test VMs nest.  On the Mac, podman runs in a VM of its own
-(`podman machine`) and reaches the tree over a shared folder.
+(`podman machine`) and reaches the tree over virtiofs.
+
+`ltvm build lustre rocky9 --arch aarch64 --kernel 5.14-rhel9.7
+--configure=--with-o2ib=no` on a fresh clone of the same commit, with
+the same build container image, both sides at 5 CPUs (the UTM VM with
+8 GB, the podman machine with 4 GB):
+
+| | UTM VM | macOS |
+|---|---|---|
+| full build (configure + 34 modules) | 137 s | 334 s |
+| rebuild, nothing changed | 3 s | 23 s |
+| rebuild, one `.c` touched | 4 s | 23 s |
+
+The Mac pays three things the UTM VM does not:
+
+- **virtiofs.**  In the podman machine itself, an up-to-date `make`
+  takes 0.8 s with the tree on the machine's own disk and 3.0 s (10 s
+  cold) with it shared from macOS; one touched `.c` file, 3.6 s
+  against 7.7 s.
+- **The podman machine's lifecycle.**  ltvm stops the machine after a
+  build to give its memory back and starts it for the next one, about
+  12 s per build command.
+- **`-j` from the Mac's core count.**  The build ran `make -j11` on the
+  machine's 5 CPUs and 4 GB.
+
+Compute is not among them: the podman machine is an HVF VM, which
+runs `xz` faster than the UTM VM does (above).
 
 An earlier attempt on this setup concluded TCG was faster, from boot
 time alone (~60 s under KVM, with `nohz=off` and the ITS off).  That
