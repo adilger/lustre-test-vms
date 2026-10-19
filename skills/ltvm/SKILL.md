@@ -303,6 +303,13 @@ ltvm cluster stop co2                      # start to bring it back
 ltvm cluster destroy co2
 ```
 
+`cluster status` also shows the Lustre targets of each server, with
+their recovery state.  For each client, it lists the imports that are
+not FULL or IDLE.  `--json` gives the same data under `lustre`.  To wait
+for recovery, add `--wait-recovery SECS`.  The command then exits 1
+if a target still recovers after SECS.  A node that does not answer in
+10 seconds shows as unreachable.
+
 `cluster create` and `cluster destroy` need `sudo` in front on a host
 that is not set up for unprivileged VMs (see Root).
 
@@ -415,6 +422,55 @@ LTVM.TEST; rerunning keeps the keys, recreating the cluster loses them):
 ```bash
 ltvm cluster krb5 co2
 ```
+
+### Failover pairs
+
+To move a target between 2 servers (`fail mds1`, replay and recovery
+tests with a real failover), give a server a failover partner:
+
+```bash
+ltvm cluster create co2 mgs+mds:co2-mds1:1 oss:co2-oss:2 client:co2-c \
+    --failover co2-mds2=co2-mds1
+ltvm cluster deploy co2 --build <tree>
+ltvm suite run co2 replay-single --only '0a 0b' --wait
+```
+
+The partner is a new node (not a node spec) with the role `failover`.
+The partner has no disks of its own.  Its QEMU opens the primary's
+disks, so `/dev/vdb` is the same MDT on both guests.  `cluster deploy`
+writes the partner into `cfg/local.sh` as `mds1failover_HOST`.  When
+the primary is the MGS, it also writes `mgsfailover_HOST` and puts both
+NIDs in `MGSNID`.  The framework formats the target with `--failnode`,
+which turns on ldiskfs MMP.  MMP stops a second Lustre mount on the
+partner with EBUSY after about 11 seconds.  MMP does not stop a raw
+`dd` to the device, so do not write to the device from the passive
+node.  ZFS works too: `multihost=on` stops the second import.
+
+To fail a server over by hand, use `cluster failover`, not a hand
+mount.  It puts the fault on the host, then mounts the targets on the
+partner through the test framework.  Thus the framework's record of
+the active node stays correct for `cluster failback`:
+
+```bash
+ltvm cluster failover co2 co2-mds1 --how kill --json
+ltvm cluster status co2 --json --wait-recovery 300
+ltvm cluster failback co2 co2-mds1
+```
+
+`--how` is `umount`, `kill` (power loss), `panic` (vmcore, then a
+reboot) or `freeze` (SIGSTOP, Linux hosts only).  The `split-brain`
+method cuts the link of a primary that runs.  It then checks that MMP
+refuses the takeover: exit 0 means MMP refused it.  Neither action waits for
+recovery.  `cluster status --wait-recovery SECS` waits, and exits 1
+if a target still recovers after SECS.  A suite deletes the framework's record of where each facet is.  Thus
+`suite run` and `cluster llmount`/`llumount` refuse while a target is
+on its partner, and name the failback to run.
+
+For suites with hard failures, add `--env FAILURE_MODE=HARD`.  The
+framework then crashes a node through `ltvm-power`, and the node
+reboots after 30 seconds.
+
+A primary has one partner at most.
 
 ## Running tests
 

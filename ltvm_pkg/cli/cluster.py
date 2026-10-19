@@ -1,5 +1,6 @@
 """CLI layer for ``ltvm cluster``: create / destroy / start / stop /
-deploy / llmount / status / exec / list / ssh over ``ltvm_pkg.vm_cluster``.
+deploy / llmount / status / failover / failback / exec / list / ssh over
+``ltvm_pkg.vm_cluster``.
 
 One thin wrapper per action, each reaching the matching vm_cluster
 handler through a ``_call`` adapter that turns SystemExit into an int
@@ -158,6 +159,19 @@ def cmd_cluster_create(args: argparse.Namespace) -> int:
         per_node["--node-kernel"].get(n) for n in names
     ]
 
+    # --failover PARTNER=PRIMARY: PARTNER is a new node, so it is not
+    # among the spec names; vm_cluster checks the rest.
+    failover: dict[str, str] = {}
+    for item in getattr(args, "failover", None) or []:
+        partner, sep, primary = item.partition("=")
+        if not sep or not partner or not primary:
+            return _error(
+                f"--failover {item!r}: expected PARTNER=PRIMARY", use_json
+            )
+        if partner in failover:
+            return _error(f"--failover names {partner!r} twice", use_json)
+        failover[partner] = primary
+
     flag_target = args.target
     if (
         pos_target is not None
@@ -177,6 +191,7 @@ def cmd_cluster_create(args: argparse.Namespace) -> int:
             nodes=nodes,
             node_targets=node_targets,
             node_kernels=node_kernels,
+            failover=failover,
             vcpus=args.vcpus,
             # mem=None means "let cmd_create resolve the target's
             # default_mem" (rocky10 needs 4096), rather than silently
@@ -312,7 +327,35 @@ def cmd_cluster_status(args: argparse.Namespace) -> int:
     """Show a cluster's nodes and their state."""
     use_json = args.json
     return _call(
-        _handler("cmd_cluster_status"), _qemu_ns(name=args.name), use_json
+        _handler("cmd_cluster_status"),
+        _qemu_ns(name=args.name, wait_recovery=args.wait_recovery),
+        use_json,
+    )
+
+
+def cmd_cluster_failover(args: argparse.Namespace) -> int:
+    """Move a server's targets to its failover partner."""
+    use_json = args.json
+    return _call(
+        _handler("cmd_cluster_failover"),
+        _qemu_ns(
+            name=args.name,
+            node=args.node,
+            how=args.how,
+            hold=args.hold,
+            timeout=args.timeout,
+        ),
+        use_json,
+    )
+
+
+def cmd_cluster_failback(args: argparse.Namespace) -> int:
+    """Move a server's targets back from its failover partner."""
+    use_json = args.json
+    return _call(
+        _handler("cmd_cluster_failback"),
+        _qemu_ns(name=args.name, node=args.node, timeout=args.timeout),
+        use_json,
     )
 
 

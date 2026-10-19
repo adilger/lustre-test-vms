@@ -41,7 +41,10 @@ done
 # packages-dev.txt.
 echo "==> Installing ZFS build dependencies"
 if command -v dnf >/dev/null 2>&1; then
-    dnf -y install \
+    # --refresh: the container image holds the repo metadata from the
+    # day it was built.  Once the mirrors move on, the files it names
+    # are gone (404) and the install fails.
+    dnf -y --refresh install \
         libtirpc-devel \
         libblkid-devel \
         libuuid-devel \

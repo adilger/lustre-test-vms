@@ -288,7 +288,10 @@ ltvm cluster stop <name>...     Stop every node
 ltvm cluster deploy <name>      Build + deploy Lustre to every node
 ltvm cluster llmount <name>     Mount Lustre across the cluster
 ltvm cluster llumount <name>    Unmount it and unload the modules
-ltvm cluster status <name>      Nodes and their state
+ltvm cluster status <name>      Nodes, targets, recovery and client imports
+                                (--wait-recovery SECS waits for recovery)
+ltvm cluster failover <name> <node> [--how H]   Fault a server, mount on partner
+ltvm cluster failback <name> <node>             Restore it, move targets back
 ltvm cluster exec <name> <role> <cmd>...   Run on every node with that role
 ltvm cluster ssh  <name> <role> Interactive ssh to one node
 ltvm cluster list               List all clusters
@@ -302,6 +305,97 @@ and accepts `--force`/`--yes` anyway. `cluster llmount` and `cluster
 deploy --mount` run llmount.sh from the first client node (the MGS node
 when there is no client), the node the generated `cfg/local.sh` treats
 as local.
+
+`cluster create --failover PARTNER=PRIMARY` adds a failover partner for
+a server node. ltvm creates PARTNER with no data disks of its own. The
+QEMU of PARTNER opens the data disks of PRIMARY in the same order. Thus
+both guests see each target under one name (`/dev/vdb`, `/dev/vdc`).
+Both QEMUs open these disks with `share-rw=on` and `cache=none`.
+`cluster deploy` writes PARTNER into `cfg/local.sh` as the
+`mds<N>failover_HOST` or `ost<N>failover_HOST` of each target on
+PRIMARY. When PRIMARY is the MGS, it also writes `mgsfailover_HOST` and
+adds the NID of PARTNER to `MGSNID`. The test framework then formats
+these targets with `--failnode`, which turns on ldiskfs MMP, and `fail
+mds1` moves MDT0 to PARTNER:
+
+```bash
+ltvm cluster create co2 mgs+mds:co2-mds1:1 oss:co2-oss:2 client:co2-c \
+    --failover co2-mds2=co2-mds1
+ltvm cluster deploy co2 --build ~/lustre-release
+ltvm suite run co2 replay-single --only '0a 0b' --wait
+```
+
+The single-VM form is `ltvm create A --share-disks`, then `ltvm create
+B --disks-from A`. `ltvm destroy A` refuses while B exists, because B
+would lose its disks: destroy both together. A primary has at most one
+partner. MMP stops a second Lustre mount, but it does not stop a raw
+write to the device. On Linux, the VM directory must be on a filesystem
+that supports `O_DIRECT`.
+
+On ZFS, mkfs.lustre partitions each disk after the partner booted, and
+the partner's kernel does not see the new partitions. Thus `local.sh`
+sets `ZPOOL=/usr/sbin/ltvm-zpool`, which rereads the partition table of
+a data disk that shows none before a `zpool import`.
+
+A cluster can run `FAILURE_MODE=HARD`. Its `local.sh` sets `POWER_DOWN` and
+`POWER_UP` to `/usr/sbin/ltvm-power`. `off` crashes the node with kdump
+unloaded, and the kernel reboots it after `LTVM_POWER_OFF_SECS` (30 by
+default). `on` waits for ssh:
+
+```bash
+ltvm suite run co2 replay-single --only '0a 0b' --env FAILURE_MODE=HARD --wait
+```
+
+The crash is close to a power loss, but it is not the same. The guest
+loses its page cache, MMP stops, and the node stops answering, as in a
+power loss. But the kernel runs its panic path (panic notifiers and
+console output) before it stops. A real power off needs the QEMU
+process on the host, and the framework calls `POWER_DOWN` from inside
+the client guest, which cannot reach QEMU. For a real power loss, use
+`ltvm cluster failover --how kill` from the host.
+
+`cluster failover` takes a primary down by one of 5 methods, then
+mounts its targets on its partner. It moves the targets with the test
+framework on the first client. Thus the framework's record of the
+active node stays correct for `cluster failback` and the next failover.
+It returns when the mounts finish or fail. It does not wait for
+recovery, because in a test recovery may never end. To wait, use
+`cluster status --wait-recovery SECS`:
+
+| `--how` | The primary | After the takeover |
+|---------|-------------|--------------------|
+| `umount` | Unmounts its targets | Runs |
+| `kill` | QEMU gets SIGKILL: power loss | Is down |
+| `panic` | Crashes; kdump saves a vmcore | Reboots |
+| `freeze` | QEMU gets SIGSTOP: a hung node (Linux hosts only) | Resumes (`--hold`: stays frozen) |
+| `split-brain` | QMP `set_link off`: still runs, and MMP must refuse the takeover | Gets its link back (`--hold`: stays cut off) |
+
+```bash
+ltvm cluster failover co2 co2-mds1 --how kill --json
+ltvm cluster status co2 --json --wait-recovery 300
+ltvm cluster failback co2 co2-mds1
+```
+
+`split-brain` is a check of MMP, not a failover. It exits 0 when MMP
+refused every mount on the partner. It exits 1, and names the targets,
+when the partner mounted a target that the running primary also holds.
+
+On macOS, `cluster failover` refuses `freeze`. A stopped QEMU reads no
+packets, and socket_vmnet then stalls every VM on the host. QMP `stop`
+keeps the network up, but it also stops the guest's clock. In a test on
+2026-10-19, the resumed node saw no gap, and its MMP did not find the
+takeover. Both nodes then kept the targets, on ldiskfs and on ZFS.
+
+`cluster failback` starts, resumes or reconnects the primary as
+failover left it. It then moves the targets back from the partner, and
+it mounts a target that a failed move left mounted nowhere.
+
+A suite, `llmount.sh` and `llmountcleanup.sh` delete the framework's
+record of the active node when they start. They then act on each
+primary, while the partner still holds the target. Thus `suite run`,
+`cluster llmount`, `cluster llumount` and `cluster deploy --mount`
+refuse while a target is on its partner, and they name the `cluster
+failback` command to run.
 
 `vm` sub-actions:
 

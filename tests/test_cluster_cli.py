@@ -574,6 +574,39 @@ class TestClusterCreateArgs:
         assert rc == EXIT_ERROR
         assert not self.handler.called
 
+    def test_failover_passes_partner_and_primary(self) -> None:
+        cmd_cluster(
+            _ns(
+                "create",
+                "co9",
+                "mgs+mds:co9-mds1:1",
+                "client:co9-c",
+                "--failover",
+                "co9-mds2=co9-mds1",
+            )
+        )
+        ns = self._captured_ns()
+        assert ns.failover == {"co9-mds2": "co9-mds1"}
+        # The partner is a new node, not a spec.
+        assert ns.nodes == ["mgs+mds:co9-mds1:1", "client:co9-c"]
+
+    def test_no_failover_passes_an_empty_map(self) -> None:
+        cmd_cluster(_ns("create", "co9", "mgs+mds:co9-mds1:1"))
+        assert self._captured_ns().failover == {}
+
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            ["--failover", "co9-mds2"],
+            ["--failover", "=co9-mds1"],
+            ["--failover", "co9-x=co9-mds1", "--failover", "co9-x=co9-mds1"],
+        ],
+    )
+    def test_bad_failover_errors(self, extra: list[str]) -> None:
+        rc = cmd_cluster(_ns("create", "co9", "mgs+mds:co9-mds1:1", *extra))
+        assert rc == EXIT_ERROR
+        assert not self.handler.called
+
 
 # ─────────────────────────────────────────────────────────
 # cmd_cluster create: root requirement
@@ -808,6 +841,12 @@ class TestClusterStatusArgs:
             cmd_cluster(_ns("status", "co7"))
         ns = m.call_args.args[0]
         assert ns.name == "co7"
+        assert ns.wait_recovery is None
+
+    def test_status_passes_wait_recovery(self) -> None:
+        with patch("ltvm_pkg.vm_cluster.cmd_cluster_status") as m:
+            cmd_cluster(_ns("status", "co7", "--wait-recovery", "90"))
+        assert m.call_args.args[0].wait_recovery == 90
 
 
 class TestClusterDestroyArgs:
@@ -1698,7 +1737,10 @@ class TestCmdClusterDeployBuildsForTheNodes:
                 )
             )
         builds = [c.args[0] for c in run.call_args_list]
-        assert [(b[3], b[b.index("--kernel") + 1]) for b in builds] == [
+        assert [
+            (b[b.index("lustre") + 1], b[b.index("--kernel") + 1])
+            for b in builds
+        ] == [
             ("rocky9", "5.14-rhel9.7-5.14.0-611.55.1.el9_7"),
             ("rocky10-16k", "6.12-rhel10.2-6.12.0-211.47.1.el10_2"),
         ]
@@ -2743,7 +2785,7 @@ class TestCmdClusterDeployServersOrClients:
         builds: list[list[str]] = []
 
         def run(cmd: list[str], *a: object, **k: object) -> MagicMock:
-            if cmd[:3] == ["ltvm", "build", "lustre"]:
+            if cmd[2:4] == ["build", "lustre"]:
                 builds.append(cmd)
             return MagicMock(returncode=0, stdout="", stderr="")
 
@@ -2790,14 +2832,14 @@ class TestCmdClusterDeployServersOrClients:
         self, tmp_path: Path
     ) -> None:
         builds, deployed, written = self._deploy(tmp_path, server_only=True)
-        assert [b[3] for b in builds] == ["rocky8"]
+        assert [b[b.index("lustre") + 1] for b in builds] == ["rocky8"]
         assert sorted(deployed) == ["co3-mds", "co3-oss"]
         # Every node still gets the cluster's configuration.
         assert sorted(written) == ["co3-c1", "co3-mds", "co3-oss"]
 
     def test_client_only_skips_the_servers(self, tmp_path: Path) -> None:
         builds, deployed, written = self._deploy(tmp_path, client_only=True)
-        assert [b[3] for b in builds] == ["rocky9"]
+        assert [b[b.index("lustre") + 1] for b in builds] == ["rocky9"]
         assert deployed == ["co3-c1"]
         assert sorted(written) == ["co3-c1", "co3-mds", "co3-oss"]
 
@@ -2805,7 +2847,10 @@ class TestCmdClusterDeployServersOrClients:
         self, tmp_path: Path
     ) -> None:
         builds, deployed, _ = self._deploy(tmp_path)
-        assert sorted(b[3] for b in builds) == ["rocky8", "rocky9"]
+        assert sorted(b[b.index("lustre") + 1] for b in builds) == [
+            "rocky8",
+            "rocky9",
+        ]
         assert sorted(deployed) == ["co3-c1", "co3-mds", "co3-oss"]
 
     def test_both_or_zfs_for_clients_is_refused(self, tmp_path: Path) -> None:
@@ -2817,3 +2862,10 @@ class TestCmdClusterDeployServersOrClients:
     def test_the_cli_refuses_both(self) -> None:
         rc = cmd_cluster(_ns("deploy", "co1", "--server-only", "--client-only"))
         assert rc != EXIT_OK
+
+
+def test_child_ltvm_is_this_checkout() -> None:
+    argv = vm_cluster._ltvm()
+    assert argv[1] == str(
+        Path(vm_cluster.__file__).resolve().parent.parent / "ltvm"
+    )

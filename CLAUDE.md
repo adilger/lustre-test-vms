@@ -1076,6 +1076,55 @@ node whose older image lacks it (`_ensure_pdsh`).
 exits non-zero if any node did; `cluster ssh <role>` opens a session on
 the first, since it execs a single interactive ssh.
 
+**Failover pairs.**  `cluster create --failover PARTNER=PRIMARY` adds a
+server node with no disks of its own (role `failover`,
+`failover_for=PRIMARY`).  The flag repeats, but a primary has at most
+one partner.  ltvm creates the partners last, with `ltvm create
+--disks-from PRIMARY`.  Both QEMUs open the primary's disks.  Thus both
+guests see the same `/dev/vd*` names (`qemu_run.data_disk_args`).
+`generate_local_sh` writes the `<facet>failover_HOST` lines, and
+`probe_mgs_lnet` adds the partner's NID to `MGSNID`.  The test framework
+does the rest: `--failnode` (MMP on) and the move on `fail <facet>`.
+
+- Both QEMUs need `share-rw=on` and `cache=none`.  QEMU refuses a mix.
+  With host caching, one QEMU does not see the writes of the other.
+- `_validate_failover_disks` limits a share to 2 VMs.
+- `_refuse_orphaned_partners` stops `destroy` of a primary alone.  Its
+  partner would keep writing to unlinked images.
+- MMP stops a second mount, but not a raw write.
+- VM-proven on ldiskfs: replay-single 0a 0b 0c 1 2a on an MDS pair
+  (2026-10-18), and replay-ost-single 19/0/1 on an OSS pair
+  (2026-10-19).
+- `cluster deploy` installs `ltvm-power.sh` (`POWER_DOWN`/`POWER_UP`,
+  for `FAILURE_MODE=HARD`) and `ltvm-zpool.sh` (`ZPOOL`) on every node.
+  A ZFS partner must reread the partitions that mkfs.lustre made after
+  it booted, or `zpool import` finds no pool.
+- VM-proven on ZFS (2026-10-19): replay-ost-single 19/0/1 on an OSS
+  pair, and replay-single 0a 0b 0c 1 2a on an MDS pair.
+- HARD mode VM-proven on ZFS (2026-10-19): replay-single 0a 0b 1, 5
+  pass.  `ltvm-power` crashed and restarted both MDS nodes and an OSS.
+- `cluster failover/failback` (`cluster_failover.py`) put the fault on
+  the host and move facets with `failover-facets.sh` on the first
+  client.  That script must run `RPC_MODE=true init_test_env`: without
+  it, init_test_env deletes `$TMP/*active` and probes the dead node.
+  It runs from a file, detached: pdsh's ssh eats a script on stdin.
+- Neither action waits for recovery.  `cluster status
+  --wait-recovery` waits on request.
+- `failover-facets.sh drop` takes the pool name from `zpool_name`:
+  an MDT pool is `lustre-mdt1`, not `lustre-<facet>`.
+- `require_no_moved_facets` gates `suite run` and `_run_llmount`.
+  Their `init_test_env` deletes `$TMP/*active`, and they then act on
+  the primaries.  A record that names a partner with nothing mounted
+  passes, because a deploy unloads Lustre on every node.
+- `split-brain` must fail to take over.  Its exit status is 0 only
+  when MMP refused every mount.
+- `freeze` refuses macOS.  There, SIGSTOP stalls socket_vmnet for every
+  VM.  QMP stop pauses the guest's clock, so MMP missed the takeover,
+  and both nodes kept the targets (ldiskfs and ZFS).
+- Failover and failback VM-proven 2026-10-19: umount, kill, panic and
+  split-brain (named netdrop then) on ZFS.  Kill also on ldiskfs.
+  `freeze` on a Linux host is UNRUN.
+
 Each action is a real subparser, so `ltvm cluster <action> --help`
 works and every action's flags validate and tab-complete.  Two
 consequences worth knowing:

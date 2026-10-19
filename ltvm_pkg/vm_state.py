@@ -631,6 +631,15 @@ class VMInfo:
     # evenly across this many nodes, one socket each.  0 is none.
     numa_nodes: int = 0
 
+    # Failover pairs (--share-disks / --disks-from).  A VM with
+    # share_disks opens its data disks so that one other QEMU can open
+    # them too.  A VM with disks_from has no data disks of its own: it
+    # attaches the data disks of that VM, in the same order, so both
+    # guests see them as the same /dev/vd* names.  Older .info files
+    # load as neither.
+    share_disks: bool = False
+    disks_from: str = ""
+
     @property
     def info_path(self) -> Path:
         return SOCKETS / f"{self.name}.info"
@@ -729,6 +738,8 @@ class VMInfo:
             f"{'|'.join(f'{bdf}={drv}' for bdf, drv in self.passthrough_drivers.items())}\n"
             f"KERNEL_ARGS={self.kernel_args}\n"
             f"NUMA_NODES={self.numa_nodes}\n"
+            f"SHARE_DISKS={int(self.share_disks)}\n"
+            f"DISKS_FROM={self.disks_from}\n"
         )
         _atomic_write(self.info_path, text)
 
@@ -912,6 +923,8 @@ class VMInfo:
             passthrough_drivers=pt_drivers,
             kernel_args=vals.get("KERNEL_ARGS", ""),
             numa_nodes=int(vals.get("NUMA_NODES") or 0),
+            share_disks=vals.get("SHARE_DISKS", "0") == "1",
+            disks_from=vals.get("DISKS_FROM", ""),
         )
 
     @staticmethod
@@ -941,6 +954,17 @@ class ClusterNode:
     mdt_disks: int = 0
     ost_disks: int = 0
     ip: str = ""
+    # For a failover partner (`cluster create --failover`): the node
+    # whose disks this one attaches and whose targets it can mount.
+    failover_for: str = ""
+
+    @property
+    def is_server(self) -> bool:
+        """True for a node that mounts targets: a server role, or a
+        failover partner that takes them over."""
+        return (
+            self.is_mgs or self.is_mds or self.is_oss or bool(self.failover_for)
+        )
 
     @property
     def is_mgs(self) -> bool:
@@ -1100,6 +1124,18 @@ class ClusterInfo:
 
     def client_nodes(self) -> list[ClusterNode]:
         return [n for n in self.get_nodes() if n.is_client]
+
+    def node(self, name: str) -> ClusterNode:
+        for n in self.get_nodes():
+            if n.name == name:
+                return n
+        raise RuntimeError(f"cluster {self.name!r} has no node {name!r}")
+
+    def failover_partners(self) -> dict[str, str]:
+        """Map each node that has a failover partner to that partner."""
+        return {
+            n.failover_for: n.name for n in self.get_nodes() if n.failover_for
+        }
 
     def local_node(self) -> ClusterNode:
         """The node the cluster block in cfg/local.sh treats as local:
