@@ -388,9 +388,14 @@ takeover. Both nodes then kept the targets, on ldiskfs and on ZFS.
 
 `cluster failback` starts, resumes or reconnects the primary as
 failover left it. It then moves the targets back from the partner, and
-it mounts a target that a failed move left mounted nowhere. A suite
-deletes the framework's record of the active node when it starts. Thus
-fail back before you start a suite.
+it mounts a target that a failed move left mounted nowhere.
+
+A suite, `llmount.sh` and `llmountcleanup.sh` delete the framework's
+record of the active node when they start. They then act on each
+primary, while the partner still holds the target. Thus `suite run`,
+`cluster llmount`, `cluster llumount` and `cluster deploy --mount`
+refuse while a target is on its partner, and they name the `cluster
+failback` command to run.
 
 `vm` sub-actions:
 

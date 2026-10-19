@@ -462,8 +462,9 @@ reboot) or `freeze` (SIGSTOP, Linux hosts only).  The `split-brain`
 method cuts the link of a primary that runs.  It then checks that MMP
 refuses the takeover: exit 0 means MMP refused it.  Neither action waits for
 recovery.  `cluster status --wait-recovery SECS` waits, and exits 1
-if a target still recovers after SECS.  Fail back before you start a suite, because a suite deletes
-the framework's record of where each facet is.
+if a target still recovers after SECS.  A suite deletes the framework's record of where each facet is.  Thus
+`suite run` and `cluster llmount`/`llumount` refuse while a target is
+on its partner, and name the failback to run.
 
 For suites with hard failures, add `--env FAILURE_MODE=HARD`.  The
 framework then crashes a node through `ltvm-power`, and the node

@@ -1112,6 +1112,10 @@ does the rest: `--failnode` (MMP on) and the move on `fail <facet>`.
   --wait-recovery` waits on request.
 - `failover-facets.sh drop` takes the pool name from `zpool_name`:
   an MDT pool is `lustre-mdt1`, not `lustre-<facet>`.
+- `require_no_moved_facets` gates `suite run` and `_run_llmount`.
+  Their `init_test_env` deletes `$TMP/*active`, and they then act on
+  the primaries.  A record that names a partner with nothing mounted
+  passes, because a deploy unloads Lustre on every node.
 - `split-brain` must fail to take over.  Its exit status is 0 only
   when MMP refused every mount.
 - `freeze` refuses macOS.  There, SIGSTOP stalls socket_vmnet for every

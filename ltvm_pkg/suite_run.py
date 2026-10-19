@@ -758,6 +758,10 @@ def cmd_suite_run(args: argparse.Namespace) -> int:
     os_family = _os_family_for_vm(exec_vm, "libdir")
     libdir = lustre_libdir(os_family)
     _ensure_layout(t, exec_vm, os_family, libdir)
+    if t.kind == "cluster":
+        from .cluster_failover import require_no_moved_facets
+
+        require_no_moved_facets(ClusterInfo.load(t.name), "start a suite")
     run_id = time.strftime(f"{args.suite}-%Y%m%d-%H%M%S")
     dest = results_dest(results_dir, t.name, run_id)
     if args.wait:

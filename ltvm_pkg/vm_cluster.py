@@ -2187,6 +2187,9 @@ def _run_llmount(
     with the servers' own scripts: the clients may hold another Lustre,
     or none yet.
     """
+    from .cluster_failover import require_no_moved_facets
+
+    require_no_moved_facets(cluster, "unmount" if cleanup else "mount")
     node = cluster.local_node()
     if server_only and not cleanup:
         node = cluster.mgs_node()

@@ -165,3 +165,60 @@ def test_split_brain_report(
         use_json=False,
     )
     assert text in capsys.readouterr().out
+
+
+class TestMovedFacets:
+    def _c(self) -> ClusterInfo:
+        return _cluster(
+            ("g-mds1", ["mgs", "mds"], 1, 0, "10.0.0.10"),
+            ("g-oss1", ["oss"], 0, 2, "10.0.0.11"),
+            ("g-c", ["client"], 0, 0, "10.0.0.12"),
+            ("g-oss2", ["failover"], 0, 0, "10.0.0.13", "g-oss1"),
+        )
+
+    def _moved(self, active: dict[str, tuple[str, str]]) -> Any:
+        with (
+            patch.object(cluster_failover.VMInfo, "load"),
+            patch.object(cluster_failover, "lustre_libdir", return_value="/l"),
+            patch(
+                "ltvm_pkg.vm_commands._os_family_for_vm", return_value="rhel"
+            ),
+            patch.object(cluster_failover._Pair, "active", return_value=active),
+        ):
+            return cluster_failover.moved_facets(self._c())
+
+    def test_a_mounted_or_silent_partner_counts(self) -> None:
+        assert self._moved(
+            {
+                "ost1": ("g-oss2", "mounted"),
+                "ost2": ("g-oss2", "unreachable"),
+            }
+        ) == {"g-oss1": ["ost1", "ost2"]}
+
+    def test_a_stale_record_does_not_count(self) -> None:
+        assert (
+            self._moved(
+                {"ost1": ("g-oss2", "unmounted"), "ost2": ("g-oss1", "mounted")}
+            )
+            == {}
+        )
+
+    def test_no_partner_needs_no_probe(self) -> None:
+        c = _cluster(("g-mds1", ["mgs", "mds"], 1, 0, "10.0.0.10"))
+        with patch.object(cluster_failover._Pair, "active") as active:
+            assert cluster_failover.moved_facets(c) == {}
+        active.assert_not_called()
+
+    def test_the_refusal_names_the_failback(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with (
+            patch.object(
+                cluster_failover,
+                "moved_facets",
+                return_value={"g-oss1": ["ost1"]},
+            ),
+            pytest.raises(SystemExit),
+        ):
+            cluster_failover.require_no_moved_facets(self._c(), "start a suite")
+        assert "ltvm cluster failback g g-oss1" in capsys.readouterr().err

@@ -188,6 +188,45 @@ class _Pair:
         return active
 
 
+def moved_facets(cluster: ClusterInfo) -> dict[str, list[str]]:
+    """primary -> its facets that the partner holds, or may hold.
+
+    A facet counts when the framework's record names the partner, and
+    the partner has it mounted or does not answer.  A record left from a
+    partner that unmounted everything (a deploy unloads Lustre) is
+    harmless: the next init_test_env deletes it.
+    """
+    moved: dict[str, list[str]] = {}
+    for primary, partner in cluster.failover_partners().items():
+        for facet, (host, state) in _Pair(cluster, primary).active().items():
+            if host == partner and state != "unmounted":
+                moved.setdefault(primary, []).append(facet)
+    return moved
+
+
+def require_no_moved_facets(cluster: ClusterInfo, action: str) -> None:
+    """Refuse *action* while a facet is on its failover partner.
+
+    Every suite, llmount.sh and llmountcleanup.sh start with an
+    init_test_env that deletes the records of the active node.  They
+    then stop, format or mount each facet on its primary, while the
+    partner still holds it.
+    """
+    moved = moved_facets(cluster)
+    if not moved:
+        return
+    lines = "\n".join(
+        f"  ltvm cluster failback {cluster.name} {primary}   "
+        f"# {', '.join(facets)}"
+        for primary, facets in moved.items()
+    )
+    die(
+        f"cannot {action}: targets are on their failover partners, and "
+        f"the test framework would act on the primaries.  Fail back "
+        f"first:\n{lines}"
+    )
+
+
 def _qmp(vm: VMInfo, command: str, **arguments: Any) -> Any:
     from .vm_commands import qmp_execute
 
