@@ -1,7 +1,9 @@
 """Failover pairs: two VMs that open one set of data disks.
 
 A VM made with --share-disks lets one partner (--disks-from) attach its
-data disks.  None of it may change a VM that does not ask for it.
+data disks, and `cluster create --failover PARTNER=PRIMARY` builds such
+a pair and writes the partner into local.sh as each target's failover
+host.  None of it may change a VM or cluster that does not ask for it.
 """
 
 from __future__ import annotations
@@ -9,12 +11,12 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from ltvm_pkg import qemu_run, vm_commands
-from ltvm_pkg.vm_state import VMInfo
+from ltvm_pkg import qemu_run, vm_cluster, vm_commands
+from ltvm_pkg.vm_state import ClusterInfo, ClusterNode, VMInfo
 
 
 @pytest.fixture
@@ -203,3 +205,229 @@ class TestValidateFailoverDisks:
         _vm("g-a", mdt=1, share_disks=True)
         with pytest.raises(SystemExit):
             self._check(_create_args(disks_from="g-a", share_disks=True))
+
+
+# ── cluster create --failover ────────────────────────────
+
+
+class TestFailoverPartners:
+    def _specs(self) -> list[ClusterNode]:
+        return [
+            vm_cluster.parse_node_spec(s)
+            for s in ("mgs+mds:g-mds1:1", "oss:g-oss:2", "client:g-c")
+        ]
+
+    def test_partner_is_a_diskless_server(self) -> None:
+        (p,) = vm_cluster.failover_partners(self._specs(), {"g-mds2": "g-mds1"})
+        assert p.name == "g-mds2"
+        assert p.failover_for == "g-mds1"
+        assert (p.mdt_disks, p.ost_disks) == (0, 0)
+        assert p.is_server
+        assert not (p.is_mgs or p.is_mds or p.is_oss or p.is_client)
+
+    def test_none_asked_for_adds_none(self) -> None:
+        assert vm_cluster.failover_partners(self._specs(), {}) == []
+
+    @pytest.mark.parametrize(
+        "failover",
+        [
+            {"g-oss": "g-mds1"},  # partner is a node spec
+            {"g-x": "g-nope"},  # unknown primary
+            {"g-x": "g-c"},  # a client has no targets
+            {"g-x": "g-mds1", "g-y": "g-mds1"},  # two partners
+            {"bad name": "g-mds1"},  # invalid VM name
+        ],
+    )
+    def test_bad_pairs_are_refused(self, failover: dict[str, str]) -> None:
+        with pytest.raises(SystemExit):
+            vm_cluster.failover_partners(self._specs(), failover)
+
+    def test_partner_create_attaches_and_primary_shares(self) -> None:
+        primary, partner = (
+            vm_cluster.parse_node_spec("mgs+mds:g-mds1:1"),
+            ClusterNode(
+                name="g-mds2", roles=["failover"], failover_for="g-mds1"
+            ),
+        )
+        argvs = []
+        with patch.object(vm_cluster, "_run_prefixed") as run:
+            run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            vm_cluster._create_one_node(primary, 2, None, share_disks=True)
+            argvs.append(run.call_args.args[0])
+            vm_cluster._create_one_node(partner, 2, None)
+            argvs.append(run.call_args.args[0])
+        assert "--share-disks" in argvs[0]
+        assert "--disks-from" not in argvs[0]
+        i = argvs[1].index("--disks-from")
+        assert argvs[1][i + 1] == "g-mds1"
+        assert argvs[1][argvs[1].index("--mdt-disks") + 1] == "0"
+        assert argvs[1][argvs[1].index("--ost-disks") + 1] == "0"
+
+    def test_plain_node_create_is_unchanged(self) -> None:
+        node = vm_cluster.parse_node_spec("oss:g-oss:2")
+        with patch.object(vm_cluster, "_run_prefixed") as run:
+            run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            vm_cluster._create_one_node(node, 2, None)
+        argv = run.call_args.args[0]
+        assert "--share-disks" not in argv
+        assert "--disks-from" not in argv
+
+    def test_cluster_creates_partners_after_primaries(
+        self, vm_dirs: Any
+    ) -> None:
+        order: list[tuple[str, bool]] = []
+
+        def fake_create(node: ClusterNode, *a: Any, **kw: Any) -> Any:
+            order.append((node.name, kw.get("share_disks", False)))
+            VMInfo(name=node.name, ip="192.0.2.30").save()
+            return node.name, 0, ""
+
+        args = argparse.Namespace(
+            name="g",
+            nodes=["mgs+mds:g-mds1:1", "client:g-c"],
+            failover={"g-mds2": "g-mds1"},
+            vcpus=2,
+            mem=2048,
+            os=None,
+            arch=None,
+            disk_size=None,
+            nic=[],
+            owner_id=None,
+        )
+        with (
+            patch.object(
+                vm_cluster, "_create_one_node", side_effect=fake_create
+            ),
+            patch.object(
+                vm_cluster, "_distribute_cluster_hosts", return_value=[]
+            ),
+        ):
+            vm_cluster.cmd_cluster_create(args)
+        assert order[-1] == ("g-mds2", False)
+        assert ("g-mds1", True) in order[:-1]
+        assert ("g-c", False) in order[:-1]
+        nodes = {n.name: n for n in ClusterInfo.load("g").get_nodes()}
+        assert nodes["g-mds2"].failover_for == "g-mds1"
+        assert nodes["g-mds2"].roles == ["failover"]
+        assert ClusterInfo.load("g").failover_partners() == {"g-mds1": "g-mds2"}
+
+    def test_record_without_failover_has_no_new_key(self, vm_dirs: Any) -> None:
+        def fake_create(node: ClusterNode, *a: Any, **kw: Any) -> Any:
+            VMInfo(name=node.name, ip="192.0.2.30").save()
+            return node.name, 0, ""
+
+        args = argparse.Namespace(
+            name="g",
+            nodes=["mgs+mds:g-mds1:1"],
+            vcpus=2,
+            mem=2048,
+            os=None,
+            arch=None,
+            disk_size=None,
+            nic=[],
+            owner_id=None,
+        )
+        with (
+            patch.object(
+                vm_cluster, "_create_one_node", side_effect=fake_create
+            ),
+            patch.object(
+                vm_cluster, "_distribute_cluster_hosts", return_value=[]
+            ),
+        ):
+            vm_cluster.cmd_cluster_create(args)
+        assert "failover_for" not in ClusterInfo.load("g").path.read_text()
+
+
+# ── cfg/local.sh ─────────────────────────────────────────
+
+
+def _cluster(*nodes: tuple) -> ClusterInfo:
+    """(name, roles, mdt, ost, ip[, failover_for]) tuples."""
+    return ClusterInfo(
+        name="g",
+        nodes=[
+            {
+                "name": n[0],
+                "roles": list(n[1]),
+                "mdt_disks": n[2],
+                "ost_disks": n[3],
+                "ip": n[4],
+                **({"failover_for": n[5]} if len(n) > 5 else {}),
+            }
+            for n in nodes
+        ],
+    )
+
+
+class TestLocalShFailover:
+    def test_mds_pair_names_the_partner_for_mdt_and_mgs(self) -> None:
+        c = _cluster(
+            ("g-mds1", ["mgs", "mds"], 1, 0, "10.0.0.10"),
+            ("g-oss", ["oss"], 0, 2, "10.0.0.11"),
+            ("g-c", ["client"], 0, 0, "10.0.0.12"),
+            ("g-mds2", ["failover"], 0, 0, "10.0.0.13", "g-mds1"),
+        )
+        text = vm_cluster.generate_local_sh(c)
+        assert "mds1_HOST=g-mds1" in text
+        assert "mds1failover_HOST=g-mds2" in text
+        assert "mgsfailover_HOST=g-mds2" in text
+        assert "MDSDEV1=/dev/vdb" in text
+        assert "ostfailover" not in text
+        # The partner is no MDS of its own: still one MDT.
+        assert "MDSCOUNT=${_ltvm_env_MDSCOUNT:-1}" in text
+
+    def test_oss_pair_names_the_partner_for_each_ost(self) -> None:
+        c = _cluster(
+            ("g-mds", ["mgs", "mds"], 1, 0, "10.0.0.10"),
+            ("g-oss1", ["oss"], 0, 2, "10.0.0.11"),
+            ("g-oss2", ["failover"], 0, 0, "10.0.0.12", "g-oss1"),
+        )
+        text = vm_cluster.generate_local_sh(c)
+        assert "ost1failover_HOST=g-oss2" in text
+        assert "ost2failover_HOST=g-oss2" in text
+        assert "mds1failover_HOST" not in text
+        assert "mgsfailover_HOST" not in text
+        assert "OSTCOUNT=${_ltvm_env_OSTCOUNT:-2}" in text
+
+    def test_no_partner_writes_no_failover_line(self) -> None:
+        c = _cluster(
+            ("g-mds", ["mgs", "mds"], 1, 0, "10.0.0.10"),
+            ("g-oss", ["oss"], 0, 2, "10.0.0.11"),
+        )
+        assert "failover" not in vm_cluster.generate_local_sh(c)
+
+    def test_mgs_partner_adds_its_nid(self) -> None:
+        c = _cluster(
+            ("g-mds1", ["mgs", "mds"], 1, 0, "10.0.0.10"),
+            ("g-mds2", ["failover"], 0, 0, "10.0.0.13", "g-mds1"),
+        )
+        probes = {
+            "10.0.0.10": "--\n2: eth0    inet 10.0.0.10/24 brd x\n",
+            "10.0.0.13": "--\n2: eth0    inet 10.0.0.13/24 brd x\n",
+        }
+
+        def fake_ssh(ip: str, *a: Any, **kw: Any) -> Any:
+            return MagicMock(returncode=0, stdout=probes[ip], stderr="")
+
+        with patch.object(vm_cluster, "run_ssh", side_effect=fake_ssh):
+            lnet = vm_cluster.probe_mgs_lnet(c)
+        assert lnet.mgsnid == "10.0.0.10@tcp:10.0.0.13@tcp"
+        text = vm_cluster.generate_local_sh(c, lnet=lnet)
+        assert "MGSNID=10.0.0.10@tcp:10.0.0.13@tcp" in text
+
+    def test_oss_partner_leaves_the_mgs_nid_alone(self) -> None:
+        c = _cluster(
+            ("g-mds", ["mgs", "mds"], 1, 0, "10.0.0.10"),
+            ("g-oss1", ["oss"], 0, 2, "10.0.0.11"),
+            ("g-oss2", ["failover"], 0, 0, "10.0.0.12", "g-oss1"),
+        )
+        with patch.object(vm_cluster, "run_ssh") as ssh:
+            ssh.return_value = MagicMock(
+                returncode=0,
+                stdout="--\n2: eth0    inet 10.0.0.10/24 brd x\n",
+                stderr="",
+            )
+            lnet = vm_cluster.probe_mgs_lnet(c)
+        assert lnet.mgsnid == "10.0.0.10@tcp"
+        assert ssh.call_count == 1

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import dataclasses
 import json
 import os
 import re
@@ -116,6 +117,56 @@ def parse_node_spec(spec: str) -> ClusterNode:
     )
 
 
+FAILOVER_ROLE = "failover"
+
+
+def failover_partners(
+    spec_nodes: list[ClusterNode], failover: dict[str, str]
+) -> list[ClusterNode]:
+    """The failover partner nodes `--failover PARTNER=PRIMARY` adds.
+
+    A partner is a server with no disks of its own: it attaches its
+    primary's disks and can mount each of the primary's targets.  The
+    primary must hold disks, and has at most one partner; a partner is
+    a new name, not one of the node specs.
+    """
+    from .vm_commands import _validate_vm_name
+
+    by_name = {n.name: n for n in spec_nodes}
+    seen: dict[str, str] = {}
+    partners: list[ClusterNode] = []
+    for partner, primary in failover.items():
+        _validate_vm_name(partner)
+        if partner in by_name:
+            die(
+                f"--failover {partner}={primary}: {partner!r} is a node "
+                f"spec; the partner is a new node that ltvm creates"
+            )
+        node = by_name.get(primary)
+        if node is None:
+            die(
+                f"--failover {partner}={primary}: no node {primary!r} in "
+                f"the node specs"
+            )
+        if not (node.is_mgs or node.is_mds or node.is_oss):
+            die(
+                f"--failover {partner}={primary}: {primary!r} is a client "
+                f"and has no targets to fail over"
+            )
+        if primary in seen:
+            die(
+                f"--failover: {primary!r} has two partners, {seen[primary]!r} "
+                f"and {partner!r}; a failover pair has two nodes"
+            )
+        seen[primary] = partner
+        partners.append(
+            ClusterNode(
+                name=partner, roles=[FAILOVER_ROLE], failover_for=primary
+            )
+        )
+    return partners
+
+
 # What a node's LNet will run on: the networks= value of its lnet.conf,
 # a separator, then every address the node holds.  rc.local composes
 # lnet.conf at boot from the node's NICs (setup-lnet-config.sh), so
@@ -191,21 +242,36 @@ def lnet_from_probe(output: str, ip_family: str = "ipv4") -> ClusterLnet:
     raise ValueError(f"no {family} address on {iface}, which carries {net}")
 
 
-def probe_mgs_lnet(
-    cluster: ClusterInfo, ip_family: str = "ipv4"
-) -> ClusterLnet:
-    """Ask the cluster's MGS which net and address its NID is on."""
-    mgs = cluster.mgs_node()
-    r = run_ssh(mgs.ip, LNET_PROBE, timeout=30)
+def _probe_node_lnet(node: ClusterNode, ip_family: str) -> ClusterLnet:
+    """Ask *node* which net and address its NID is on."""
+    r = run_ssh(node.ip, LNET_PROBE, timeout=30)
     if r.returncode != 0:
         die(
-            f"cannot read the LNet config of MGS {mgs.name}: "
+            f"cannot read the LNet config of {node.name}: "
             f"{(r.stderr or r.stdout).strip()}"
         )
     try:
         return lnet_from_probe(r.stdout, ip_family)
     except ValueError as e:
-        die(f"MGS {mgs.name}: {e}")
+        die(f"{node.name}: {e}")
+
+
+def probe_mgs_lnet(
+    cluster: ClusterInfo, ip_family: str = "ipv4"
+) -> ClusterLnet:
+    """Ask the cluster's MGS which net and address its NID is on.
+
+    An MGS with a failover partner has two NIDs, and MGSNID names both,
+    colon-separated, which is how a client mount and --mgsnode list an
+    MGS that can run on either node.
+    """
+    mgs = cluster.mgs_node()
+    lnet = _probe_node_lnet(mgs, ip_family)
+    partner = cluster.failover_partners().get(mgs.name)
+    if partner is None:
+        return lnet
+    other = _probe_node_lnet(cluster.node(partner), ip_family)
+    return dataclasses.replace(lnet, mgsnid=f"{lnet.mgsnid}:{other.mgsnid}")
 
 
 CLUSTER_BLOCK_BEGIN = "# --- Cluster configuration"
@@ -320,6 +386,12 @@ def generate_local_sh(
     mds_list = cluster.mds_nodes()
     oss_list = cluster.oss_nodes()
     client_list = cluster.client_nodes()
+    # primary -> partner.  The framework moves a facet to
+    # ${facet}failover_HOST on `fail <facet>`, formats it with
+    # --failnode for that host (which turns ldiskfs MMP on), and finds
+    # it there under the same device name: the partner attaches the
+    # primary's disks in the primary's order.
+    partner_of = cluster.failover_partners()
 
     lustre_dir = lustre_libdir(os_family)
     lines = [
@@ -339,6 +411,8 @@ def generate_local_sh(
     ]
 
     lines.append(f"mgs_HOST={mgs.name}")
+    if mgs.name in partner_of:
+        lines.append(f"mgsfailover_HOST={partner_of[mgs.name]}")
     lines.append(f"MGSNID={lnet.mgsnid}")
 
     combined = mgs.is_mds
@@ -369,6 +443,10 @@ def generate_local_sh(
                 # Per target even with one MDS node: all_mdts_nodes()
                 # reads these directly, before facet_host() fills them.
                 lines.append(f"mds{mdt_idx}_HOST={mds_node.name}")
+                if mds_node.name in partner_of:
+                    lines.append(
+                        f"mds{mdt_idx}failover_HOST={partner_of[mds_node.name]}"
+                    )
                 mdt_idx += 1
         lines.append("")
 
@@ -399,6 +477,10 @@ def generate_local_sh(
                 letter = chr(ord("a") + disk_offset + d)
                 lines.append(f"OSTDEV{ost_idx}=/dev/vd{letter}")
                 lines.append(f"ost{ost_idx}_HOST={oss_node.name}")
+                if oss_node.name in partner_of:
+                    lines.append(
+                        f"ost{ost_idx}failover_HOST={partner_of[oss_node.name]}"
+                    )
                 ost_idx += 1
         for idx, host in (ost_files.hosts if ost_files else {}).items():
             lines.append(f"OSTDEV{idx}={ost_file_path(idx)}")
@@ -478,6 +560,7 @@ def _create_one_node(
     numa_nodes: int = 0,
     kernel: str | None = None,
     variant: str = "base",
+    share_disks: bool = False,
 ) -> tuple[str, int, str]:
     """Create a single cluster VM via ltvm subprocess.
 
@@ -539,6 +622,10 @@ def _create_one_node(
     cmd += ["--ost-disks", str(node.ost_disks)]
     for nic in nics or []:
         cmd += ["--nic", nic]
+    if share_disks:
+        cmd += ["--share-disks"]
+    if node.failover_for:
+        cmd += ["--disks-from", node.failover_for]
     if kernel_args:
         # One argv word, so a value starting with '-' is not an option.
         cmd += [f"--kernel-args={kernel_args}"]
@@ -741,6 +828,8 @@ def _print_cluster_plan(
             disks.append(f"{node.mdt_disks} MDT")
         if node.ost_disks:
             disks.append(f"{node.ost_disks} OST")
+        if node.failover_for:
+            disks.append(f"those of {node.failover_for}")
         own = node_targets.get(node.name)
         own_kernel = node_kernels.get(node.name)
         print(
@@ -859,7 +948,11 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
                 f"all its VMs are gone"
             )
 
-    node_specs = [parse_node_spec(s) for s in args.nodes]
+    spec_nodes = [parse_node_spec(s) for s in args.nodes]
+    partners = failover_partners(
+        spec_nodes, dict(getattr(args, "failover", None) or {})
+    )
+    node_specs = spec_nodes + partners
 
     # Refuse a spec that names the same node twice.  Nothing checked,
     # so `cluster create co2 mgs+mds:co2-a:1 oss:co2-a:3` launched two
@@ -923,14 +1016,19 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
     # name things in the cluster-wide target, and another target has
     # its own names.
     node_targets = _node_targets(
-        node_specs, getattr(args, "node_targets", None), os_target
+        spec_nodes, getattr(args, "node_targets", None), os_target
     )
     node_kernels = _node_kernels(
-        node_specs,
+        spec_nodes,
         getattr(args, "node_kernels", None),
         node_targets,
         os_target,
     )
+    # A partner boots what its primary boots: it mounts the same targets.
+    for p in partners:
+        node_targets[p.name] = node_targets[p.failover_for]
+        node_kernels[p.name] = node_kernels[p.failover_for]
+    shared = {p.failover_for for p in partners}
     disk_size = getattr(args, "disk_size", None)
     root_size = getattr(args, "root_size", None)
     # Multi-NIC: same list of --nic specs applies to every node in the
@@ -987,49 +1085,59 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
     for name, k in node_kernels.items():
         if k:
             print(f"    Kernel: {k} for {name}")
-    print(f"    Creating {len(node_specs)} nodes in parallel...")
+    print(f"    Creating {len(spec_nodes)} nodes in parallel...")
 
-    failed = []
-    with ThreadPoolExecutor(max_workers=len(node_specs)) as executor:
-        futures = {
-            executor.submit(
-                _create_one_node,
-                node,
-                vcpus,
-                mem,
-                node_targets[node.name] or os_target,
-                arch,
-                disk_size,
-                root_size,
-                nics,
-                kernel_args,
-                owner_id,
-                wait_seconds=wait_seconds,
-                numa_nodes=numa_nodes,
-                kernel=node_kernels[node.name]
-                or (None if node_targets[node.name] else kernel),
-                variant="base" if node_targets[node.name] else variant,
-            ): node
-            for node in node_specs
-        }
-        for future in as_completed(futures):
-            node = futures[future]
-            try:
-                name, rc, output = future.result()
-            except Exception as e:
-                # Don't let one node's exception (e.g. TimeoutExpired
-                # from the inner subprocess) abandon the remaining
-                # futures.  Mark this one as failed and keep
-                # collecting -- the cleanup loop below needs an
-                # accurate `failed` list.
-                name = node.name
-                rc = -1
-                output = f"exception: {type(e).__name__}: {e}"
-            if rc != 0:
-                print(f"\n--- {name}: FAILED (rc={rc}) ---\n{output}")
-                failed.append(name)
-            else:
-                print(f"  {name}: up")
+    def create_wave(wave: list[ClusterNode]) -> list[str]:
+        failed: list[str] = []
+        with ThreadPoolExecutor(max_workers=len(wave)) as executor:
+            futures = {
+                executor.submit(
+                    _create_one_node,
+                    node,
+                    vcpus,
+                    mem,
+                    node_targets[node.name] or os_target,
+                    arch,
+                    disk_size,
+                    root_size,
+                    nics,
+                    kernel_args,
+                    owner_id,
+                    wait_seconds=wait_seconds,
+                    numa_nodes=numa_nodes,
+                    kernel=node_kernels[node.name]
+                    or (None if node_targets[node.name] else kernel),
+                    variant="base" if node_targets[node.name] else variant,
+                    share_disks=node.name in shared,
+                ): node
+                for node in wave
+            }
+            for future in as_completed(futures):
+                node = futures[future]
+                try:
+                    name, rc, output = future.result()
+                except Exception as e:
+                    # Don't let one node's exception (e.g. TimeoutExpired
+                    # from the inner subprocess) abandon the remaining
+                    # futures.  Mark this one as failed and keep
+                    # collecting -- the cleanup loop below needs an
+                    # accurate `failed` list.
+                    name = node.name
+                    rc = -1
+                    output = f"exception: {type(e).__name__}: {e}"
+                if rc != 0:
+                    print(f"\n--- {name}: FAILED (rc={rc}) ---\n{output}")
+                    failed.append(name)
+                else:
+                    print(f"  {name}: up")
+        return failed
+
+    failed = create_wave(spec_nodes)
+    # A partner's create reads its primary's .info and opens its disks,
+    # so the partners come up after every primary is up.
+    if partners and not failed:
+        print(f"    Creating {len(partners)} failover partner(s)...")
+        failed = create_wave(partners)
 
     if failed:
         # Clean up ALL nodes, including the failed ones.  A failed
@@ -1037,8 +1145,9 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
         # and .info file before erroring out (e.g. SSH wait timed out
         # so the rollback in cmd_create couldn't run).  `ltvm destroy`
         # is idempotent on missing VMs, so it's safe to call on every
-        # node and necessary to avoid leaking partial state.
-        for node in node_specs:
+        # node and necessary to avoid leaking partial state.  A partner
+        # goes first: destroy refuses a primary whose partner stays.
+        for node in sorted(node_specs, key=lambda n: not n.failover_for):
             r = subprocess.run(
                 _sudo_prefix() + [*_ltvm(), "destroy", node.name],
                 capture_output=True,
@@ -1065,6 +1174,9 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
                 "mdt_disks": n.mdt_disks,
                 "ost_disks": n.ost_disks,
                 "ip": n.ip,
+                # Only when set, so a cluster without failover keeps
+                # the record an older ltvm reads without a warning.
+                **({"failover_for": n.failover_for} if n.failover_for else {}),
             }
             for n in node_specs
         ],
@@ -1087,7 +1199,8 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
     print(f"\n=== Cluster '{cluster_name}' created ===")
     print(f"  owner: {owner_id}")
     for n in node_specs:
-        print(f"  {n.name:<20} {n.ip:<18} {'+'.join(n.roles)}")
+        partner = f" of {n.failover_for}" if n.failover_for else ""
+        print(f"  {n.name:<20} {n.ip:<18} {'+'.join(n.roles)}{partner}")
     print(
         f"\nNext: ltvm cluster deploy {cluster_name} "
         f"--build /path/to/lustre-release [--mount]"
@@ -1520,14 +1633,10 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
         die("--server-only and --client-only exclude each other")
     deploy_nodes = nodes
     if server_only:
-        deploy_nodes = [n for n in nodes if n.is_mgs or n.is_mds or n.is_oss]
+        deploy_nodes = [n for n in nodes if n.is_server]
     elif client_only:
         # A node that is also a server would lose its server build.
-        deploy_nodes = [
-            n
-            for n in nodes
-            if n.is_client and not (n.is_mgs or n.is_mds or n.is_oss)
-        ]
+        deploy_nodes = [n for n in nodes if n.is_client and not n.is_server]
     if not deploy_nodes:
         die(
             f"cluster {cluster.name!r} has no "
@@ -1751,9 +1860,7 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
                 zfs_by_node.get(node.name),
                 userspace_only=userspace_only,
                 need_zfs=(
-                    userspace_only
-                    and fstype == "zfs"
-                    and (node.is_mgs or node.is_mds or node.is_oss)
+                    userspace_only and fstype == "zfs" and node.is_server
                 ),
             ),
             success_verb="deployed",
@@ -2224,6 +2331,7 @@ def cmd_cluster_status(args: argparse.Namespace) -> None:
             "mdt_disks": node.mdt_disks,
             "ost_disks": node.ost_disks,
             "mgs_disk": bool(node.is_mgs and not node.is_mds),
+            "failover_for": node.failover_for or None,
         }
         for node in nodes
     ]
@@ -2263,6 +2371,8 @@ def cmd_cluster_status(args: argparse.Namespace) -> None:
             disks += f" ost={node.ost_disks}"
         if node.is_mgs and not node.is_mds:
             disks += " mgs=1"
+        if node.failover_for:
+            disks += f" disks of {node.failover_for}"
         roles = "+".join(node.roles)
         print(
             f"  {node.name:<20} {node.ip:<18} {status:<8} {roles:<12}{disks}",

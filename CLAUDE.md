@@ -1076,16 +1076,25 @@ node whose older image lacks it (`_ensure_pdsh`).
 exits non-zero if any node did; `cluster ssh <role>` opens a session on
 the first, since it execs a single interactive ssh.
 
-**Shared data disks.**  `ltvm create A --share-disks` and `ltvm create B
---disks-from A` give 2 VMs one set of data disks.  B has no disks of
-its own.  Thus both guests see the same `/dev/vd*` names
-(`qemu_run.data_disk_args`).
+**Failover pairs.**  `cluster create --failover PARTNER=PRIMARY` adds a
+server node with no disks of its own (role `failover`,
+`failover_for=PRIMARY`).  The flag repeats, but a primary has at most
+one partner.  ltvm creates the partners last, with `ltvm create
+--disks-from PRIMARY`.  Both QEMUs open the primary's disks.  Thus both
+guests see the same `/dev/vd*` names (`qemu_run.data_disk_args`).
+`generate_local_sh` writes the `<facet>failover_HOST` lines, and
+`probe_mgs_lnet` adds the partner's NID to `MGSNID`.  The test framework
+does the rest: `--failnode` (MMP on) and the move on `fail <facet>`.
 
 - Both QEMUs need `share-rw=on` and `cache=none`.  QEMU refuses a mix.
   With host caching, one QEMU does not see the writes of the other.
 - `_validate_failover_disks` limits a share to 2 VMs.
 - `_refuse_orphaned_partners` stops `destroy` of a primary alone.  Its
   partner would keep writing to unlinked images.
+- MMP stops a second mount, but not a raw write.
+- VM-proven on ldiskfs: replay-single 0a 0b 0c 1 2a on an MDS pair
+  (2026-10-18), and replay-ost-single 19/0/1 on an OSS pair
+  (2026-10-19).
 
 Each action is a real subparser, so `ltvm cluster <action> --help`
 works and every action's flags validate and tab-complete.  Two

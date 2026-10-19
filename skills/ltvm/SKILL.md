@@ -416,6 +416,37 @@ LTVM.TEST; rerunning keeps the keys, recreating the cluster loses them):
 ltvm cluster krb5 co2
 ```
 
+### Failover pairs
+
+To move a target between 2 servers (`fail mds1`, replay and recovery
+tests with a real failover), give a server a failover partner:
+
+```bash
+ltvm cluster create co2 mgs+mds:co2-mds1:1 oss:co2-oss:2 client:co2-c \
+    --failover co2-mds2=co2-mds1
+ltvm cluster deploy co2 --build <tree>
+ltvm suite run co2 replay-single --only '0a 0b' --wait
+```
+
+The partner is a new node (not a node spec) with the role `failover`.
+The partner has no disks of its own.  Its QEMU opens the primary's
+disks, so `/dev/vdb` is the same MDT on both guests.  `cluster deploy`
+writes the partner into `cfg/local.sh` as `mds1failover_HOST`.  When
+the primary is the MGS, it also writes `mgsfailover_HOST` and puts both
+NIDs in `MGSNID`.  The framework formats the target with `--failnode`,
+which turns on ldiskfs MMP.  MMP stops a second Lustre mount on the
+partner with EBUSY after about 11 seconds.  MMP does not stop a raw
+`dd` to the device, so do not write to the device from the passive
+node.  After a hard stop of the active node, the partner can mount the
+target once the MMP check passes:
+
+```bash
+kill -9 <primary QEMU pid>    # or: ltvm stop co2-mds1 --force
+ssh co2-mds2 'mount -t lustre /dev/vdb /mnt/mdt'
+```
+
+A primary has one partner at most.  The tests so far used ldiskfs only.
+
 ## Running tests
 
 For a whole suite, or a long `--only` list, use `ltvm suite`.  It starts

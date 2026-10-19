@@ -158,6 +158,19 @@ def cmd_cluster_create(args: argparse.Namespace) -> int:
         per_node["--node-kernel"].get(n) for n in names
     ]
 
+    # --failover PARTNER=PRIMARY: PARTNER is a new node, so it is not
+    # among the spec names; vm_cluster checks the rest.
+    failover: dict[str, str] = {}
+    for item in getattr(args, "failover", None) or []:
+        partner, sep, primary = item.partition("=")
+        if not sep or not partner or not primary:
+            return _error(
+                f"--failover {item!r}: expected PARTNER=PRIMARY", use_json
+            )
+        if partner in failover:
+            return _error(f"--failover names {partner!r} twice", use_json)
+        failover[partner] = primary
+
     flag_target = args.target
     if (
         pos_target is not None
@@ -177,6 +190,7 @@ def cmd_cluster_create(args: argparse.Namespace) -> int:
             nodes=nodes,
             node_targets=node_targets,
             node_kernels=node_kernels,
+            failover=failover,
             vcpus=args.vcpus,
             # mem=None means "let cmd_create resolve the target's
             # default_mem" (rocky10 needs 4096), rather than silently

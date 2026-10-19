@@ -303,15 +303,32 @@ deploy --mount` run llmount.sh from the first client node (the MGS node
 when there is no client), the node the generated `cfg/local.sh` treats
 as local.
 
-`ltvm create A --share-disks`, then `ltvm create B --disks-from A`,
-gives 2 VMs one set of data disks, for a failover pair. B has no data
-disks of its own. The QEMU of B opens the data disks of A in the same
-order. Thus both guests see each disk under one name (`/dev/vdb`,
-`/dev/vdc`). Both QEMUs open these disks with `share-rw=on` and
-`cache=none`. A share has at most 2 VMs. `ltvm destroy A` refuses
-while B exists, because B would lose its disks: destroy both together.
-On Linux, the VM directory must be on a filesystem that supports
-`O_DIRECT`.
+`cluster create --failover PARTNER=PRIMARY` adds a failover partner for
+a server node. ltvm creates PARTNER with no data disks of its own. The
+QEMU of PARTNER opens the data disks of PRIMARY in the same order. Thus
+both guests see each target under one name (`/dev/vdb`, `/dev/vdc`).
+Both QEMUs open these disks with `share-rw=on` and `cache=none`.
+`cluster deploy` writes PARTNER into `cfg/local.sh` as the
+`mds<N>failover_HOST` or `ost<N>failover_HOST` of each target on
+PRIMARY. When PRIMARY is the MGS, it also writes `mgsfailover_HOST` and
+adds the NID of PARTNER to `MGSNID`. The test framework then formats
+these targets with `--failnode`, which turns on ldiskfs MMP, and `fail
+mds1` moves MDT0 to PARTNER:
+
+```bash
+ltvm cluster create co2 mgs+mds:co2-mds1:1 oss:co2-oss:2 client:co2-c \
+    --failover co2-mds2=co2-mds1
+ltvm cluster deploy co2 --build ~/lustre-release
+ltvm suite run co2 replay-single --only '0a 0b' --wait
+```
+
+The single-VM form is `ltvm create A --share-disks`, then `ltvm create
+B --disks-from A`. `ltvm destroy A` refuses while B exists, because B
+would lose its disks: destroy both together. A primary has at most one
+partner. MMP stops a second
+Lustre mount, but it does not stop a raw write to the device. The tests
+so far used ldiskfs only. On Linux, the VM directory must be on a filesystem
+that supports `O_DIRECT`.
 
 `vm` sub-actions:
 

@@ -574,6 +574,39 @@ class TestClusterCreateArgs:
         assert rc == EXIT_ERROR
         assert not self.handler.called
 
+    def test_failover_passes_partner_and_primary(self) -> None:
+        cmd_cluster(
+            _ns(
+                "create",
+                "co9",
+                "mgs+mds:co9-mds1:1",
+                "client:co9-c",
+                "--failover",
+                "co9-mds2=co9-mds1",
+            )
+        )
+        ns = self._captured_ns()
+        assert ns.failover == {"co9-mds2": "co9-mds1"}
+        # The partner is a new node, not a spec.
+        assert ns.nodes == ["mgs+mds:co9-mds1:1", "client:co9-c"]
+
+    def test_no_failover_passes_an_empty_map(self) -> None:
+        cmd_cluster(_ns("create", "co9", "mgs+mds:co9-mds1:1"))
+        assert self._captured_ns().failover == {}
+
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            ["--failover", "co9-mds2"],
+            ["--failover", "=co9-mds1"],
+            ["--failover", "co9-x=co9-mds1", "--failover", "co9-x=co9-mds1"],
+        ],
+    )
+    def test_bad_failover_errors(self, extra: list[str]) -> None:
+        rc = cmd_cluster(_ns("create", "co9", "mgs+mds:co9-mds1:1", *extra))
+        assert rc == EXIT_ERROR
+        assert not self.handler.called
+
 
 # ─────────────────────────────────────────────────────────
 # cmd_cluster create: root requirement

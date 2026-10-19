@@ -954,6 +954,17 @@ class ClusterNode:
     mdt_disks: int = 0
     ost_disks: int = 0
     ip: str = ""
+    # For a failover partner (`cluster create --failover`): the node
+    # whose disks this one attaches and whose targets it can mount.
+    failover_for: str = ""
+
+    @property
+    def is_server(self) -> bool:
+        """True for a node that mounts targets: a server role, or a
+        failover partner that takes them over."""
+        return (
+            self.is_mgs or self.is_mds or self.is_oss or bool(self.failover_for)
+        )
 
     @property
     def is_mgs(self) -> bool:
@@ -1113,6 +1124,18 @@ class ClusterInfo:
 
     def client_nodes(self) -> list[ClusterNode]:
         return [n for n in self.get_nodes() if n.is_client]
+
+    def node(self, name: str) -> ClusterNode:
+        for n in self.get_nodes():
+            if n.name == name:
+                return n
+        raise RuntimeError(f"cluster {self.name!r} has no node {name!r}")
+
+    def failover_partners(self) -> dict[str, str]:
+        """Map each node that has a failover partner to that partner."""
+        return {
+            n.failover_for: n.name for n in self.get_nodes() if n.failover_for
+        }
 
     def local_node(self) -> ClusterNode:
         """The node the cluster block in cfg/local.sh treats as local:

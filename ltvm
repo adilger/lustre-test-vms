@@ -2136,6 +2136,18 @@ def build_parser() -> argparse.ArgumentParser:
         "and base variant. Repeat for more nodes.",
     )
     ccp.add_argument(
+        "--failover",
+        dest="failover",
+        action="append",
+        default=None,
+        metavar="PARTNER=PRIMARY",
+        help="Add a failover partner PARTNER for the server PRIMARY: a "
+        "new node that attaches PRIMARY's disks (shared, MMP-protected "
+        "on ldiskfs) and is written into local.sh as the failover host "
+        "of each of PRIMARY's targets, so `fail mds1` moves MDT0 to it. "
+        "Repeat for more pairs.",
+    )
+    ccp.add_argument(
         "--node-kernel",
         dest="node_kernel",
         action="append",
