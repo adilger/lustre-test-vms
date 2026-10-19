@@ -1103,6 +1103,23 @@ does the rest: `--failnode` (MMP on) and the move on `fail <facet>`.
   pair, and replay-single 0a 0b 0c 1 2a on an MDS pair.
 - HARD mode VM-proven on ZFS (2026-10-19): replay-single 0a 0b 1, 5
   pass.  `ltvm-power` crashed and restarted both MDS nodes and an OSS.
+- `cluster failover/failback` (`cluster_failover.py`) put the fault on
+  the host and move facets with `failover-facets.sh` on the first
+  client.  That script must run `RPC_MODE=true init_test_env`: without
+  it, init_test_env deletes `$TMP/*active` and probes the dead node.
+  It runs from a file, detached: pdsh's ssh eats a script on stdin.
+- Neither action waits for recovery.  `cluster status
+  --wait-recovery` waits on request.
+- `failover-facets.sh drop` takes the pool name from `zpool_name`:
+  an MDT pool is `lustre-mdt1`, not `lustre-<facet>`.
+- `split-brain` must fail to take over.  Its exit status is 0 only
+  when MMP refused every mount.
+- `freeze` refuses macOS.  There, SIGSTOP stalls socket_vmnet for every
+  VM.  QMP stop pauses the guest's clock, so MMP missed the takeover,
+  and both nodes kept the targets (ldiskfs and ZFS).
+- Failover and failback VM-proven 2026-10-19: umount, kill, panic and
+  split-brain (named netdrop then) on ZFS.  Kill also on ldiskfs.
+  `freeze` on a Linux host is UNRUN.
 
 Each action is a real subparser, so `ltvm cluster <action> --help`
 works and every action's flags validate and tab-complete.  Two

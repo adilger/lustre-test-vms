@@ -446,13 +446,24 @@ partner with EBUSY after about 11 seconds.  MMP does not stop a raw
 `dd` to the device, so do not write to the device from the passive
 node.  ZFS works too: `multihost=on` stops the second import.
 
-After a hard stop of the active node, the partner can mount the target
-once the MMP check passes:
+To fail a server over by hand, use `cluster failover`, not a hand
+mount.  It puts the fault on the host, then mounts the targets on the
+partner through the test framework.  Thus the framework's record of
+the active node stays correct for `cluster failback`:
 
 ```bash
-kill -9 <primary QEMU pid>    # or: ltvm stop co2-mds1 --force
-ssh co2-mds2 'mount -t lustre /dev/vdb /mnt/mdt'
+ltvm cluster failover co2 co2-mds1 --how kill --json
+ltvm cluster status co2 --json --wait-recovery 300
+ltvm cluster failback co2 co2-mds1
 ```
+
+`--how` is `umount`, `kill` (power loss), `panic` (vmcore, then a
+reboot) or `freeze` (SIGSTOP, Linux hosts only).  The `split-brain`
+method cuts the link of a primary that runs.  It then checks that MMP
+refuses the takeover: exit 0 means MMP refused it.  Neither action waits for
+recovery.  `cluster status --wait-recovery SECS` waits, and exits 1
+if a target still recovers after SECS.  Fail back before you start a suite, because a suite deletes
+the framework's record of where each facet is.
 
 For suites with hard failures, add `--env FAILURE_MODE=HARD`.  The
 framework then crashes a node through `ltvm-power`, and the node

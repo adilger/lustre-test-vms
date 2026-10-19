@@ -290,6 +290,8 @@ ltvm cluster llmount <name>     Mount Lustre across the cluster
 ltvm cluster llumount <name>    Unmount it and unload the modules
 ltvm cluster status <name>      Nodes, targets, recovery and client imports
                                 (--wait-recovery SECS waits for recovery)
+ltvm cluster failover <name> <node> [--how H]   Fault a server, mount on partner
+ltvm cluster failback <name> <node>             Restore it, move targets back
 ltvm cluster exec <name> <role> <cmd>...   Run on every node with that role
 ltvm cluster ssh  <name> <role> Interactive ssh to one node
 ltvm cluster list               List all clusters
@@ -349,7 +351,46 @@ loses its page cache, MMP stops, and the node stops answering, as in a
 power loss. But the kernel runs its panic path (panic notifiers and
 console output) before it stops. A real power off needs the QEMU
 process on the host, and the framework calls `POWER_DOWN` from inside
-the client guest, which cannot reach QEMU.
+the client guest, which cannot reach QEMU. For a real power loss, use
+`ltvm cluster failover --how kill` from the host.
+
+`cluster failover` takes a primary down by one of 5 methods, then
+mounts its targets on its partner. It moves the targets with the test
+framework on the first client. Thus the framework's record of the
+active node stays correct for `cluster failback` and the next failover.
+It returns when the mounts finish or fail. It does not wait for
+recovery, because in a test recovery may never end. To wait, use
+`cluster status --wait-recovery SECS`:
+
+| `--how` | The primary | After the takeover |
+|---------|-------------|--------------------|
+| `umount` | Unmounts its targets | Runs |
+| `kill` | QEMU gets SIGKILL: power loss | Is down |
+| `panic` | Crashes; kdump saves a vmcore | Reboots |
+| `freeze` | QEMU gets SIGSTOP: a hung node (Linux hosts only) | Resumes (`--hold`: stays frozen) |
+| `split-brain` | QMP `set_link off`: still runs, and MMP must refuse the takeover | Gets its link back (`--hold`: stays cut off) |
+
+```bash
+ltvm cluster failover co2 co2-mds1 --how kill --json
+ltvm cluster status co2 --json --wait-recovery 300
+ltvm cluster failback co2 co2-mds1
+```
+
+`split-brain` is a check of MMP, not a failover. It exits 0 when MMP
+refused every mount on the partner. It exits 1, and names the targets,
+when the partner mounted a target that the running primary also holds.
+
+On macOS, `cluster failover` refuses `freeze`. A stopped QEMU reads no
+packets, and socket_vmnet then stalls every VM on the host. QMP `stop`
+keeps the network up, but it also stops the guest's clock. In a test on
+2026-10-19, the resumed node saw no gap, and its MMP did not find the
+takeover. Both nodes then kept the targets, on ldiskfs and on ZFS.
+
+`cluster failback` starts, resumes or reconnects the primary as
+failover left it. It then moves the targets back from the partner, and
+it mounts a target that a failed move left mounted nowhere. A suite
+deletes the framework's record of the active node when it starts. Thus
+fail back before you start a suite.
 
 `vm` sub-actions:
 

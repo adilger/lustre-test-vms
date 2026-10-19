@@ -2326,6 +2326,13 @@ def _rotated(path: Path, fh: Any, anchor: bytes = b"") -> bool:
 
 def _qmp_nmi(qmp_path: Path) -> None:
     """Send inject-nmi via QMP Unix socket."""
+    qmp_execute(qmp_path, "inject-nmi")
+
+
+def qmp_execute(
+    qmp_path: Path, command: str, arguments: dict[str, Any] | None = None
+) -> Any:
+    """Run one QMP command over the VM's Unix socket; return its result."""
     import socket as _socket
 
     def _recv_json_line(sock: _socket.socket, buf: bytearray) -> dict[str, Any]:
@@ -2368,8 +2375,10 @@ def _qmp_nmi(qmp_path: Path) -> None:
         # Negotiate capabilities and read the response (one full line).
         s.sendall(json.dumps({"execute": "qmp_capabilities"}).encode() + b"\n")
         _recv_json_line(s, buf)
-        # Inject NMI
-        s.sendall(json.dumps({"execute": "inject-nmi"}).encode() + b"\n")
+        request: dict[str, Any] = {"execute": command}
+        if arguments:
+            request["arguments"] = arguments
+        s.sendall(json.dumps(request).encode() + b"\n")
         # Skip async events (e.g. NMI, RESET) until we get the response
         # frame for our request.  QMP responses always carry "return" or
         # "error"; events carry "event" instead.
@@ -2381,6 +2390,7 @@ def _qmp_nmi(qmp_path: Path) -> None:
             raise RuntimeError(
                 result["error"].get("desc", str(result["error"]))
             )
+        return result["return"]
 
 
 def cmd_exec(args: argparse.Namespace) -> int:

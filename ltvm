@@ -193,6 +193,8 @@ try:
         cmd_cluster_deploy,
         cmd_cluster_destroy,
         cmd_cluster_exec,
+        cmd_cluster_failback,
+        cmd_cluster_failover,
         cmd_cluster_krb5,
         cmd_cluster_list,
         cmd_cluster_llmount,
@@ -2477,6 +2479,64 @@ def build_parser() -> argparse.ArgumentParser:
         "if one has not",
     )
     csp.set_defaults(func=cmd_cluster_status)
+
+    cfop = cluster_sub.add_parser(
+        "failover",
+        parents=[common],
+        help="Fault a server and mount its targets on its failover partner",
+        description="Take NODE down by --how, then mount its targets on "
+        "its partner through the test framework (run on the first "
+        "client).  Returns once the mounts finish or fail; it does not "
+        "wait for recovery: `cluster status` shows it.",
+    )
+    _cfop_name = cfop.add_argument("name", help="Cluster name")
+    _cfop_name.completer = complete_clusters  # type: ignore[attr-defined]
+    _cfop_node = cfop.add_argument("node", help="The primary server")
+    _cfop_node.completer = complete_cluster_members  # type: ignore[attr-defined]
+    from ltvm_pkg.cluster_failover import HOWS
+
+    cfop.add_argument(
+        "--how",
+        choices=list(HOWS),
+        default="umount",
+        help="How the primary goes down: "
+        + "; ".join(f"{k}: {v}" for k, v in HOWS.items())
+        + " (default: umount)",
+    )
+    cfop.add_argument(
+        "--hold",
+        action="store_true",
+        help="freeze/split-brain: leave the primary frozen or cut off; "
+        "`cluster failback` restores it",
+    )
+    cfop.add_argument(
+        "--timeout",
+        type=int,
+        default=600,
+        help="Timeout for the mounts, in seconds (default: 600)",
+    )
+    cfop.set_defaults(func=cmd_cluster_failover)
+
+    cfbp = cluster_sub.add_parser(
+        "failback",
+        parents=[common],
+        help="Restore a failed-over server and move its targets back",
+        description="Start NODE, resume it, or restore its link, as "
+        "`cluster failover` left it; then move its targets back from "
+        "the partner.  It does not wait for recovery.",
+    )
+    _cfbp_name = cfbp.add_argument("name", help="Cluster name")
+    _cfbp_name.completer = complete_clusters  # type: ignore[attr-defined]
+    _cfbp_node = cfbp.add_argument("node", help="The primary server")
+    _cfbp_node.completer = complete_cluster_members  # type: ignore[attr-defined]
+    cfbp.add_argument(
+        "--timeout",
+        type=int,
+        default=600,
+        help="Timeout for the boot and for the mounts, in seconds "
+        "(default: 600)",
+    )
+    cfbp.set_defaults(func=cmd_cluster_failback)
 
     cep = cluster_sub.add_parser(
         "exec",

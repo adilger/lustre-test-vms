@@ -1,5 +1,6 @@
 """CLI layer for ``ltvm cluster``: create / destroy / start / stop /
-deploy / llmount / status / exec / list / ssh over ``ltvm_pkg.vm_cluster``.
+deploy / llmount / status / failover / failback / exec / list / ssh over
+``ltvm_pkg.vm_cluster``.
 
 One thin wrapper per action, each reaching the matching vm_cluster
 handler through a ``_call`` adapter that turns SystemExit into an int
@@ -328,6 +329,32 @@ def cmd_cluster_status(args: argparse.Namespace) -> int:
     return _call(
         _handler("cmd_cluster_status"),
         _qemu_ns(name=args.name, wait_recovery=args.wait_recovery),
+        use_json,
+    )
+
+
+def cmd_cluster_failover(args: argparse.Namespace) -> int:
+    """Move a server's targets to its failover partner."""
+    use_json = args.json
+    return _call(
+        _handler("cmd_cluster_failover"),
+        _qemu_ns(
+            name=args.name,
+            node=args.node,
+            how=args.how,
+            hold=args.hold,
+            timeout=args.timeout,
+        ),
+        use_json,
+    )
+
+
+def cmd_cluster_failback(args: argparse.Namespace) -> int:
+    """Move a server's targets back from its failover partner."""
+    use_json = args.json
+    return _call(
+        _handler("cmd_cluster_failback"),
+        _qemu_ns(name=args.name, node=args.node, timeout=args.timeout),
         use_json,
     )
 

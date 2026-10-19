@@ -2587,3 +2587,15 @@ def cmd_cluster_krb5(args: argparse.Namespace) -> None:
     from .cluster_krb5 import cmd_cluster_krb5 as krb5
 
     krb5(args)
+
+
+def cmd_cluster_failover(args: argparse.Namespace) -> None:
+    from .cluster_failover import cmd_cluster_failover as failover
+
+    failover(args)
+
+
+def cmd_cluster_failback(args: argparse.Namespace) -> None:
+    from .cluster_failover import cmd_cluster_failback as failback
+
+    failback(args)
