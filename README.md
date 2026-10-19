@@ -334,6 +334,22 @@ the partner's kernel does not see the new partitions. Thus `local.sh`
 sets `ZPOOL=/usr/sbin/ltvm-zpool`, which rereads the partition table of
 a data disk that shows none before a `zpool import`.
 
+A cluster can run `FAILURE_MODE=HARD`. Its `local.sh` sets `POWER_DOWN` and
+`POWER_UP` to `/usr/sbin/ltvm-power`. `off` crashes the node with kdump
+unloaded, and the kernel reboots it after `LTVM_POWER_OFF_SECS` (30 by
+default). `on` waits for ssh:
+
+```bash
+ltvm suite run co2 replay-single --only '0a 0b' --env FAILURE_MODE=HARD --wait
+```
+
+The crash is close to a power loss, but it is not the same. The guest
+loses its page cache, MMP stops, and the node stops answering, as in a
+power loss. But the kernel runs its panic path (panic notifiers and
+console output) before it stops. A real power off needs the QEMU
+process on the host, and the framework calls `POWER_DOWN` from inside
+the client guest, which cannot reach QEMU.
+
 `vm` sub-actions:
 
 ```

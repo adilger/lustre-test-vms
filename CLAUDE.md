@@ -1095,11 +1095,14 @@ does the rest: `--failnode` (MMP on) and the move on `fail <facet>`.
 - VM-proven on ldiskfs: replay-single 0a 0b 0c 1 2a on an MDS pair
   (2026-10-18), and replay-ost-single 19/0/1 on an OSS pair
   (2026-10-19).
-- `cluster deploy` installs `ltvm-zpool.sh` (`ZPOOL`) on every node.
+- `cluster deploy` installs `ltvm-power.sh` (`POWER_DOWN`/`POWER_UP`,
+  for `FAILURE_MODE=HARD`) and `ltvm-zpool.sh` (`ZPOOL`) on every node.
   A ZFS partner must reread the partitions that mkfs.lustre made after
   it booted, or `zpool import` finds no pool.
 - VM-proven on ZFS (2026-10-19): replay-ost-single 19/0/1 on an OSS
   pair, and replay-single 0a 0b 0c 1 2a on an MDS pair.
+- HARD mode VM-proven on ZFS (2026-10-19): replay-single 0a 0b 1, 5
+  pass.  `ltvm-power` crashed and restarted both MDS nodes and an OSS.
 
 Each action is a real subparser, so `ltvm cluster <action> --help`
 works and every action's flags validate and tab-complete.  Two

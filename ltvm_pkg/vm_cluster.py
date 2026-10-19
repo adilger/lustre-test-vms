@@ -43,9 +43,11 @@ from .vm_state import (
     lustre_libdir,
 )
 
-# Guest helpers that local.sh names: ZPOOL.
+# Guest helpers that local.sh names: POWER_DOWN/POWER_UP and ZPOOL.
+POWER_HELPER = "/usr/sbin/ltvm-power"
 ZPOOL_HELPER = "/usr/sbin/ltvm-zpool"
 GUEST_HELPERS = {
+    POWER_HELPER: Path(__file__).parent / "ltvm-power.sh",
     ZPOOL_HELPER: Path(__file__).parent / "ltvm-zpool.sh",
 }
 
@@ -531,6 +533,9 @@ def generate_local_sh(
     lines.append("LFS=/usr/bin/lfs")
     lines.append("")
 
+    # FAILURE_MODE=HARD calls these with a node name; see ltvm-power.sh.
+    lines.append(f'POWER_DOWN="{POWER_HELPER} off"')
+    lines.append(f'POWER_UP="{POWER_HELPER} on"')
     # A failover partner must reread the partitions before an import;
     # see ltvm-zpool.sh.
     lines.append(f"ZPOOL={ZPOOL_HELPER}")
@@ -1375,8 +1380,8 @@ def _install_guest_helpers(
 ) -> tuple[str, int, str]:
     """Install the helpers that local.sh names (GUEST_HELPERS).
 
-    Every node gets them: the framework runs $ZPOOL on the servers, and
-    on the node that drives the suite.  Returns
+    Every node gets them: the framework runs POWER_DOWN from whichever
+    node drives the suite, and $ZPOOL on the servers.  Returns
     (node_name, returncode, output).
     """
     from ltvm_pkg.deploy import step_timeout

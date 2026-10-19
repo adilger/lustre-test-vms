@@ -448,6 +448,11 @@ class TestGuestHelpers:
     def test_local_sh_names_the_zpool_helper(self) -> None:
         assert f"ZPOOL={vm_cluster.ZPOOL_HELPER}" in self._text()
 
+    def test_local_sh_names_the_power_helper(self) -> None:
+        text = self._text()
+        assert f'POWER_DOWN="{vm_cluster.POWER_HELPER} off"' in text
+        assert f'POWER_UP="{vm_cluster.POWER_HELPER} on"' in text
+
     def test_every_helper_has_a_source(self) -> None:
         for src in vm_cluster.GUEST_HELPERS.values():
             assert src.is_file()

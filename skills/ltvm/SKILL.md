@@ -447,6 +447,10 @@ kill -9 <primary QEMU pid>    # or: ltvm stop co2-mds1 --force
 ssh co2-mds2 'mount -t lustre /dev/vdb /mnt/mdt'
 ```
 
+For suites with hard failures, add `--env FAILURE_MODE=HARD`.  The
+framework then crashes a node through `ltvm-power`, and the node
+reboots after 30 seconds.
+
 A primary has one partner at most.
 
 ## Running tests
