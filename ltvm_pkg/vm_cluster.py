@@ -55,6 +55,19 @@ def _sudo_prefix() -> list[str]:
     return [] if os.geteuid() == 0 or rootless.ready() else ["sudo"]
 
 
+def _ltvm() -> list[str]:
+    """The argv that runs this checkout's ltvm, for a child command.
+
+    A bare "ltvm" runs whichever install is first in PATH, and a
+    worktree's cluster then creates its nodes with another checkout's
+    code, which may not know a new flag ("unrecognized arguments").
+    """
+    return [
+        sys.executable,
+        str(Path(__file__).resolve().parent.parent / "ltvm"),
+    ]
+
+
 def parse_node_spec(spec: str) -> ClusterNode:
     """Parse a node spec like 'mgs+mds:myvm:1' or 'oss:myoss:3'.
 
@@ -490,7 +503,7 @@ def _create_one_node(
     # invoking user's.  (On macOS that is a hard failure -- root's home is
     # /var/root and /root is on the read-only system volume.)
     cmd = _sudo_prefix() + [
-        "ltvm",
+        *_ltvm(),
         "create",
         node.name,
         "--vcpus",
@@ -1027,7 +1040,7 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
         # node and necessary to avoid leaking partial state.
         for node in node_specs:
             r = subprocess.run(
-                _sudo_prefix() + ["ltvm", "destroy", node.name],
+                _sudo_prefix() + [*_ltvm(), "destroy", node.name],
                 capture_output=True,
             )
             if r.returncode != 0:
@@ -1651,7 +1664,14 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
                 die(err)
             continue
 
-        build_cmd = ["ltvm", "build", "lustre", target, "--lustre-tree", build]
+        build_cmd = [
+            *_ltvm(),
+            "build",
+            "lustre",
+            target,
+            "--lustre-tree",
+            build,
+        ]
         if kernel_name:
             build_cmd += ["--kernel", kernel_name]
         # Forward --arch unconditionally.  Comparing against the literal
