@@ -421,8 +421,10 @@ def _detect_platform_hint() -> str:
         v = vendor.read_text().lower()
         if "apple" in v:
             return (
-                "Apple Virtualization Framework detected. Ensure "
-                "'Use Apple Virtualization' is enabled in UTM/Parallels."
+                "Apple Virtualization Framework detected. Nested KVM needs "
+                "an M3 or later Mac, macOS 15+, and UTM 4.6+ with the VM's "
+                "nested virtualization option on; see "
+                "docs/NESTED_VIRTUALIZATION.md."
             )
         if "parallels" in v:
             return "Parallels detected. Enable nested virt in VM config."

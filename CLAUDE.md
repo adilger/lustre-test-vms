@@ -817,6 +817,17 @@ occurrence wins (`crashkernel=`) takes the user's value.  `root=`,
 ltvm's values, and rc.local configures the guest from `fc_*`.  Fixed at
 create time like the disks; `cluster create` applies it to every node.
 
+**Nested KVM on Apple Silicon:** a Linux host on an Apple CPU (`CPU
+implementer : 0x61`) is a VM under Apple Virtualization -- UTM, M3 or
+later, nested virtualization on -- and `qemu_machine_for_arch` gives its
+KVM guests `its=off` (`vm_state._nested_kvm_on_apple`).  With the ITS,
+virtio-pci MSIs lose wakeups there and the guest idles in `cpu_do_idle`
+forever a few seconds after init; wired INTx works.  It changes nothing
+on any other host, macOS's HVF included.  An unpushed April attempt
+routed these hosts to TCG instead, judged on boot time alone; KVM is
+3-40x faster than TCG there.  See
+[docs/NESTED_VIRTUALIZATION.md](docs/NESTED_VIRTUALIZATION.md).
+
 **Naming:** always include the checkout number: `co<N>-<role>`.
 
 **Root:** a host has one of two layouts, and

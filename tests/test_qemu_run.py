@@ -686,6 +686,40 @@ class TestForceTcg:
         assert machine.startswith("virt,")
         assert "gic-version=max" in machine
 
+    def test_its_off_under_nested_kvm_on_apple(
+        self, monkeypatch: Any, tmp_path: Path
+    ) -> None:
+        """An Apple CPU on a Linux KVM host gets its=off; others keep the ITS.
+
+        Nested KVM under Apple Virtualization loses MSIs routed through
+        the ITS and the guest hangs in idle after init.
+        """
+        import platform
+
+        from ltvm_pkg import vm_state
+
+        monkeypatch.delenv("LTVM_FORCE_TCG", raising=False)
+        monkeypatch.setattr(platform, "system", lambda: "Linux")
+        monkeypatch.setattr(platform, "machine", lambda: "aarch64")
+        cpuinfo = tmp_path / "cpuinfo"
+        real = vm_state._nested_kvm_on_apple
+        monkeypatch.setattr(
+            vm_state, "_nested_kvm_on_apple", lambda: real(cpuinfo)
+        )
+
+        cpuinfo.write_text("processor\t: 0\nCPU implementer\t: 0x61\n")
+        assert vm_state.qemu_machine_for_arch("aarch64") == (
+            "virt,accel=kvm,gic-version=max,its=off"
+        )
+        cpuinfo.write_text("processor\t: 0\nCPU implementer\t: 0x41\n")
+        assert vm_state.qemu_machine_for_arch("aarch64") == (
+            "virt,accel=kvm,gic-version=max"
+        )
+        # Under TCG there is no nested GIC to work around.
+        cpuinfo.write_text("CPU implementer\t: 0x61\n")
+        monkeypatch.setenv("LTVM_FORCE_TCG", "1")
+        assert "its=off" not in vm_state.qemu_machine_for_arch("aarch64")
+
     def test_cpu_model_is_concrete_when_forced(
         self, tmp_vmdir: Path, monkeypatch: Any
     ) -> None:

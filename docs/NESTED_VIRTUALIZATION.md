@@ -151,28 +151,66 @@ gcloud compute instances update <name> \
 
 ## macOS (Apple Silicon / Intel)
 
-### Apple Silicon (M1/M2/M3/M4) -- aarch64
+### Apple Silicon -- aarch64
 
-Apple Silicon Macs don't have x86 hardware, so x86 KVM is not
-possible. Two options:
+ltvm runs on macOS itself, with HVF.  To run it inside a Linux VM on
+the Mac instead -- so an agent driving ltvm is confined to that VM --
+the Linux VM needs nested virtualization, and that needs all of:
 
-1. **Run ltvm natively on aarch64.** ltvm supports aarch64 targets
-   (rocky9, ubuntu2404). Use a Linux VM on your Mac
-   (UTM, Parallels, VMware Fusion) with an **aarch64 Linux guest**,
-   then run ltvm inside that. KVM works because the guest arch
-   matches the host (ARM virtualization).
+- an **M3 or later** chip (M1 and M2 have no nested virtualization);
+- **macOS 15** or later;
+- **UTM 4.6** or later, with the VM on the **Apple Virtualization**
+  backend (not QEMU) and its nested virtualization option turned on;
+- an **aarch64** Linux guest, running **aarch64** ltvm targets.  An
+  x86_64 target can only be emulated (TCG) on Apple Silicon.
 
-2. **Use a remote x86 machine.** SSH to a cloud instance or
-   lab server and run ltvm there.
+Check from inside the Linux VM:
 
-The key: the **guest architecture must match the host**. An aarch64
-Mac can run aarch64 KVM guests but not x86_64 KVM guests.
+```bash
+sudo dmesg | grep -e 'started at EL2' -e 'kvm \['   # "All CPU(s) started at EL2"
+ls -l /dev/kvm                                      # present
+sudo usermod -aG kvm $USER                          # if you are not in the kvm group
+```
 
-VM frameworks for aarch64 Linux on Apple Silicon:
-- **UTM** (free, QEMU-based): enable "Use Apple Virtualization"
-  for KVM-equivalent performance
-- **Parallels Desktop**: full nested virt support
-- **VMware Fusion**: supports nested virt on ARM
+`ltvm doctor` then reports KVM as available, and `ltvm create` uses
+it: `accel=kvm` and `-cpu host`.  `ps -o args -C qemu-system-aarch64`
+shows what a running VM got.
+
+**ltvm turns off the GIC ITS here.**  On an Apple CPU (`CPU
+implementer : 0x61` in `/proc/cpuinfo`), ltvm launches KVM guests with
+`virt,...,its=off`.  With the ITS, virtio-pci MSIs lose wakeups under
+this nesting: the guest boots past init, then sits in `cpu_do_idle`
+for good while its vCPU thread shows 100% CPU.  Without the ITS,
+virtio falls back to wired INTx interrupts, which work.  Trapping WFI
+in the L1 KVM does not help, so it is the MSI delivery itself.
+`LTVM_FORCE_TCG=1` still forces emulation, if you ever need it.
+
+Measured on an M3 Pro, macOS 26.5, UTM 4.7.5, Ubuntu 26.04 (kernel
+7.0) as L1, QEMU 10.2.1, rocky9 aarch64 guest, 2 vCPUs:
+
+| | TCG | nested KVM |
+|---|---|---|
+| boot to root prompt | 23-25 s | 9 s |
+| `ltvm create` to ssh | -- | 20 s |
+| sha256 of 512 MiB | 4.6 s | 0.7 s |
+| 2000 fork+exec | 20 s | 0.5 s |
+| `xz -3` of 64 MiB | 62-70 s | 20 s (same as the L1 itself) |
+| `find /usr` | 7.5-12 s | 2.1 s |
+| 256 MiB direct read | 1.9-2.9 s | 1.0 s |
+
+CPU-bound work runs at the L1's own speed; what nesting costs is
+exits, so interrupt-bound I/O gains least (4 KiB direct reads are
+about even).
+
+An earlier attempt on this setup concluded TCG was faster, from boot
+time alone (~60 s under KVM, with `nohz=off` and the ITS off).  That
+no longer reproduces: `nohz=off` makes no measurable difference, and
+the boot is 9 s.
+
+Parallels Desktop and VMware Fusion have not been tested with ltvm.
+
+If the Mac cannot nest, run ltvm on macOS directly, or on a remote
+x86_64 or aarch64 Linux machine.
 
 ### Intel Mac
 

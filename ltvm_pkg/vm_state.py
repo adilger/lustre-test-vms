@@ -117,8 +117,43 @@ def qemu_machine_for_arch(arch: str = "x86_64") -> str:
             if force_tcg or not host_is_arm64
             else f"accel={native_accel}"
         )
-        return f"virt,{accel},gic-version=max"
+        # its=off under nested KVM on Apple Silicon (see
+        # _nested_kvm_on_apple): MSIs routed through the emulated ITS
+        # lose wakeups there, and the guest sits in cpu_do_idle forever
+        # a few seconds after init.  Without an ITS, virtio-pci falls
+        # back to wired INTx interrupts, which are delivered reliably.
+        its = (
+            ",its=off"
+            if accel == "accel=kvm" and _nested_kvm_on_apple()
+            else ""
+        )
+        return f"virt,{accel},gic-version=max{its}"
     return "virt,accel=tcg"
+
+
+def _nested_kvm_on_apple(cpuinfo: Path = Path("/proc/cpuinfo")) -> bool:
+    """True when this Linux host runs on an Apple CPU (implementer 0x61).
+
+    On Apple Silicon /dev/kvm only exists inside a VM with nested
+    virtualization on -- UTM's Apple Virtualization backend on M3 or
+    later, macOS 15 or later -- so the KVM guests ltvm starts here are
+    nested ones.  There, a guest whose virtio-pci MSIs go through the
+    GICv3 ITS boots past init and then stops taking interrupts: the
+    vCPU idles in WFI with nothing ever waking it (verified on an M3
+    Pro, macOS 26.5, Ubuntu 26.04's 7.0 kernel, QEMU 10.2.1, rocky9
+    guest; trapping WFI in the L1 KVM does not help).  With its=off the
+    same guest boots in ~9 s and runs CPU-bound work at the L1's own
+    speed, 3-40x faster than TCG.
+    """
+    try:
+        with cpuinfo.open() as f:
+            for line in f:
+                key, _, value = line.partition(":")
+                if key.strip() == "CPU implementer":
+                    return value.strip().lower() == "0x61"
+    except OSError:
+        pass
+    return False
 
 
 DISK_SIZE_BYTES = 500 * 1024 * 1024  # 500 MiB default

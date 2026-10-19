@@ -56,6 +56,11 @@ a podman-managed Linux VM + QEMU microvms. A few things differ from Linux:
 - **podman backend is pinned to `applehv`** (Apple's Hypervisor.framework).
   `./ltvm install` forces the applehv machine provider; ltvm has no use for
   the GPU-only libkrun backend.
+- **To confine an agent to a VM**, run ltvm inside an aarch64 Linux VM
+  on the Mac instead: UTM on the Apple Virtualization backend with
+  nested virtualization on, which needs an M3 or later and macOS 15+.
+  ltvm then gets KVM there; see
+  [docs/NESTED_VIRTUALIZATION.md](docs/NESTED_VIRTUALIZATION.md#apple-silicon----aarch64).
 
 ```bash
 git clone git@github.com:lustre-tools/lustre-test-vms.git
