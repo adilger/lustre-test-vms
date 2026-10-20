@@ -58,6 +58,14 @@ a podman-managed Linux VM + QEMU microvms. A few things differ from Linux:
 - **podman backend is pinned to `applehv`** (Apple's Hypervisor.framework).
   `./ltvm install` forces the applehv machine provider; ltvm has no use for
   the GPU-only libkrun backend.
+- **Lustre builds read the kernel build-tree and ccache from podman
+  volumes**, not over virtiofs, which halves a build.  The first build
+  against a kernel copies its build-tree in (~1.5 min, once);
+  `LTVM_MACOS_BUILD_VOLUMES=0` goes back to bind mounts.
+- **The podman machine stops after every build** to give its memory
+  back, which costs ~12 s and its page cache on the next one.
+  `export LTVM_PODMAN_AUTOSTOP=0` keeps it up: a rebuild then takes
+  ~8 s instead of ~22 s.
 - **To confine an agent to a VM**, run ltvm inside an aarch64 Linux VM
   on the Mac instead: UTM on the Apple Virtualization backend with
   nested virtualization on, which needs an M3 or later and macOS 15+.

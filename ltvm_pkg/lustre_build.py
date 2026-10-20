@@ -29,7 +29,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import TypedDict
 
-from . import build_timeout
+from . import build_timeout, build_volumes
 from .lustre_version import (
     check_configured,
     configure_is_stale,
@@ -1370,6 +1370,13 @@ fi""")
     # whole `ltvm build lustre` forever instead of failing cleanly; the
     # limit must still clear a first full build on a busy host.
     timeout = build_timeout.seconds(build_timeout.LUSTRE)
+    # On macOS the kernel build-tree and ccache come from podman volumes
+    # on the machine's own disk instead of virtiofs; elsewhere these are
+    # the bind mounts unchanged.  See build_volumes.
+    kernel_src = build_volumes.kernel_tree_mount(
+        Path(build_tree), container_tag
+    )
+    ccache_src = build_volumes.ccache_mount(container_tag, ccache_dir)
     cmd = [
         "podman",
         "run",
@@ -1380,11 +1387,11 @@ fi""")
         "-v",
         f"{lustre_tree}:/lustre",
         "-v",
-        f"{build_tree}:/kernel:ro",
+        f"{kernel_src}:/kernel:ro",
         "-v",
         f"{host_staging}:/staging",
         "-v",
-        f"{ccache_dir}:/ccache",
+        f"{ccache_src}:/ccache",
         "-v",
         f"{TARGETS_DIR / 'common'}:/ltvm-common:ro",
         container_tag,

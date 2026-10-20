@@ -1410,6 +1410,41 @@ another version removes it and `autom4te.cache` first.  A
 version nothing can determine (no tags, no version file) is a
 WARNING at the start and the end of the build.
 
+### Building on macOS: volumes, not virtiofs
+
+On macOS podman runs in a Linux VM and every bind mount crosses
+virtiofs, which a kernel-module build is the worst case for: each
+compile stats thousands of kernel headers.  A rocky9 Lustre build took
+332 s there against 137 s in a Linux VM, and doubling the machine's
+CPUs gained nothing.  So `build lustre` mounts two of its inputs from
+podman volumes on the machine's own disk
+([ltvm_pkg/build_volumes.py](ltvm_pkg/build_volumes.py)), which brings it
+to 160 s:
+
+- **The kernel build-tree**, copied in once per kernel artifact with
+  `tar | podman volume import` (92 s for 1.8 GB, against 254 s for a cp
+  across virtiofs).  The name hashes the artifact's path, meta.json,
+  kernel.release and Module.symvers, so a changed kernel never reads an
+  old copy; making a volume removes the older ones for the same kernel,
+  and `ltvm clean` lists those whose kernel is gone.  A marker written
+  after the copy is what makes a volume usable, so an interrupted copy
+  is redone, not used.
+- **ccache**, as `ltvm-build-ccache-<tag>` -- deliberately not the
+  `ltvm-ccache-*` name of the volumes 0e4c1c9 moved away from, whose
+  root podman machine 5.x made unwritable.  Every build checks the
+  volume is writable and falls back to the host directory if not.
+
+Any failure falls back to the bind mount it replaces, with a warning.
+The Lustre tree stays a bind mount: it is edited on macOS and deploy
+reads staging from it.  Moving it too would take the build to 139 s,
+at the price of keeping a copy in sync with the user's edits.
+
+`LTVM_MACOS_BUILD_VOLUMES=0` turns the volumes off, and
+`tests/conftest.py` sets it for the whole suite -- otherwise a test that
+mocks only the build's own `podman run` would create real volumes on a
+Mac.  `LTVM_PODMAN_AUTOSTOP=0` keeps the podman machine up after a
+build; its stop and restart are ~12 s of every incremental build.
+
 ## Release Manifest Schema
 
 Each published release carries `"schema": "ltvm-release/<N>"`

@@ -32,7 +32,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ltvm_pkg import podman_gc
+from ltvm_pkg import build_volumes, podman_gc
 from ltvm_pkg.cli.util import (
     EXIT_ERROR,
     EXIT_OK,
@@ -630,6 +630,7 @@ def cmd_prune(args: argparse.Namespace) -> int:
     # Host-wide extras, only on a full scan of the shared artifacts.
     full_scan = not target_arg and not getattr(args, "user_zfs", False)
     podman_dead: list[tuple[podman_gc.TagInfo, str]] = []
+    dead_volumes: list[str] = []
     idle: list[dict[str, Any]] = []
     idle_days = float(getattr(args, "idle_days", 14))
     if full_scan:
@@ -641,6 +642,7 @@ def cmd_prune(args: argparse.Namespace) -> int:
                 if older_than_days is None
                 or (now - t.created) / 86400.0 >= older_than_days
             ]
+            dead_volumes = build_volumes.dead_kernel_volumes()
         idle = _idle_vms(idle_days)
 
     # ---- Apply phase ----
@@ -677,6 +679,13 @@ def cmd_prune(args: argparse.Namespace) -> int:
                 apply_errors.append(
                     (Path(t.tag), "podman rmi refused (a container uses it?)")
                 )
+        for v in dead_volumes:
+            if build_volumes.remove_volume(v):
+                removed_podman.append(v)
+            else:
+                apply_errors.append(
+                    (Path(v), "podman volume rm refused (a container uses it?)")
+                )
 
     # ---- Output ----
     payload: dict[str, Any] = {
@@ -709,6 +718,7 @@ def cmd_prune(args: argparse.Namespace) -> int:
             }
             for t, why in podman_dead
         ],
+        "podman_volumes": dead_volumes,
         "removed_podman": removed_podman,
         "idle_vms": idle,
     }
@@ -727,11 +737,17 @@ def cmd_prune(args: argparse.Namespace) -> int:
             print(f"  {t.tag:<44} {_format_bytes(t.size):>10}  {why}")
         print()
 
+    if dead_volumes:
+        print("Kernel build-tree volumes with no kernel artifact left (macOS):")
+        for v in dead_volumes:
+            print(f"  {v}")
+        print()
+
     if not all_candidates:
-        if not podman_dead:
+        if not podman_dead and not dead_volumes:
             print("Nothing to prune.")
         elif apply:
-            print(f"Removed {len(removed_podman)} podman images.")
+            print(f"Removed {len(removed_podman)} podman images and volumes.")
         else:
             print("Re-run with --apply to remove them.")
         return EXIT_ERROR if apply_errors else EXIT_OK
@@ -765,7 +781,7 @@ def cmd_prune(args: argparse.Namespace) -> int:
                 f"Removed {len(removed)} entries, "
                 f"freed {_format_bytes(total_bytes)}"
                 + (
-                    f", and {len(removed_podman)} podman images."
+                    f", and {len(removed_podman)} podman images and volumes."
                     if removed_podman
                     else "."
                 )

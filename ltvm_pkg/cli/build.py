@@ -237,6 +237,11 @@ def _podman_machine_autostop() -> Iterator[_AutostopHandle]:
         yield handle
     if not handle.success:
         return
+    # LTVM_PODMAN_AUTOSTOP=0 keeps the machine up between builds: a
+    # start costs ~10 s and the machine's page cache, which is most of
+    # an incremental build's time.
+    if os.environ.get("LTVM_PODMAN_AUTOSTOP") == "0":
+        return
     try:
         if podman_in_use_elsewhere():
             return  # another ltvm build is mid-flight; leave it up

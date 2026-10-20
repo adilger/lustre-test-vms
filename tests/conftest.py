@@ -118,6 +118,11 @@ def _isolate_user_state(
     monkeypatch.setenv("LTVM_SITE_CONFIG", str(root / "no-such-ltvm.conf"))
     # The developer's own build time limit would change podman argv.
     monkeypatch.delenv("LTVM_BUILD_TIMEOUT", raising=False)
+    # On a Mac, build_lustre would otherwise create and probe real
+    # podman volumes from tests that mock only the build's own podman
+    # run.  tests/test_build_volumes.py turns them back on.
+    monkeypatch.setenv("LTVM_MACOS_BUILD_VOLUMES", "0")
+    monkeypatch.delenv("LTVM_PODMAN_AUTOSTOP", raising=False)
     # Tab completion installs into /etc/bash_completion.d and the zsh
     # and fish equivalents, and `ltvm doctor --fix` installs any that
     # are missing -- so without this a doctor test rewrote the

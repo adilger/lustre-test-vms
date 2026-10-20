@@ -193,6 +193,25 @@ class TestPodmanMachineAutostop:
                 h.success = True
         stop.assert_called_once()
 
+    def test_env_keeps_the_machine_running(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """LTVM_PODMAN_AUTOSTOP=0 skips the stop even on success."""
+        from ltvm_pkg.cli.build import _podman_machine_autostop
+
+        monkeypatch.setenv("LTVM_PODMAN_AUTOSTOP", "0")
+        with (
+            patch("ltvm_pkg.cli.build.is_macos", return_value=True),
+            patch(
+                "ltvm_pkg.cli.build.should_stop_podman_machine_macos",
+                return_value=True,
+            ),
+            patch("ltvm_pkg.cli.build.stop_podman_machine_macos") as stop,
+        ):
+            with _podman_machine_autostop() as h:
+                h.success = True
+        stop.assert_not_called()
+
     def test_error_return_does_not_stop_machine(self) -> None:
         """Callers that return an error code leave ``success`` False;
         the machine must keep running."""
