@@ -23,6 +23,13 @@ dir there.
 Every step falls back to the bind mount it replaces, with a warning,
 so a podman that cannot do volumes builds as before.
 ``LTVM_MACOS_BUILD_VOLUMES=0`` turns the volumes off.
+
+Each volume is labelled with what it is (``ltvm.kind``) and, for a
+kernel, the build-tree it was copied from (``ltvm.build-tree``), so it
+can be judged by any ltvm checkout on the Mac: a kernel volume is dead
+once that path is gone or holds a different kernel.  ``ltvm clean``
+and ``ltvm target clean`` remove a kernel's volume with the kernel,
+and ``ltvm doctor`` shows what the volumes hold.
 """
 
 from __future__ import annotations
@@ -30,12 +37,14 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import hashlib
+import json
 import logging
 import os
 import re
 import subprocess
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .host_setup import is_macos
@@ -52,6 +61,11 @@ KERNEL_PREFIX = "ltvm-kernel-"
 # 0e4c1c9 and may still be lying around with the unreadable root that
 # made it switch to a bind mount.
 CCACHE_PREFIX = "ltvm-build-ccache-"
+LABEL_KIND = "ltvm.kind"
+LABEL_TREE = "ltvm.build-tree"
+# ccache's own default, made explicit so an image that changes it
+# cannot leave the volume to grow without bound.
+CCACHE_MAXSIZE = "5G"
 
 
 def enabled() -> bool:
@@ -152,7 +166,15 @@ def _populate(volume: str, build_tree: Path, image: str) -> None:
     # remove a container using it too; if one is, create fails below
     # and the build falls back to the bind mount.
     _podman("volume", "rm", volume)
-    r = _podman("volume", "create", volume)
+    r = _podman(
+        "volume",
+        "create",
+        "--label",
+        f"{LABEL_KIND}=kernel",
+        "--label",
+        f"{LABEL_TREE}={build_tree.resolve()}",
+        volume,
+    )
     if r.returncode != 0:
         raise RuntimeError(f"podman volume create {volume}: {r.stderr.strip()}")
     # Through podman's API rather than virtiofs: 92 s for a 1.8 GB tree,
@@ -198,21 +220,20 @@ def _populate(volume: str, build_tree: Path, image: str) -> None:
         raise RuntimeError(f"could not mark {volume} complete")
 
 
-def _remove_superseded(keep: str) -> None:
-    """Remove other volumes for the same kernel (an older artifact).
+def _remove_superseded(keep: str, build_tree: Path) -> None:
+    """Remove the older volumes copied from *build_tree*.
 
     Without -f, which would also remove -- kill -- a build still running
     against the old kernel.  A volume in use stays, and the next build,
     or `ltvm clean`, removes it.
     """
-    stem = keep.rsplit("-", 1)[0]
-    r = _podman("volume", "ls", "--format", "{{.Name}}")
-    for name in (r.stdout or "").split():
-        if name != keep and name.rsplit("-", 1)[0] == stem:
-            if _podman("volume", "rm", name).returncode == 0:
-                log.info("removed superseded kernel volume %s", name)
+    tree = str(build_tree.resolve())
+    for v in list_volumes() or []:
+        if v.name != keep and v.kind == "kernel" and v.build_tree == tree:
+            if _podman("volume", "rm", v.name).returncode == 0:
+                log.info("removed superseded kernel volume %s", v.name)
             else:
-                log.info("kept superseded kernel volume %s: in use", name)
+                log.info("kept superseded kernel volume %s: in use", v.name)
 
 
 def kernel_tree_mount(build_tree: Path, image: str) -> str:
@@ -235,7 +256,7 @@ def kernel_tree_mount(build_tree: Path, image: str) -> str:
                     flush=True,
                 )
                 _populate(volume, build_tree, image)
-                _remove_superseded(volume)
+                _remove_superseded(volume, build_tree)
     except (OSError, RuntimeError, subprocess.SubprocessError) as e:
         log.warning(
             "kernel build-tree volume unavailable (%s); building against "
@@ -260,7 +281,13 @@ def ccache_mount(container_tag: str, fallback: Path) -> str:
     try:
         with _lock(volume):
             if _podman("volume", "exists", volume).returncode != 0:
-                r = _podman("volume", "create", volume)
+                r = _podman(
+                    "volume",
+                    "create",
+                    "--label",
+                    f"{LABEL_KIND}=ccache",
+                    volume,
+                )
                 if r.returncode != 0:
                     raise RuntimeError(r.stderr.strip())
             out = _probe(
@@ -276,39 +303,202 @@ def ccache_mount(container_tag: str, fallback: Path) -> str:
     return volume
 
 
-def dead_kernel_volumes(artifacts_dir: Path | None = None) -> list[str]:
-    """Kernel volumes no kernel artifact on this host would mount.
+@dataclass
+class Volume:
+    name: str
+    labels: dict[str, str] = field(default_factory=dict)
 
-    What is left once `ltvm clean` (or a hand rm) takes a kernel away;
-    a rebuilt kernel's old volume is removed when its new one is made.
-    Only where volumes are in use: none are made anywhere else.
+    @property
+    def kind(self) -> str | None:
+        """kernel, ccache, or None for a volume that is not ltvm's."""
+        kind = self.labels.get(LABEL_KIND)
+        if kind:
+            return kind
+        if self.name.startswith(KERNEL_PREFIX):
+            return "kernel"
+        if self.name.startswith(CCACHE_PREFIX):
+            return "ccache"
+        return None
+
+    @property
+    def build_tree(self) -> str | None:
+        return self.labels.get(LABEL_TREE)
+
+
+def list_volumes() -> list[Volume] | None:
+    """ltvm's volumes, or None when podman cannot be asked.
+
+    None rather than [] so a caller can say "not checked" -- on a Mac,
+    most often because the podman machine is stopped -- instead of
+    "there are none".  Only on macOS: no other host gets volumes.
     """
-    if not enabled():
+    if not is_macos():
         return []
-    if artifacts_dir is None:
-        from .target_config import ARTIFACTS_DIR
-
-        artifacts_dir = ARTIFACTS_DIR
     try:
-        r = _podman("volume", "ls", "--format", "{{.Name}}", timeout=30)
+        r = _podman("volume", "ls", "--format", "json", timeout=30)
     except (OSError, subprocess.SubprocessError):
-        return []
+        return None
     if r.returncode != 0:
-        return []
-    live = {
-        kernel_volume_name(bt)
-        for bt in artifacts_dir.glob("*/*/kernels/*/build-tree")
-        if bt.is_dir()
-    }
-    return sorted(
-        n
-        for n in r.stdout.split()
-        if n.startswith(KERNEL_PREFIX) and n not in live
-    )
+        return None
+    try:
+        rows = json.loads(r.stdout or "[]")
+    except json.JSONDecodeError:
+        return None
+    vols = [
+        Volume(str(row.get("Name", "")), dict(row.get("Labels") or {}))
+        for row in rows
+        if isinstance(row, dict)
+    ]
+    return [v for v in vols if v.kind in ("kernel", "ccache")]
+
+
+def _under(tree: str | None, paths: Iterable[Path]) -> bool:
+    if not tree:
+        return False
+    t = Path(tree)
+    return any(t == p or p in t.parents for p in (q.resolve() for q in paths))
+
+
+def why_dead(v: Volume) -> str | None:
+    """Why kernel volume *v* has nothing left to serve, or None."""
+    if v.kind != "kernel":
+        return None
+    if not v.build_tree:
+        return "no record of the kernel it was copied from"
+    tree = Path(v.build_tree)
+    if not tree.is_dir():
+        return f"its kernel is gone ({tree.parent.name})"
+    if kernel_volume_name(tree) != v.name:
+        return f"superseded: {tree.parent.name} was rebuilt or re-fetched"
+    return None
+
+
+def dead_kernel_volumes(
+    under: Iterable[Path] | None = None,
+) -> list[tuple[Volume, str]] | None:
+    """Kernel volumes with no kernel left to serve, and why.
+
+    *under* limits it to volumes copied from inside those directories
+    (one target's artifacts); a volume of unknown origin is then left
+    out, since nothing says it belongs there.  None when podman could
+    not be asked.
+    """
+    vols = list_volumes()
+    if vols is None:
+        return None
+    paths = list(under) if under is not None else None
+    found = []
+    for v in vols:
+        why = why_dead(v)
+        if why is None:
+            continue
+        if paths is not None and not _under(v.build_tree, paths):
+            continue
+        found.append((v, why))
+    return found
+
+
+def kernel_volumes_under(paths: Iterable[Path]) -> list[Volume] | None:
+    """Kernel volumes copied from inside *paths*: what deleting them orphans."""
+    vols = list_volumes()
+    if vols is None:
+        return None
+    paths = list(paths)
+    return [
+        v for v in vols if v.kind == "kernel" and _under(v.build_tree, paths)
+    ]
+
+
+_UNITS = {
+    "B": 1,
+    "kB": 10**3,
+    "KB": 10**3,
+    "MB": 10**6,
+    "GB": 10**9,
+    "TB": 10**12,
+}
+
+
+def volume_sizes() -> dict[str, int]:
+    """Bytes per volume, from `podman system df -v`; {} when unknown.
+
+    Its volume table is text only (``--format`` and ``-v`` do not mix),
+    with go-units' decimal sizes: ``1.8GB``.
+    """
+    try:
+        r = _podman("system", "df", "-v", timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    if r.returncode != 0:
+        return {}
+    sizes: dict[str, int] = {}
+    table = r.stdout.split("Local Volumes space usage:", 1)
+    if len(table) != 2:
+        return {}
+    for line in table[1].splitlines():
+        m = re.match(r"(\S+)\s+\d+\s+([0-9.]+)\s*([kKMGT]?B)\s*$", line.strip())
+        if m:
+            sizes[m.group(1)] = int(float(m.group(2)) * _UNITS[m.group(3)])
+    return sizes
 
 
 def remove_volume(name: str) -> bool:
+    """Remove *name* unless a container uses it (never -f)."""
     try:
         return _podman("volume", "rm", name, timeout=60).returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False
+
+
+def machine_running() -> bool:
+    """True when a podman machine is up.  Asks; never starts one."""
+    try:
+        r = _podman("machine", "list", "--format", "json", timeout=15)
+        rows = json.loads(r.stdout or "[]") if r.returncode == 0 else []
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+        return False
+    return any(isinstance(m, dict) and m.get("Running") for m in rows)
+
+
+def doctor_report() -> tuple[list[str], list[str]]:
+    """(warnings, info) about the build volumes, for `ltvm doctor`.
+
+    Only on macOS, and only when the podman machine is already up:
+    doctor must not start a VM to look inside it.
+    """
+    if not is_macos():
+        return [], []
+    if not machine_running():
+        return [], ["build volumes: not checked (podman machine stopped)"]
+    vols = list_volumes()
+    if vols is None:
+        return [], ["build volumes: not checked (podman did not answer)"]
+    if not vols:
+        return [], ["build volumes: none yet"]
+    sizes = volume_sizes()
+
+    def total(vs: list[Volume]) -> str:
+        known = [sizes[v.name] for v in vs if v.name in sizes]
+        return _human(sum(known)) if known else "?"
+
+    kernels = [v for v in vols if v.kind == "kernel"]
+    caches = [v for v in vols if v.kind == "ccache"]
+    info = [
+        f"build volumes: {len(kernels)} kernel build-tree(s), {total(kernels)}; "
+        f"{len(caches)} ccache, {total(caches)} (capped at {CCACHE_MAXSIZE} each)"
+    ]
+    dead = [(v, why) for v in kernels if (why := why_dead(v))]
+    warnings = []
+    if dead:
+        warnings.append(
+            f"{len(dead)} kernel build-tree volume(s) with no kernel left, "
+            f"{total([v for v, _ in dead])} -- `ltvm clean --apply` removes them"
+        )
+    return warnings, info
+
+
+def _human(n: int) -> str:
+    for unit, scale in (("GB", 10**9), ("MB", 10**6), ("kB", 10**3)):
+        if n >= scale:
+            return f"{n / scale:.1f} {unit}"
+    return f"{n} B"

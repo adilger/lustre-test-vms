@@ -61,7 +61,9 @@ a podman-managed Linux VM + QEMU microvms. A few things differ from Linux:
 - **Lustre builds read the kernel build-tree and ccache from podman
   volumes**, not over virtiofs, which halves a build.  The first build
   against a kernel copies its build-tree in (~1.5 min, once);
-  `LTVM_MACOS_BUILD_VOLUMES=0` goes back to bind mounts.
+  `LTVM_MACOS_BUILD_VOLUMES=0` goes back to bind mounts.  A kernel's
+  volume goes with the kernel (`ltvm clean`, `ltvm target clean`), and
+  `ltvm doctor` shows what they take inside the podman machine.
 - **The podman machine stops after every build** to give its memory
   back, which costs ~12 s and its page cache on the next one.
   `export LTVM_PODMAN_AUTOSTOP=0` keeps it up: a rebuild then takes

@@ -1425,24 +1425,42 @@ to 160 s:
   `tar | podman volume import` (92 s for 1.8 GB, against 254 s for a cp
   across virtiofs).  The name hashes the artifact's path, meta.json,
   kernel.release and Module.symvers, so a changed kernel never reads an
-  old copy; making a volume removes the older ones for the same kernel,
-  and `ltvm clean` lists those whose kernel is gone.  A marker written
-  after the copy is what makes a volume usable, so an interrupted copy
-  is redone, not used.
+  old copy.  A marker written after the copy is what makes a volume
+  usable, so an interrupted copy is redone, not used.
 - **ccache**, as `ltvm-build-ccache-<tag>` -- deliberately not the
   `ltvm-ccache-*` name of the volumes 0e4c1c9 moved away from, whose
   root podman machine 5.x made unwritable.  Every build checks the
-  volume is writable and falls back to the host directory if not.
+  volume is writable and falls back to the host directory if not, and
+  passes `CCACHE_MAXSIZE=5G` (ccache's own default, made explicit) only
+  with the volume.
+
+The volumes follow the artifacts they copy, so nothing outlives what it
+was made from.  Each is labelled `ltvm.kind` and, for a kernel,
+`ltvm.build-tree` -- the path it was copied from -- and every decision
+reads the label, never the name: a kernel volume is dead once that path
+is gone or now maps to another volume, which any ltvm checkout on the
+Mac judges the same way (matching names against one checkout's
+artifacts would let `clean --apply` in one delete another's).  Making a
+volume removes the older ones from the same build-tree; `ltvm clean
+[--apply]` removes the dead ones, within the target named if one is,
+and those of the kernels it deletes in the same run; `ltvm target
+clean` removes those of the arch dir it wipes; `ltvm doctor` shows what
+they hold and counts dead ones as an issue.  None of them uses
+`podman volume rm -f`, which removes the containers using a volume too:
+a volume in use is kept, and said so.  The scans run on any Mac, even
+with the volumes turned off, and report "not checked" rather than
+"none" when podman cannot be asked -- doctor in particular never starts
+a stopped podman machine to look.
 
 Any failure falls back to the bind mount it replaces, with a warning.
 The Lustre tree stays a bind mount: it is edited on macOS and deploy
 reads staging from it.  Moving it too would take the build to 139 s,
 at the price of keeping a copy in sync with the user's edits.
 
-`LTVM_MACOS_BUILD_VOLUMES=0` turns the volumes off, and
-`tests/conftest.py` sets it for the whole suite -- otherwise a test that
-mocks only the build's own `podman run` would create real volumes on a
-Mac.  `LTVM_PODMAN_AUTOSTOP=0` keeps the podman machine up after a
+`LTVM_MACOS_BUILD_VOLUMES=0` turns the volumes off.
+`tests/conftest.py` tells build_volumes it is not on a Mac for the whole
+suite -- otherwise a test that mocks only the build's own `podman run`,
+or runs clean or doctor, would create and list real volumes on a Mac.  `LTVM_PODMAN_AUTOSTOP=0` keeps the podman machine up after a
 build; its stop and restart are ~12 s of every incremental build.
 
 ## Release Manifest Schema

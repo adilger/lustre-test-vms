@@ -524,6 +524,97 @@ def _arches_for_target(target: str, arch_flag: str | None) -> list[str]:
     return sorted(d.name for d in target_dir.iterdir() if d.is_dir())
 
 
+@dataclass
+class _VolumeReport:
+    prune: list[dict[str, Any]] = field(default_factory=list)
+    keep: list[dict[str, Any]] = field(default_factory=list)
+    checked: bool = True
+
+
+def _volume_report(
+    target_arg: str | None, deleting: list[Path], user_zfs: bool
+) -> _VolumeReport:
+    """What macOS build volumes `ltvm clean` would remove, and keeps."""
+    from ltvm_pkg.target_config import ARTIFACTS_DIR
+
+    rep = _VolumeReport()
+    if user_zfs or not build_volumes.is_macos():
+        return rep
+    scope = [ARTIFACTS_DIR / target_arg] if target_arg else None
+    dead = build_volumes.dead_kernel_volumes(scope)
+    going = build_volumes.kernel_volumes_under(deleting)
+    vols = build_volumes.list_volumes()
+    if dead is None or going is None or vols is None:
+        rep.checked = False
+        return rep
+    sizes = build_volumes.volume_sizes() if vols else {}
+    seen: set[str] = set()
+    for v, why in dead:
+        seen.add(v.name)
+        rep.prune.append(
+            {"name": v.name, "bytes": sizes.get(v.name), "reason": why}
+        )
+    for v in going:
+        if v.name not in seen:
+            seen.add(v.name)
+            rep.prune.append(
+                {
+                    "name": v.name,
+                    "bytes": sizes.get(v.name),
+                    "reason": "its kernel is removed in this run",
+                }
+            )
+    for v in vols:
+        if v.kind == "ccache" and (
+            target_arg is None
+            or target_arg in v.name.removeprefix(build_volumes.CCACHE_PREFIX)
+        ):
+            rep.keep.append(
+                {
+                    "name": v.name,
+                    "bytes": sizes.get(v.name),
+                    "reason": f"ccache, capped at {build_volumes.CCACHE_MAXSIZE}",
+                }
+            )
+    return rep
+
+
+def _podman_counts(images: list[str], volumes: list[str]) -> str:
+    parts = []
+    if images or not volumes:
+        parts.append(
+            f"{len(images)} podman image{'' if len(images) == 1 else 's'}"
+        )
+    if volumes:
+        parts.append(
+            f"{len(volumes)} podman volume{'' if len(volumes) == 1 else 's'}"
+        )
+    return " and ".join(parts)
+
+
+def _print_volumes(rep: _VolumeReport) -> None:
+    def size(b: int | None) -> str:
+        return _format_bytes(b) if b is not None else "?"
+
+    if not rep.checked:
+        print(
+            "Build volumes: not checked -- podman could not be asked "
+            "(is the podman machine running?)"
+        )
+        print()
+        return
+    if rep.prune:
+        print("Kernel build-tree volumes to remove (macOS):")
+        for v in rep.prune:
+            print(f"  {v['name']:<60} {size(v['bytes']):>10}  {v['reason']}")
+        print()
+    if rep.keep:
+        print("Build volumes kept (macOS):")
+        for v in rep.keep:
+            print(f"  {v['name']:<60} {size(v['bytes']):>10}  {v['reason']}")
+        print()
+
+
 def _scan_user_zfs(target_arg: str | None) -> _TargetReport:
     """This user's own ZFS builds whose kernel is gone from artifacts.
 
@@ -630,7 +721,6 @@ def cmd_prune(args: argparse.Namespace) -> int:
     # Host-wide extras, only on a full scan of the shared artifacts.
     full_scan = not target_arg and not getattr(args, "user_zfs", False)
     podman_dead: list[tuple[podman_gc.TagInfo, str]] = []
-    dead_volumes: list[str] = []
     idle: list[dict[str, Any]] = []
     idle_days = float(getattr(args, "idle_days", 14))
     if full_scan:
@@ -642,8 +732,17 @@ def cmd_prune(args: argparse.Namespace) -> int:
                 if older_than_days is None
                 or (now - t.created) / 86400.0 >= older_than_days
             ]
-            dead_volumes = build_volumes.dead_kernel_volumes()
         idle = _idle_vms(idle_days)
+
+    # macOS build volumes: the kernel volumes nothing serves any more
+    # (within the target named, if one is) and those of the kernels this
+    # run deletes -- a copy should not outlive what it copies.  ccache
+    # is shown, never pruned: it is a live cache with its own cap.
+    volumes = _volume_report(
+        target_arg,
+        [c.path for c in all_candidates],
+        getattr(args, "user_zfs", False),
+    )
 
     # ---- Apply phase ----
     # Sort deepest-first so a base-variant kdir that contains nested
@@ -671,6 +770,7 @@ def cmd_prune(args: argparse.Namespace) -> int:
             except OSError as e:
                 apply_errors.append((c.path, str(e)))
     removed_podman: list[str] = []
+    removed_volumes: list[str] = []
     if apply:
         for t, _why in podman_dead:
             if podman_gc.remove_tag(t.tag):
@@ -679,12 +779,15 @@ def cmd_prune(args: argparse.Namespace) -> int:
                 apply_errors.append(
                     (Path(t.tag), "podman rmi refused (a container uses it?)")
                 )
-        for v in dead_volumes:
-            if build_volumes.remove_volume(v):
-                removed_podman.append(v)
+        for v in volumes.prune:
+            if build_volumes.remove_volume(v["name"]):
+                removed_volumes.append(v["name"])
             else:
                 apply_errors.append(
-                    (Path(v), "podman volume rm refused (a container uses it?)")
+                    (
+                        Path(v["name"]),
+                        "podman volume rm refused: a container uses it",
+                    )
                 )
 
     # ---- Output ----
@@ -718,8 +821,11 @@ def cmd_prune(args: argparse.Namespace) -> int:
             }
             for t, why in podman_dead
         ],
-        "podman_volumes": dead_volumes,
+        "podman_volumes": volumes.prune,
+        "podman_volumes_kept": volumes.keep,
+        "podman_volumes_checked": volumes.checked,
         "removed_podman": removed_podman,
+        "removed_volumes": removed_volumes,
         "idle_vms": idle,
     }
 
@@ -737,17 +843,13 @@ def cmd_prune(args: argparse.Namespace) -> int:
             print(f"  {t.tag:<44} {_format_bytes(t.size):>10}  {why}")
         print()
 
-    if dead_volumes:
-        print("Kernel build-tree volumes with no kernel artifact left (macOS):")
-        for v in dead_volumes:
-            print(f"  {v}")
-        print()
+    _print_volumes(volumes)
 
     if not all_candidates:
-        if not podman_dead and not dead_volumes:
+        if not podman_dead and not volumes.prune:
             print("Nothing to prune.")
         elif apply:
-            print(f"Removed {len(removed_podman)} podman images and volumes.")
+            print(f"Removed {_podman_counts(removed_podman, removed_volumes)}.")
         else:
             print("Re-run with --apply to remove them.")
         return EXIT_ERROR if apply_errors else EXIT_OK
@@ -781,8 +883,8 @@ def cmd_prune(args: argparse.Namespace) -> int:
                 f"Removed {len(removed)} entries, "
                 f"freed {_format_bytes(total_bytes)}"
                 + (
-                    f", and {len(removed_podman)} podman images and volumes."
-                    if removed_podman
+                    f", and {_podman_counts(removed_podman, removed_volumes)}."
+                    if removed_podman or removed_volumes
                     else "."
                 )
             )

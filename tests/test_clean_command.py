@@ -637,3 +637,108 @@ class TestIdleVms:
         out = capsys.readouterr().out
         assert "co1-old" in out
         assert "Nothing to prune" in out
+
+
+class TestBuildVolumes:
+    """macOS build-tree volumes go with their kernels, scoped like the
+    rest of clean; ccache is shown and never pruned."""
+
+    def _setup(
+        self, tmp_targets: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> dict:
+        from ltvm_pkg import build_volumes as bv
+
+        arts = tmp_targets / "artifacts"
+        r9 = arts / "rocky9" / "x86_64"
+        old = _make_kernel_dir(r9, "5.14-rhel9.7-5.14.0-503.40.1.el9_7")
+        new = _make_kernel_dir(r9, "5.14-rhel9.7-5.14.0-611.49.1.el9_7")
+        (old / "build-tree").mkdir()
+        (new / "build-tree").mkdir()
+        gone = arts / "rocky10" / "x86_64" / "kernels" / "k" / "build-tree"
+
+        def kvol(name: str, tree: Path) -> bv.Volume:
+            labels = {
+                bv.LABEL_KIND: "kernel",
+                bv.LABEL_TREE: str(tree.resolve()),
+            }
+            return bv.Volume(name, labels)
+
+        vols = [
+            # The superseded kernel's own current volume: live until the
+            # kernel is removed.
+            kvol(bv.kernel_volume_name(old / "build-tree"), old / "build-tree"),
+            kvol(bv.kernel_volume_name(new / "build-tree"), new / "build-tree"),
+            kvol("v-r10-gone", gone),
+            bv.Volume(
+                "ltvm-build-ccache-rocky9-x86_64", {bv.LABEL_KIND: "ccache"}
+            ),
+        ]
+        monkeypatch.setattr(bv, "is_macos", lambda: True)
+        monkeypatch.setattr(bv, "list_volumes", lambda: vols)
+        monkeypatch.setattr(
+            bv, "volume_sizes", lambda: {v.name: 1_800_000_000 for v in vols}
+        )
+        removed: list[str] = []
+        monkeypatch.setattr(
+            bv, "remove_volume", lambda n: removed.append(n) is None
+        )
+        return {"vols": vols, "removed": removed, "old": old, "new": new}
+
+    def test_a_removed_kernel_takes_its_volume_along(
+        self,
+        tmp_targets: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        s = self._setup(tmp_targets, monkeypatch)
+        old_vol = s["vols"][0].name
+        rc = _run_prune(tmp_targets, target="rocky9", apply=True)
+        assert rc == EXIT_OK
+        assert not s["old"].exists()
+        # The superseded kernel's volume goes with it; rocky10's dead
+        # volume is outside `clean rocky9`; the live kernel's stays.
+        assert s["removed"] == [old_vol]
+        out = capsys.readouterr().out
+        assert "its kernel is removed in this run" in out
+        assert "ccache, capped at 5G" in out
+        assert "and 1 podman volume." in out
+
+    def test_full_scan_dry_run_lists_dead_ones_and_removes_nothing(
+        self,
+        tmp_targets: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        s = self._setup(tmp_targets, monkeypatch)
+        rc = _run_prune(tmp_targets, use_json=True)
+        assert rc == EXIT_OK
+        payload = json.loads(capsys.readouterr().out)
+        names = {v["name"] for v in payload["podman_volumes"]}
+        assert names == {"v-r10-gone", s["vols"][0].name}
+        assert [v["name"] for v in payload["podman_volumes_kept"]] == [
+            "ltvm-build-ccache-rocky9-x86_64"
+        ]
+        assert payload["podman_volumes_checked"] is True
+        assert s["removed"] == []
+
+    def test_says_when_podman_could_not_be_asked(
+        self,
+        tmp_targets: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from ltvm_pkg import build_volumes as bv
+
+        monkeypatch.setattr(bv, "is_macos", lambda: True)
+        monkeypatch.setattr(bv, "list_volumes", lambda: None)
+        rc = _run_prune(tmp_targets)
+        assert rc == EXIT_OK
+        assert "Build volumes: not checked" in capsys.readouterr().out
+
+    def test_nothing_about_volumes_off_a_mac(
+        self, tmp_targets: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        rc = _run_prune(tmp_targets)
+        assert rc == EXIT_OK
+        out = capsys.readouterr().out
+        assert "volume" not in out.lower()

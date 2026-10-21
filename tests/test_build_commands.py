@@ -1339,6 +1339,90 @@ class TestCmdCleanScoping:
         assert not (out / "rocky9" / "aarch64").exists()
         assert (out / "rocky9" / "x86_64" / "keep.txt").exists()
 
+    def test_clean_removes_the_kernels_build_volumes_on_macos(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        tmp_targets: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A kernel's build-tree volume goes with the kernel, a volume a
+        container uses is kept and said so, and other targets' stay."""
+        import ltvm_pkg.cli as cli_mod
+        import ltvm_pkg.target_config as cfg
+        from ltvm_pkg import build_volumes as bv
+
+        out = tmp_targets / "artifacts"
+        mine = out / "rocky9" / "aarch64" / "kernels" / "k" / "build-tree"
+        busy = out / "rocky9" / "aarch64" / "kernels" / "k2" / "build-tree"
+        theirs = out / "rocky10" / "aarch64" / "kernels" / "k" / "build-tree"
+        for d in (mine, busy, theirs):
+            d.mkdir(parents=True)
+        vols = [
+            bv.Volume(
+                n, {bv.LABEL_KIND: "kernel", bv.LABEL_TREE: str(t.resolve())}
+            )
+            for n, t in (
+                ("v-mine", mine),
+                ("v-busy", busy),
+                ("v-theirs", theirs),
+            )
+        ]
+        monkeypatch.setattr(bv, "list_volumes", lambda: vols)
+        removed: list[str] = []
+        monkeypatch.setattr(
+            bv,
+            "remove_volume",
+            lambda n: removed.append(n) is None and n != "v-busy",
+        )
+        with (
+            patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
+            patch.object(cfg, "ARTIFACTS_DIR", out),
+            patch.object(cli_mod, "TargetConfig", cfg.TargetConfig),
+            patch.object(
+                cfg,
+                "TARGETS_YAML",
+                tmp_targets / "targets" / "targets.yaml",
+            ),
+        ):
+            args = argparse.Namespace(
+                target="rocky9", arch="aarch64", all_arches=False, json=False
+            )
+            rc = cli_mod.cmd_clean(args)
+        assert rc == EXIT_OK
+        assert sorted(removed) == ["v-busy", "v-mine"]
+        printed = capsys.readouterr().out
+        assert "removed podman volume v-mine" in printed
+        assert "kept podman volume v-busy: a container uses it" in printed
+
+    def test_clean_says_when_volumes_could_not_be_checked(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        tmp_targets: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import ltvm_pkg.cli as cli_mod
+        import ltvm_pkg.target_config as cfg
+        from ltvm_pkg import build_volumes as bv
+
+        out = tmp_targets / "artifacts"
+        (out / "rocky9" / "aarch64").mkdir(parents=True)
+        monkeypatch.setattr(bv, "list_volumes", lambda: None)
+        with (
+            patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
+            patch.object(cfg, "ARTIFACTS_DIR", out),
+            patch.object(cli_mod, "TargetConfig", cfg.TargetConfig),
+            patch.object(
+                cfg,
+                "TARGETS_YAML",
+                tmp_targets / "targets" / "targets.yaml",
+            ),
+        ):
+            args = argparse.Namespace(
+                target="rocky9", arch="aarch64", all_arches=False, json=False
+            )
+            assert cli_mod.cmd_clean(args) == EXIT_OK
+        assert "podman volumes not checked" in capsys.readouterr().out
+
     def test_clean_unknown_target_returns_not_found(
         self,
         capsys: pytest.CaptureFixture[str],

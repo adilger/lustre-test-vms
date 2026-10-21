@@ -1392,6 +1392,13 @@ fi""")
         f"{host_staging}:/staging",
         "-v",
         f"{ccache_src}:/ccache",
+        *(
+            # The volume is ltvm's to bound (build_volumes.CCACHE_MAXSIZE);
+            # a host ccache dir keeps whatever the image or user set.
+            ["-e", f"CCACHE_MAXSIZE={build_volumes.CCACHE_MAXSIZE}"]
+            if ccache_src != str(ccache_dir)
+            else []
+        ),
         "-v",
         f"{TARGETS_DIR / 'common'}:/ltvm-common:ro",
         container_tag,

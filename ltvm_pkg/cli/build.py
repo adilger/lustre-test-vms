@@ -1042,6 +1042,13 @@ def cmd_clean(args: argparse.Namespace) -> int:
         # --arch override; defaults to x86_64).
         wipe_paths = [ARTIFACTS_DIR / target / tc.arch]
 
+    # On macOS the kernels' build-tree volumes go with them; asked for
+    # before the wipe, since it is the labels that say where each one
+    # was copied from.  See build_volumes.
+    from ltvm_pkg import build_volumes
+
+    doomed = build_volumes.kernel_volumes_under(wipe_paths)
+
     wiped: list[dict[str, Any]] = []
     for p in wipe_paths:
         if p.exists():
@@ -1054,11 +1061,19 @@ def cmd_clean(args: argparse.Namespace) -> int:
         else:
             wiped.append({"path": str(p), "bytes": 0, "removed": False})
 
+    volumes: list[dict[str, Any]] = []
+    for v in doomed or []:
+        volumes.append(
+            {"name": v.name, "removed": build_volumes.remove_volume(v.name)}
+        )
+
     result = {
         "target": target,
         "arch": None if all_arches else tc.arch,
         "all_arches": all_arches,
         "wiped": wiped,
+        "volumes": volumes,
+        "volumes_checked": doomed is not None,
     }
 
     if use_json:
@@ -1073,6 +1088,19 @@ def cmd_clean(args: argparse.Namespace) -> int:
                 print(f"nothing to clean at {w['path']}")
         if any_removed:
             print(f"total freed: {_format_bytes(total)}")
+        for vol in volumes:
+            if vol["removed"]:
+                print(f"removed podman volume {vol['name']}")
+            else:
+                print(
+                    f"kept podman volume {vol['name']}: a container uses it "
+                    "(`ltvm clean` removes it later)"
+                )
+        if doomed is None:
+            print(
+                "podman volumes not checked: is the podman machine running? "
+                "`ltvm clean` lists the ones left behind"
+            )
     return EXIT_OK
 
 

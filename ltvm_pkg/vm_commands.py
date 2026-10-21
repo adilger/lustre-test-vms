@@ -3690,6 +3690,16 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     if disk_info is not None:
         print(disk_info)
 
+    # macOS: what the build volumes inside the podman machine hold.
+    from . import build_volumes
+
+    vol_warnings, vol_info = build_volumes.doctor_report()
+    for w in vol_warnings:
+        print(w)
+        issues += 1
+    for line in vol_info:
+        print(line)
+
     _, ssh_dir = _real_user_ssh_dir()
     ssh_cfg = ssh_dir / "config"
     if ssh_cfg.exists():
