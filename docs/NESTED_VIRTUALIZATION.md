@@ -185,43 +185,30 @@ virtio falls back to wired INTx interrupts, which work.  Trapping WFI
 in the L1 KVM does not help, so it is the MSI delivery itself.
 `LTVM_FORCE_TCG=1` still forces emulation, if you ever need it.
 
-Measured on an M3 Pro, macOS 26.5, UTM 4.7.5, Ubuntu 26.04 (kernel
-7.0) as L1, QEMU 10.2.1, rocky9 aarch64 guest, 2 vCPUs:
+Parallels Desktop and VMware Fusion have not been tested with ltvm.
+If the Mac cannot nest, run ltvm on macOS directly, or on a remote
+x86_64 or aarch64 Linux machine.
+
+#### Benchmarks
+
+An M3 Pro (5 performance and 6 efficiency cores, 36 GB), macOS 26.5,
+UTM 4.7.5 with an Ubuntu 26.04 VM (kernel 7.0, QEMU 10.2.1, 5 vCPUs,
+8 GB).  Guests: rocky9 aarch64 with the 5.14-rhel9.7 kernel, 2 vCPUs.
+Measured on 2026-10-19 and 2026-10-21; a range spans both days.
+
+**Nested KVM against emulation**, both in the UTM VM:
 
 | | TCG | nested KVM |
 |---|---|---|
-| boot to root prompt | 23-25 s | 9 s |
-| `ltvm create` to ssh | -- | 20 s |
-| `dd \| sha256sum` of 512 MiB | 4.6 s | 0.7 s |
-| 2000 fork+exec | 20 s | 0.5 s |
-| `xz -3` of 64 MiB | 62-70 s | 20 s (same as the L1 itself) |
-| `find /usr` | 7.5-12 s | 2.1 s |
-| 256 MiB direct read | 1.9-2.9 s | 1.0 s |
+| boot to root prompt | 21-25 s | 8.3-9 s |
+| openssl sha256, 1 process | 0.17 GB/s | 2.69-2.78 GB/s |
+| 2000 fork+exec | 20-23 s | 0.5-0.6 s |
+| pipe between processes, two vCPUs | 8.5 s | 0.39-0.47 s |
+| `xz -3` of 64 MiB | 62-70 s | 20-22 s |
+| `find /usr` | 7.4-12 s | 2.0-2.9 s |
+| 4 KiB direct reads x 20000 | 7.0-7.9 s | 4.8-5.1 s |
 
-CPU-bound work runs at the L1's own speed; what nesting costs is
-exits, so interrupt-bound I/O gains least (4 KiB direct reads are
-about even).
-
-A short Lustre run -- the rocky9 rhel9.7 bundle, 3 GB guest, 1 MDT +
-2 OSTs of 2 GB, the UTM VM with 5 vCPUs and 8 GB -- against the same
-run with ltvm on the Mac itself:
-
-| step | UTM VM (nested KVM) | macOS (HVF) |
-|---|---|---|
-| `ltvm create` to ssh | 20 s | 7 s |
-| `deploy-lustre --mount` | 31-35 s | 31 s |
-| sanity 0a-24b (34 tests) | 4-5 s, all pass | 3 s, all pass |
-| createmany / `ls -l` / unlinkmany, 5000 files | 2 s / 1 s / 1 s | 1 s / 1 s / 0 s |
-| 1 GiB write (striped, fsync) / read | 5-9 s / 2 s | 2 s / 1 s |
-| `llumount` | 37-42 s | 47 s |
-
-About 20% slower end to end: setup and teardown dominate, and they
-cost about the same; the nesting shows in the I/O.
-
-#### Compared with ltvm on macOS directly
-
-The same image and kernel, 2 vCPUs, nested KVM in the UTM VM against
-HVF on the Mac itself:
+**The UTM VM against ltvm on the Mac itself**, the same image:
 
 | | nested KVM | HVF | |
 |---|---|---|---|
@@ -235,10 +222,6 @@ HVF on the Mac itself:
 | 256 MiB direct write / read | 1-1.9 / 1-1.7 s | 0.7-0.8 / 0.5 s | ~2x |
 | 4 KiB direct reads x 20000 | 4.8-5.1 s | 2.5-2.8 s | 1.9x |
 
-Measured on 2026-10-19 and 2026-10-21; the ranges span both runs.
-
-Where the difference comes from:
-
 - **Compute and syscalls cost nothing extra.**  Code that does not
   leave the guest runs at native speed at any nesting depth.
 - **Exits cost about 2x.**  A cross-vCPU wakeup (an IPI and a WFI), an
@@ -249,58 +232,58 @@ Where the difference comes from:
   interrupts take to deassert.  ltvm can change neither.
 - **Memory-heavy work loses ~22% in the L1 itself, not in the
   nesting.**  `xz` takes 16.2 s on the Mac, 15.9 s in an HVF guest,
-  19.8 s in the UTM VM and 20 s in a guest nested in it.  Whether the
-  UTM VM's nested virtualization option causes it has not been tested.
+  19.8 s in the UTM VM and 20 s in a guest nested in it.
 
-#### Building Lustre
+**A Lustre run**: the rocky9 rhel9.7 bundle, a 3 GB guest, 1 MDT +
+2 OSTs of 2 GB.
 
-In this layout builds are not nested: `ltvm build` runs podman
-directly in the L1, against a Lustre tree on its own disk, and only
-the test VMs nest.  On the Mac, podman runs in a VM of its own
-(`podman machine`) and reaches the tree over virtiofs.
-
-`ltvm build lustre rocky9 --arch aarch64 --kernel 5.14-rhel9.7
---configure=--with-o2ib=no` on a fresh clone of the same commit, with
-the same build container image, both sides at 5 CPUs (the UTM VM with
-8 GB, the podman machine with 4 GB):
-
-| | UTM VM | macOS |
+| step | UTM VM (nested KVM) | macOS (HVF) |
 |---|---|---|
-| full build, cold ccache (configure + 34 modules) | 137-143 s | 332-340 s |
-| rebuild, nothing changed | 3 s | 23-24 s (10-10.5 s) |
-| rebuild, `llite/file.c` edited | 3-4 s | 23-24 s (11-11.6 s) |
+| `ltvm create` to ssh | 20 s | 7 s |
+| `deploy-lustre --mount` | 31-35 s | 31 s |
+| sanity 0a-24b (34 tests) | 4-5 s, all pass | 3 s, all pass |
+| createmany / `ls -l` / unlinkmany, 5000 files | 2 s / 1 s / 1 s | 1 s / 1 s / 0 s |
+| 1 GiB write (striped, fsync) / read | 5-9 s / 2 s | 2 s / 1 s |
+| `llumount` | 37-42 s | 47 s |
 
-The times in brackets keep the podman machine up between builds.  An
-edit recompiles that one file on both sides; the rest is overhead.
+About 20% slower end to end: setup and teardown dominate and cost about
+the same, and the nesting shows in the I/O.
 
-The Mac pays two things the UTM VM does not:
+**Building Lustre.**  Builds in the UTM VM are not nested: `ltvm
+build` runs podman directly in it, against a Lustre tree on its own
+disk, and only the test VMs nest.  On the Mac podman runs in a VM of
+its own (`podman machine`) and reaches its bind mounts over virtiofs.
+`ltvm build lustre rocky9 --arch aarch64 --kernel 5.14-rhel9.7
+--configure=--with-o2ib=no`, a fresh clone of one commit, an empty
+ccache, the same build container image, 5 CPUs on every side (the
+podman machine with 4 GB):
 
-- **virtiofs**, nearly all of it.  The build reads the kernel
-  build-tree, ccache and the Lustre tree through it, and each compile
-  opens and stats thousands of kernel headers.  In the podman machine
-  itself, an up-to-date `make` takes 0.8 s with the tree on the
-  machine's own disk and 3.0 s (10 s cold) with it shared from macOS.
-  Moving everything onto the machine's disk takes the full build to
-  139 s, where the UTM VM takes 137 s.  More CPUs do not help while it
-  is there -- 325 s at 10 CPUs -- and neither does a smaller `-j`:
-  ltvm runs `make -j<the Mac's cores>`, and over virtiofs `-j11` on 5
-  CPUs beats `-j5` (make 235 s against 295 s) by hiding the I/O wait.
+| | UTM VM | macOS | macOS, `LTVM_MACOS_BUILD_VOLUMES=0` |
+|---|---|---|---|
+| full build (configure + 34 modules) | 137-143 s | 160-170 s | 332-340 s |
+| rebuild, nothing changed | 3 s | 19-20 s (7-8 s) | 23-24 s (10-10.5 s) |
+| rebuild, `llite/file.c` edited | 3-4 s | 22 s (8.3-8.8 s) | 23-24 s (11-11.6 s) |
+
+The first build against a kernel also copies its build-tree into a
+podman volume, once: 115 s.  The times in brackets keep the podman
+machine up between builds (`LTVM_PODMAN_AUTOSTOP=0`).  An edit
+recompiles that one file everywhere; the rest is overhead.
+
+- **virtiofs is what the Mac paid.**  Each compile opens and stats
+  thousands of kernel headers, and over virtiofs every one is a round
+  trip to macOS: in the podman machine an up-to-date `make` takes 0.8
+  s on the machine's own disk and 3.0 s (10 s cold) over virtiofs.  So
+  on macOS the kernel build-tree and ccache come from podman volumes
+  (CLAUDE.md, "Building on macOS").  The Lustre tree stays a bind
+  mount, since it is edited on macOS; moving it too would take the
+  full build to 139 s.
 - **The podman machine's lifecycle.**  ltvm stops the machine after a
   build to give its memory back and starts it for the next one: about
   12 s per build command, and the machine's page cache.
-
-Compute is not among them: the podman machine is an HVF VM, which
-runs `xz` faster than the UTM VM does (above).
-
-An earlier attempt on this setup concluded TCG was faster, from boot
-time alone (~60 s under KVM, with `nohz=off` and the ITS off).  That
-no longer reproduces: `nohz=off` makes no measurable difference, and
-the boot is 9 s.
-
-Parallels Desktop and VMware Fusion have not been tested with ltvm.
-
-If the Mac cannot nest, run ltvm on macOS directly, or on a remote
-x86_64 or aarch64 Linux machine.
+- **Not CPUs, not `-j`.**  Over virtiofs 10 CPUs build no faster than
+  5 (325 s), and ltvm's `make -j<the Mac's cores>` beats `-j5` there
+  by hiding the I/O wait (make 235 s against 295 s); with the volumes,
+  `-j5` to `-j16` are within noise.
 
 ### Intel Mac
 

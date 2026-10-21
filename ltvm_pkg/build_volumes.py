@@ -11,7 +11,7 @@ VM takes 137 s, and doubling the machine's CPUs gains nothing.
 Two inputs are moved onto the machine's own disk, as named volumes:
 
 - the kernel build-tree, which is read-only and changes only when the
-  kernel artifact does: copied in once per kernel (~1.5 min for
+  kernel artifact does: copied in once per kernel (~2 min for
   1.8 GB), keyed on the artifact so a rebuilt or re-fetched kernel gets
   a new volume and the old one is removed;
 - ccache, which is a cache, so losing or not sharing it is harmless.
