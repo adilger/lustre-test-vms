@@ -811,7 +811,54 @@ def _render_socket_vmnet_plist() -> str:
         template.replace("@SOCKET_VMNET_BIN@", str(bin_path))
         .replace("@SOCKET_VMNET_SOCKET@", str(sock_path))
         .replace("@VMNET_GATEWAY@", DEFAULT_VMNET_GATEWAY)
+        .replace("@SOCKET_GROUP@", _socket_vmnet_group())
     )
+
+
+def _socket_vmnet_group() -> str:
+    """The group the socket_vmnet socket is made for.
+
+    ltvm's own group, whose members run VMs without sudo: socket_vmnet's
+    default, staff, is every local account's group but not a
+    directory-service account's, which on a Mac bound to one leaves
+    nobody able to use the socket.  staff while the group does not exist
+    yet, since socket_vmnet will not start with a group it cannot find.
+    """
+    import grp
+
+    from ltvm_pkg import rootless
+
+    try:
+        grp.getgrnam(rootless.GROUP)
+    except KeyError:
+        return "staff"
+    return rootless.GROUP
+
+
+def _launchd_loaded(label: str) -> bool:
+    """True if launchd has the system job *label* loaded."""
+    r = _run_quiet(["launchctl", "print", f"system/{label}"], check=False)
+    return r.returncode == 0
+
+
+def _launchd_replace(label: str, plist: Path, wait: float = 15.0) -> None:
+    """Load *plist* as system job *label*, unloading the old one first.
+
+    ``launchctl bootout`` returns before launchd has taken the job away.
+    Asking whether it is still loaded right after says yes, which is how
+    a rewritten plist used to leave its daemon unloaded -- booted out, and
+    then not bootstrapped because it "was loaded" -- and bootstrapping
+    straight away can fail while the old job is still going.  So wait
+    for it to go, then bootstrap.
+    """
+    import time
+
+    if _launchd_loaded(label):
+        _sudo_run(["launchctl", "bootout", f"system/{label}"], check=False)
+        deadline = time.monotonic() + wait
+        while _launchd_loaded(label) and time.monotonic() < deadline:
+            time.sleep(0.2)
+    _sudo_run(["launchctl", "bootstrap", "system", str(plist)])
 
 
 def _socket_vmnet_daemon_loaded() -> bool:
@@ -880,14 +927,10 @@ def install_socket_vmnet_launchd_macos(force: bool = False) -> None:
             )
         finally:
             Path(tmp_path).unlink(missing_ok=True)
-        if _socket_vmnet_daemon_loaded():
-            _sudo_run(
-                ["launchctl", "bootout", f"system/{SOCKET_VMNET_PLIST_LABEL}"],
-                check=False,
-            )
         log.info("Installed %s", SOCKET_VMNET_PLIST_PATH)
-
-    if not _socket_vmnet_daemon_loaded():
+        _launchd_replace(SOCKET_VMNET_PLIST_LABEL, SOCKET_VMNET_PLIST_PATH)
+        log.info("Loaded %s", SOCKET_VMNET_PLIST_LABEL)
+    elif not _socket_vmnet_daemon_loaded():
         _sudo_prime("Loading the socket_vmnet launchd job requires root")
         _sudo_run(
             ["launchctl", "bootstrap", "system", str(SOCKET_VMNET_PLIST_PATH)]
@@ -1019,15 +1062,11 @@ def install_dnsmasq_macos(force: bool = False) -> None:
             )
         finally:
             Path(tmp_plist).unlink(missing_ok=True)
-        if _dnsmasq_daemon_loaded():
-            _sudo_run(
-                ["launchctl", "bootout", f"system/{DNSMASQ_PLIST_LABEL}"],
-                check=False,
-            )
         log.info("Installed %s", DNSMASQ_PLIST_PATH)
-        needs_reload = True
-
-    if not _dnsmasq_daemon_loaded():
+        # A fresh start reads the new conf too: no reload after it.
+        _launchd_replace(DNSMASQ_PLIST_LABEL, DNSMASQ_PLIST_PATH)
+        log.info("Loaded %s", DNSMASQ_PLIST_LABEL)
+    elif not _dnsmasq_daemon_loaded():
         _sudo_prime("Loading the ltvm-dnsmasq launchd job requires root")
         _sudo_run(["launchctl", "bootstrap", "system", str(DNSMASQ_PLIST_PATH)])
         log.info("Loaded %s", DNSMASQ_PLIST_LABEL)
@@ -1086,9 +1125,7 @@ def install_dnsmasq_reload_macos(force: bool = False) -> None:
         )
     finally:
         Path(tmp).unlink(missing_ok=True)
-    if loaded:
-        _sudo_run(["launchctl", "bootout", f"system/{label}"], check=False)
-    _sudo_run(["launchctl", "bootstrap", "system", str(path)])
+    _launchd_replace(label, path)
     log.info("Loaded %s", label)
 
 
@@ -3306,11 +3343,13 @@ def _run_setup_macos(
         vm_claim.ensure_claims_dir()
 
     if "network" in active:
+        # The ltvm group before socket_vmnet's plist, which makes the
+        # socket that group's; and hosts.d before dnsmasq, which reads it
+        # at start.
+        _setup_shared_vm_dirs_macos()
         install_socket_vmnet_macos(force=force)
         install_socket_vmnet_launchd_macos(force=force)
         install_sshpass_macos(force=force)
-        # hosts.d before dnsmasq, which reads it at start.
-        _setup_shared_vm_dirs_macos()
         install_dnsmasq_macos(force=force)
         install_dnsmasq_reload_macos(force=force)
 

@@ -10,6 +10,7 @@
 		<array>
 			<string>@SOCKET_VMNET_BIN@</string>
 			<string>--vmnet-gateway=@VMNET_GATEWAY@</string>
+			<string>--socket-group=@SOCKET_GROUP@</string>
 			<string>@SOCKET_VMNET_SOCKET@</string>
 		</array>
 		<key>StandardErrorPath</key>

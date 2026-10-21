@@ -180,7 +180,10 @@ def _macos_readiness(r: Readiness) -> None:
 
     sock = socket_vmnet_socket_path()
     if not _accessible(sock, os.R_OK | os.W_OK):
-        r.problems.append(f"{sock} is not usable by this user")
+        r.problems.append(
+            f"{sock} is not usable by this user -- `ltvm install` gives "
+            f"it the '{GROUP}' group"
+        )
     _check_shared_dirs(r)
     if not DNSMASQ_RELOAD_PLIST.exists():
         r.problems.append(

@@ -197,7 +197,10 @@ class TestMacosReadiness:
     def test_missing_socket(self, host: dict[str, Path]) -> None:
         host["sock"].unlink()
         r = rootless.readiness()
-        assert r.problems == [f"{host['sock']} is not usable by this user"]
+        assert r.problems == [
+            f"{host['sock']} is not usable by this user -- `ltvm install` "
+            "gives it the 'ltvm' group"
+        ]
 
     def test_missing_reload_job(self, host: dict[str, Path]) -> None:
         host["plist"].unlink()
