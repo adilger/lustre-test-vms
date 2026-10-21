@@ -161,7 +161,6 @@ class TestKernelTreeMount:
         assert (
             "volume",
             "rm",
-            "-f",
             build_volumes.kernel_volume_name(bt),
         ) in calls
 
@@ -323,3 +322,51 @@ def test_another_checkouts_volume_is_not_superseded(
     monkeypatch.setattr(build_volumes, "_podman", podman)
     build_volumes._remove_superseded(name)
     assert removed == []
+
+
+def test_no_volume_is_ever_force_removed(
+    tmp_path: Path, on_mac: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`podman volume rm -f` also removes the containers using it, which
+    would kill a build still running against an older kernel."""
+    bt = _kernel_artifact(tmp_path)
+    name = build_volumes.kernel_volume_name(bt)
+    stem = name.rsplit("-", 1)[0]
+    calls: list[tuple[str, ...]] = []
+
+    def podman(*args: str, timeout: float | None = None) -> Any:
+        calls.append(args)
+        if args[:2] == ("volume", "ls"):
+            return _cp(out=f"{stem}-oldoldoldold\n{name}\n")
+        if args[:2] == ("volume", "rm"):
+            return _cp(rc=2)  # in use
+        return _cp()
+
+    monkeypatch.setattr(build_volumes, "_podman", podman)
+    build_volumes._remove_superseded(name)  # in use: kept, no error
+    monkeypatch.setattr(build_volumes, "_ready", lambda v, i: False)
+
+    def boom(*a: Any) -> None:
+        raise RuntimeError("import failed")
+
+    monkeypatch.setattr(build_volumes, "_populate", boom)
+    build_volumes.kernel_tree_mount(bt, "img")
+    rms = [a for a in calls if a[:2] == ("volume", "rm")]
+    assert rms and not any("-f" in a or "--force" in a for a in rms)
+
+
+def test_the_copy_uses_macos_tar_not_whatever_is_on_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Its flags are bsdtar's; a GNU tar first on PATH refuses them."""
+    bt = _kernel_artifact(tmp_path)
+    monkeypatch.setattr(
+        build_volumes, "_podman", lambda *a, timeout=None: _cp()
+    )
+    monkeypatch.setattr(build_volumes, "_probe", lambda i, m, s: "")
+    popen = MagicMock()
+    popen.return_value.wait.return_value = 0
+    monkeypatch.setattr(build_volumes.subprocess, "Popen", popen)
+    monkeypatch.setattr(build_volumes.subprocess, "run", lambda *a, **k: _cp())
+    build_volumes._populate("v", bt, "img")
+    assert popen.call_args.args[0][0] == "/usr/bin/tar"

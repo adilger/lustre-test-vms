@@ -45,6 +45,8 @@ log = logging.getLogger(__name__)
 # Written into the kernel volume after the copy has finished; a volume
 # without it is a copy that was interrupted, and is rebuilt.
 READY_MARKER = ".ltvm-volume-ready"
+# macOS's own tar; see _populate.
+BSDTAR = "/usr/bin/tar"
 KERNEL_PREFIX = "ltvm-kernel-"
 # Not "ltvm-ccache-": volumes of that name were ltvm's ccache before
 # 0e4c1c9 and may still be lying around with the unreadable root that
@@ -146,7 +148,10 @@ def _ready(volume: str, image: str) -> bool:
 
 def _populate(volume: str, build_tree: Path, image: str) -> None:
     """Copy *build_tree* into a fresh *volume*, the marker last."""
-    _podman("volume", "rm", "-f", volume)
+    # An incomplete copy from an interrupted run.  Not -f: that would
+    # remove a container using it too; if one is, create fails below
+    # and the build falls back to the bind mount.
+    _podman("volume", "rm", volume)
     r = _podman("volume", "create", volume)
     if r.returncode != 0:
         raise RuntimeError(f"podman volume create {volume}: {r.stderr.strip()}")
@@ -154,10 +159,12 @@ def _populate(volume: str, build_tree: Path, image: str) -> None:
     # against 254 s for a cp across the bind mount.  bsdtar's own uid
     # and AppleDouble entries are not mappable in the machine, so
     # everything goes in as root (the build container's own uid).
+    # macOS's bsdtar by path: the flags are its own, and a Homebrew GNU
+    # tar first on PATH would refuse them on every build.
     env = {**os.environ, "COPYFILE_DISABLE": "1"}
     tar = subprocess.Popen(
         [
-            "tar",
+            BSDTAR,
             "--uid",
             "0",
             "--gid",
@@ -192,13 +199,20 @@ def _populate(volume: str, build_tree: Path, image: str) -> None:
 
 
 def _remove_superseded(keep: str) -> None:
-    """Remove other volumes for the same kernel (an older artifact)."""
+    """Remove other volumes for the same kernel (an older artifact).
+
+    Without -f, which would also remove -- kill -- a build still running
+    against the old kernel.  A volume in use stays, and the next build,
+    or `ltvm clean`, removes it.
+    """
     stem = keep.rsplit("-", 1)[0]
     r = _podman("volume", "ls", "--format", "{{.Name}}")
     for name in (r.stdout or "").split():
         if name != keep and name.rsplit("-", 1)[0] == stem:
-            log.info("removing superseded kernel volume %s", name)
-            _podman("volume", "rm", "-f", name)
+            if _podman("volume", "rm", name).returncode == 0:
+                log.info("removed superseded kernel volume %s", name)
+            else:
+                log.info("kept superseded kernel volume %s: in use", name)
 
 
 def kernel_tree_mount(build_tree: Path, image: str) -> str:
@@ -228,7 +242,7 @@ def kernel_tree_mount(build_tree: Path, image: str) -> str:
             "the bind mount, which is slower on macOS",
             e,
         )
-        _podman("volume", "rm", "-f", volume)
+        _podman("volume", "rm", volume)
         return str(build_tree)
     return volume
 
