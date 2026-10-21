@@ -202,17 +202,21 @@ CPU-bound work runs at the L1's own speed; what nesting costs is
 exits, so interrupt-bound I/O gains least (4 KiB direct reads are
 about even).
 
-A short Lustre run on the same setup -- the rocky9 rhel9.7 bundle,
-3 GB guest, 1 MDT + 2 OSTs of 2 GB, L1 with 5 vCPUs and 8 GB:
+A short Lustre run -- the rocky9 rhel9.7 bundle, 3 GB guest, 1 MDT +
+2 OSTs of 2 GB, the UTM VM with 5 vCPUs and 8 GB -- against the same
+run with ltvm on the Mac itself:
 
-| step | time |
-|---|---|
-| `ltvm create` to ssh | 20 s |
-| `deploy-lustre --mount` | 31 s |
-| sanity 0a-24b (34 tests) | 5 s, all pass |
-| createmany / `ls -l` / unlinkmany, 5000 files | 2 s / 1 s / 1 s |
-| 1 GiB write (striped, fsync) / read | 9 s / 2 s |
-| `llumount` | 37 s |
+| step | UTM VM (nested KVM) | macOS (HVF) |
+|---|---|---|
+| `ltvm create` to ssh | 20 s | 7 s |
+| `deploy-lustre --mount` | 31-35 s | 31 s |
+| sanity 0a-24b (34 tests) | 4-5 s, all pass | 3 s, all pass |
+| createmany / `ls -l` / unlinkmany, 5000 files | 2 s / 1 s / 1 s | 1 s / 1 s / 0 s |
+| 1 GiB write (striped, fsync) / read | 5-9 s / 2 s | 2 s / 1 s |
+| `llumount` | 37-42 s | 47 s |
+
+About 20% slower end to end: setup and teardown dominate, and they
+cost about the same; the nesting shows in the I/O.
 
 #### Compared with ltvm on macOS directly
 
@@ -221,14 +225,17 @@ HVF on the Mac itself:
 
 | | nested KVM | HVF | |
 |---|---|---|---|
-| boot to root prompt | 8.3-8.8 s | 11 s | |
-| openssl sha256, 1 / 2 processes | 2.69 / 2.57 GB/s | 2.90 / 2.60 GB/s | ~1x |
-| pipe between processes, one vCPU | 0.31 s | 0.29 s | ~1x |
-| pipe between processes, two vCPUs | 0.47 s | 0.20 s | 2.3x |
-| 2000 fork+exec | 0.5-0.8 s | 0.4-0.5 s | 1.1-2x |
-| `xz -3` of 64 MiB | 20-21 s | 15-16 s | 1.3x |
+| boot to root prompt | 8.3-8.8 s | 10.4-11 s | |
+| openssl sha256, 1 / 2 processes | 2.69-2.78 / 2.57-2.68 GB/s | 2.90-2.98 / 2.60-2.83 GB/s | ~1x |
+| pipe between processes, one vCPU | 0.31 s | 0.28-0.29 s | ~1x |
+| pipe between processes, two vCPUs | 0.39-0.47 s | 0.20 s | 2-2.3x |
+| 2000 fork+exec | 0.5-0.8 s | 0.39-0.5 s | 1.1-2x |
+| `xz -3` of 64 MiB | 20-22 s | 15-16 s | 1.3x |
+| `find /usr` | 2.0-2.9 s | 1.5-1.6 s | 1.5-1.9x |
 | 256 MiB direct write / read | 1-1.9 / 1-1.7 s | 0.7-0.8 / 0.5 s | ~2x |
 | 4 KiB direct reads x 20000 | 4.8-5.1 s | 2.5-2.8 s | 1.9x |
+
+Measured on 2026-10-19 and 2026-10-21; the ranges span both runs.
 
 Where the difference comes from:
 
@@ -259,21 +266,28 @@ the same build container image, both sides at 5 CPUs (the UTM VM with
 
 | | UTM VM | macOS |
 |---|---|---|
-| full build (configure + 34 modules) | 137 s | 334 s |
-| rebuild, nothing changed | 3 s | 23 s |
-| rebuild, one `.c` touched | 4 s | 23 s |
+| full build, cold ccache (configure + 34 modules) | 137-143 s | 332-340 s |
+| rebuild, nothing changed | 3 s | 23-24 s (10-10.5 s) |
+| rebuild, `llite/file.c` edited | 3-4 s | 23-24 s (11-11.6 s) |
 
-The Mac pays three things the UTM VM does not:
+The times in brackets keep the podman machine up between builds.  An
+edit recompiles that one file on both sides; the rest is overhead.
 
-- **virtiofs.**  In the podman machine itself, an up-to-date `make`
-  takes 0.8 s with the tree on the machine's own disk and 3.0 s (10 s
-  cold) with it shared from macOS; one touched `.c` file, 3.6 s
-  against 7.7 s.
+The Mac pays two things the UTM VM does not:
+
+- **virtiofs**, nearly all of it.  The build reads the kernel
+  build-tree, ccache and the Lustre tree through it, and each compile
+  opens and stats thousands of kernel headers.  In the podman machine
+  itself, an up-to-date `make` takes 0.8 s with the tree on the
+  machine's own disk and 3.0 s (10 s cold) with it shared from macOS.
+  Moving everything onto the machine's disk takes the full build to
+  139 s, where the UTM VM takes 137 s.  More CPUs do not help while it
+  is there -- 325 s at 10 CPUs -- and neither does a smaller `-j`:
+  ltvm runs `make -j<the Mac's cores>`, and over virtiofs `-j11` on 5
+  CPUs beats `-j5` (make 235 s against 295 s) by hiding the I/O wait.
 - **The podman machine's lifecycle.**  ltvm stops the machine after a
-  build to give its memory back and starts it for the next one, about
-  12 s per build command.
-- **`-j` from the Mac's core count.**  The build ran `make -j11` on the
-  machine's 5 CPUs and 4 GB.
+  build to give its memory back and starts it for the next one: about
+  12 s per build command, and the machine's page cache.
 
 Compute is not among them: the podman machine is an HVF VM, which
 runs `xz` faster than the UTM VM does (above).

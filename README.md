@@ -48,9 +48,11 @@ a podman-managed Linux VM + QEMU microvms. A few things differ from Linux:
   `/opt/qemu`, `/usr/local/bin/ltvm`).
 - **VMs need no sudo** after `./ltvm install`, which puts `/opt/qemu-vms`
   in an `ltvm` group and adds you to it (a new terminal may be needed
-  before that takes). QEMU runs as you on socket_vmnet, and a launchd job
-  reloads ltvm's dnsmasq when a VM name is added. `ltvm doctor` reports
-  anything missing.
+  before that takes). QEMU runs as you on socket_vmnet, whose socket is
+  that group's too -- not `staff`, which an account from a directory
+  service is not in -- and a launchd job reloads ltvm's dnsmasq when a VM
+  name is added. `ltvm doctor` reports anything missing; an install from
+  before 2026-10-21 needs `./ltvm install` once more for the socket.
 - **Install Python deps first** with [uv](https://docs.astral.sh/uv/);
   the system Python lacks PyYAML. `./ltvm` auto-uses `.venv/` when present.
 - **podman backend is pinned to `applehv`** (Apple's Hypervisor.framework).
