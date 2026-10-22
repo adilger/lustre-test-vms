@@ -174,6 +174,12 @@ host kernel is not the VM kernel; `ltvm build lustre <target>
 --lustre-tree <tree>` builds inside the target's build container, which is
 what `deploy-lustre` invokes.
 
+Because a deploy rebuilds a stale staging, it ships the tree as it is
+when you deploy, not as it was when you built. Build a variant (debug
+prints, a reverted fix), restore the source, then `deploy-lustre`, and
+the VM gets the restored code. Deploy the variant before restoring the
+source.
+
 Configure flags belong to the command that builds. A deploy that rebuilds
 uses the target's defaults, so a tree built with `build lustre
 --configure=...` loses those flags at its next deploy: pass the same
