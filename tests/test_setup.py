@@ -27,6 +27,7 @@ from ltvm_pkg.host_setup import (
     setup_ssh,
     verify,
 )
+from tests.host_marks import x86_host  # noqa: F401
 
 
 @pytest.fixture(autouse=True)
@@ -736,6 +737,7 @@ def _failing_result() -> dict:
     return r
 
 
+@pytest.mark.usefixtures("x86_host")
 class TestPrintVerify:
     def test_all_ok_message(self, capsys: pytest.CaptureFixture) -> None:
         """Prints 'All checks passed.' when all_ok=True."""
@@ -1661,3 +1663,94 @@ class TestVerifyReportsNat:
         del result["nat"]
         print_verify(result)
         assert "All checks passed." in capsys.readouterr().out
+
+
+class TestInstallQemuOnArm64:
+    """An aarch64 host runs aarch64 guests under KVM; x86_64 is cross-arch."""
+
+    def _install(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        pkg_mgr: str = "apt",
+    ) -> tuple[list[str], Path]:
+        import ltvm_pkg.host_setup as hs
+
+        prefix = tmp_path / "qemu"
+        installed: list[str] = []
+        have: dict[str, str] = {}
+        provides = {
+            "qemu-system-arm": ("aarch64", "/usr/bin/qemu-system-aarch64"),
+            "qemu-kvm": ("aarch64", "/usr/libexec/qemu-kvm"),
+            "qemu-system-x86": ("x86_64", "/usr/bin/qemu-system-x86_64"),
+            "qemu-system-x86_64": ("x86_64", "/usr/bin/qemu-system-x86_64"),
+        }
+
+        def pkg_install(host: Any, *pkgs: str, **kw: Any) -> None:
+            for pkg in pkgs:
+                installed.append(pkg)
+                arch, path = provides[pkg]
+                have[arch] = path
+
+        monkeypatch.setattr(platform, "machine", lambda: "aarch64")
+        monkeypatch.setattr(hs, "QEMU_PREFIX", prefix)
+        monkeypatch.setattr(
+            hs, "_qemu_installed_version", lambda arch="x86_64": None
+        )
+        monkeypatch.setattr(
+            hs, "_system_qemu_has_virt", lambda: have.get("aarch64")
+        )
+        monkeypatch.setattr(
+            hs, "_system_qemu_has_microvm", lambda: have.get("x86_64")
+        )
+        monkeypatch.setattr(hs, "_pkg_install", pkg_install)
+        monkeypatch.setattr(
+            hs, "_run", lambda *a, **kw: MagicMock(returncode=0)
+        )
+        monkeypatch.setattr(
+            hs,
+            "_run_quiet",
+            lambda *a, **kw: MagicMock(stdout="QEMU emulator version 7.2.22"),
+        )
+        monkeypatch.setattr(hs, "_install_qemu_path_profile", lambda: None)
+        monkeypatch.setattr(hs, "_fetch_prebuilt_qemu", lambda host: False)
+        monkeypatch.setattr(hs.shutil, "which", lambda name: None)
+        hs.install_qemu(MagicMock(pkg_mgr=pkg_mgr))
+        return installed, prefix / "bin"
+
+    def test_apt_installs_aarch64_first(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        installed, bin_dir = self._install(tmp_path, monkeypatch)
+        assert installed == ["qemu-system-arm", "qemu-system-x86"]
+        assert (bin_dir / "qemu-system-aarch64").readlink() == Path(
+            "/usr/bin/qemu-system-aarch64"
+        )
+        assert (bin_dir / "qemu-system-x86_64").readlink() == Path(
+            "/usr/bin/qemu-system-x86_64"
+        )
+
+    def test_dnf_takes_qemu_kvm_for_the_host_arch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        installed, bin_dir = self._install(tmp_path, monkeypatch, "dnf")
+        assert installed == ["qemu-kvm", "qemu-system-x86_64"]
+        assert (bin_dir / "qemu-system-aarch64").readlink() == Path(
+            "/usr/libexec/qemu-kvm"
+        )
+
+    def test_verify_needs_only_the_aarch64_qemu(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from ltvm_pkg.host_setup import print_verify
+
+        monkeypatch.setattr(platform, "machine", lambda: "aarch64")
+        r = _all_ok_result()
+        r["qemu"]["installed"] = False
+        r["qemu_aarch64"] = {"installed": True, "version": "7.2.22"}
+        print_verify(r)
+        out = capsys.readouterr().out
+        assert "WARNING: QEMU" not in out
+        assert "QEMU x86_64: not installed (optional" in out

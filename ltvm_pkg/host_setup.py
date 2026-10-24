@@ -670,7 +670,39 @@ def _system_qemu_has_microvm() -> str | None:
 
 def _system_qemu_has_virt() -> str | None:
     """Check if the system-packaged QEMU aarch64 has virt machine support."""
-    return _system_qemu_has_machine(("qemu-system-aarch64",), "virt")
+    binaries: tuple[str, ...] = ("qemu-system-aarch64",)
+    if _host_qemu_arch() == "aarch64":
+        # EL's qemu-kvm is the host's own arch.  Not asked on x86_64,
+        # where "virt" could match text in its machine list.
+        binaries += ("/usr/libexec/qemu-kvm",)
+    return _system_qemu_has_machine(binaries, "virt")
+
+
+def _host_qemu_arch() -> str:
+    """The guest arch this host's KVM runs: aarch64 on an arm64 host,
+    x86_64 on any other.  The other arch is emulated (TCG)."""
+    return "aarch64" if platform.machine() in ("aarch64", "arm64") else "x86_64"
+
+
+# The machine type ltvm boots each guest arch on.
+_QEMU_MACHINE = {"x86_64": "microvm", "aarch64": "virt"}
+
+
+def _find_system_qemu(arch: str) -> str | None:
+    """A system QEMU that boots *arch* guests on ltvm's machine type."""
+    if arch == "aarch64":
+        return _system_qemu_has_virt()
+    return _system_qemu_has_microvm()
+
+
+def _system_qemu_package(host: HostInfo, arch: str) -> str:
+    """The package with the system QEMU for *arch* guests."""
+    if host.pkg_mgr == "dnf":
+        # qemu-kvm is the host's own arch only.
+        if arch == _host_qemu_arch():
+            return "qemu-kvm"
+        return f"qemu-system-{arch}"
+    return "qemu-system-arm" if arch == "aarch64" else "qemu-system-x86"
 
 
 def _brew_qemu_prefix() -> Path | None:
@@ -1742,60 +1774,66 @@ def install_image_tools_macos(force: bool = False) -> None:
 
 
 def install_qemu(host: HostInfo, force: bool = False) -> None:
-    """Install QEMU with microvm support.
+    """Install QEMU for the host's own arch, and the other for cross-arch.
 
-    Tries the system package first (fast).  Falls back to building
-    from source only if the packaged QEMU lacks microvm support.
+    The host's arch is the one KVM runs: x86_64 guests need microvm,
+    aarch64 ones virt.  Tries the system package first (fast).  Falls
+    back to building from source only if the packaged QEMU lacks it.
     """
-    existing = _qemu_installed_version()
+    native = _host_qemu_arch()
+    cross = "x86_64" if native == "aarch64" else "aarch64"
+    existing = _qemu_installed_version(native)
     if existing and not force:
         log.info("QEMU %s already installed", existing)
         return
 
-    # Step 1: check if a system QEMU already has microvm
-    sys_qemu = _system_qemu_has_microvm()
+    # Step 1: check if a system QEMU for the host's arch is there
+    sys_qemu = _find_system_qemu(native)
 
     # Step 2: if not, try installing the system package
     if not sys_qemu and not force:
         log.info("Installing system QEMU package...")
-        if host.pkg_mgr == "dnf":
-            _pkg_install(host, "qemu-kvm")
-        elif host.pkg_mgr == "apt":
+        if host.pkg_mgr == "apt":
             _run(["apt-get", "update", "-qq"])
-            _pkg_install(host, "qemu-system-x86")
-        sys_qemu = _system_qemu_has_microvm()
+        _pkg_install(host, _system_qemu_package(host, native))
+        sys_qemu = _find_system_qemu(native)
 
-    # Step 3: if system QEMU has microvm, symlink it
+    # Step 3: if the system QEMU has the machine type, symlink it, and
+    # the other arch's for cross-arch targets.
     if sys_qemu and not force:
         QEMU_PREFIX.mkdir(parents=True, exist_ok=True)
         (QEMU_PREFIX / "bin").mkdir(exist_ok=True)
-        for tool in ("qemu-system-x86_64", "qemu-system-aarch64", "qemu-img"):
-            sys_tool = shutil.which(tool)
+        sys_cross = _find_system_qemu(cross)
+        if not sys_cross:
+            log.info(
+                "Installing qemu-system-%s for cross-arch support...", cross
+            )
+            _pkg_install(host, _system_qemu_package(host, cross))
+            sys_cross = _find_system_qemu(cross)
+        tools = {
+            f"qemu-system-{native}": sys_qemu,
+            f"qemu-system-{cross}": sys_cross,
+            "qemu-img": shutil.which("qemu-img"),
+        }
+        for tool, sys_tool in tools.items():
             if sys_tool:
                 link = QEMU_PREFIX / "bin" / tool
                 link.unlink(missing_ok=True)
                 link.symlink_to(sys_tool)
-        # Also try to install aarch64 system package if not already present
-        if not _system_qemu_has_virt():
-            log.info("Installing qemu-system-aarch64 for cross-arch support...")
-            if host.pkg_mgr == "dnf":
-                _pkg_install(host, "qemu-system-aarch64")
-            elif host.pkg_mgr == "apt":
-                _pkg_install(host, "qemu-system-arm")
-            sys_aarch64 = _system_qemu_has_virt()
-            if sys_aarch64:
-                link = QEMU_PREFIX / "bin" / "qemu-system-aarch64"
-                link.unlink(missing_ok=True)
-                link.symlink_to(sys_aarch64)
         ver_r = _run_quiet([sys_qemu, "--version"], check=False)
         ver_m = re.search(r"version (\d+\.\d+\.\d+)", ver_r.stdout)
         ver = ver_m.group(1) if ver_m else "unknown"
-        log.info("Using system QEMU %s (%s) -- has microvm", ver, sys_qemu)
+        log.info(
+            "Using system QEMU %s (%s) -- has %s",
+            ver,
+            sys_qemu,
+            _QEMU_MACHINE[native],
+        )
         _install_qemu_path_profile()
         return
 
-    # Step 4: try pre-built QEMU binary from GitHub
-    if _fetch_prebuilt_qemu(host):
+    # Step 4: try pre-built QEMU binary from GitHub (x86_64 builds only)
+    if native == "x86_64" and _fetch_prebuilt_qemu(host):
         _install_qemu_path_profile()
         return
 
@@ -2874,8 +2912,10 @@ def verify(subnet: str = DEFAULT_SUBNET) -> dict[str, Any]:
     }
 
     # Overall
+    # Only the host's own arch is required; the other is cross-arch.
+    native_qemu = "qemu" if _host_qemu_arch() == "x86_64" else "qemu_aarch64"
     checks = [
-        results["qemu"]["installed"],
+        results[native_qemu]["installed"],
         results["kvm"]["available"],
         results["bridge"]["up"],
         results["dnsmasq"]["running"],
@@ -2938,17 +2978,16 @@ def print_verify(results: dict[str, Any]) -> None:
     def fail(msg: str) -> None:
         print(f"  WARNING: {msg}")
 
-    q = results["qemu"]
-    if q["installed"]:
-        ok(f"QEMU x86_64: {q['version']} at {q['path']}")
-    else:
-        fail("QEMU x86_64: not installed")
-
-    qa = results.get("qemu_aarch64", {})
-    if qa.get("installed"):
-        ok(f"QEMU aarch64: {qa['version']}")
-    else:
-        ok("QEMU aarch64: not installed (optional, for cross-arch targets)")
+    native = _host_qemu_arch()
+    for arch, key in (("x86_64", "qemu"), ("aarch64", "qemu_aarch64")):
+        q = results.get(key, {})
+        if q.get("installed"):
+            where = f" at {q['path']}" if q.get("path") else ""
+            ok(f"QEMU {arch}: {q['version']}{where}")
+        elif arch == native:
+            fail(f"QEMU {arch}: not installed")
+        else:
+            ok(f"QEMU {arch}: not installed (optional, for cross-arch targets)")
 
     kvm = results["kvm"]
     if kvm.get("note"):
