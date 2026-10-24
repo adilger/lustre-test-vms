@@ -31,6 +31,7 @@ Debian), GRUB's x86_64-efi modules, qemu-img.
 from __future__ import annotations
 
 import logging
+import platform
 import shutil
 import subprocess
 import tempfile
@@ -59,6 +60,24 @@ _ROOT_START_MIB = _ESP_MIB[1]
 # Where Debian's grub-efi-amd64-bin and RHEL's grub2-efi-x64-modules
 # both put GRUB's UEFI modules.
 GRUB_EFI_DIR = Path("/usr/lib/grub/x86_64-efi")
+
+
+def x86_grub_packaged() -> bool:
+    """Can this host's package manager install GRUB's x86 modules?
+
+    The exported disk boots through GRUB's i386-pc and x86_64-efi
+    modules.  Debian and Ubuntu build grub-pc-bin and
+    grub-efi-amd64-bin only for x86 hosts.  EL ships its x86_64-efi
+    modules to every arch, but grub2-pc-modules only to x86.  So export
+    cannot run on any other host.
+    """
+    return platform.machine() in ("x86_64", "amd64")
+
+
+X86_GRUB_NOTE = (
+    "`ltvm target export` needs an x86_64 host: EL, Debian and Ubuntu "
+    "package GRUB's i386-pc modules only for x86"
+)
 
 # Formats `export_image` knows how to write.  "gce" is "raw", rounded
 # up to a whole GiB and tarred the way Google's image import wants.
@@ -175,6 +194,8 @@ def _check_host_tools(image_format: str = "qcow2") -> dict[str, str]:
         )
     if image_format == "gce":
         _check_gnu_tar()
+    if not x86_grub_packaged():
+        raise RuntimeError(X86_GRUB_NOTE)
     # grub2-* on RHEL/Rocky, grub-* on Debian/Ubuntu.
     grub = _which_or_die(["grub2-install", "grub-install"])
     mkimage = _which_or_die(

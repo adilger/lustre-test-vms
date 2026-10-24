@@ -24,6 +24,7 @@ import pytest
 
 from ltvm_pkg import vm_commands
 from ltvm_pkg.vm_state import MARKER, VMInfo
+from tests.host_marks import x86_host  # noqa: F401
 
 
 @pytest.fixture
@@ -348,6 +349,7 @@ class TestDoctorOrphanTaps:
 # ── missing export tools ──────────────────────────────────
 
 
+@pytest.mark.usefixtures("x86_host")
 class TestCheckExportTools:
     """Direct test of the _check_export_tools helper so its decisions
     are pinned independently of the surrounding doctor plumbing."""

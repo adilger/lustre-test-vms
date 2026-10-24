@@ -282,6 +282,9 @@ def _check_grub_efi_modules(host: HostInfo) -> None:
 
     if image_export.GRUB_EFI_DIR.is_dir():
         return
+    if not image_export.x86_grub_packaged():
+        log.info("%s", image_export.X86_GRUB_NOTE)
+        return
     pkg = (
         "grub-efi-amd64-bin"
         if host.pkg_mgr == "apt"
@@ -298,6 +301,8 @@ def _check_grub_efi_modules(host: HostInfo) -> None:
 
 def check_prerequisites(host: HostInfo) -> None:
     """Verify and install basic prerequisites."""
+    from ltvm_pkg import image_export
+
     needed = {
         "curl": "curl",
         "tar": "tar",
@@ -313,13 +318,14 @@ def check_prerequisites(host: HostInfo) -> None:
         # Needed by `ltvm target export` (bootable-disk packaging).
         "parted": "parted",
         "mkfs.vfat": "dosfstools",
-        ("grub-install" if host.pkg_mgr == "apt" else "grub2-install"): (
-            "grub-pc-bin" if host.pkg_mgr == "apt" else "grub2-pc"
-        ),
         ("grub-mkimage" if host.pkg_mgr == "apt" else "grub2-mkimage"): (
             "grub-common" if host.pkg_mgr == "apt" else "grub2-tools"
         ),
     }
+    if image_export.x86_grub_packaged():
+        needed["grub-install" if host.pkg_mgr == "apt" else "grub2-install"] = (
+            "grub-pc-bin" if host.pkg_mgr == "apt" else "grub2-pc"
+        )
     missing = []
     for cmd, pkg in needed.items():
         if not shutil.which(cmd):

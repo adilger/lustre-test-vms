@@ -9,6 +9,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.host_marks import x86_host  # noqa: F401
+
 
 @pytest.fixture(autouse=True)
 def _grub_efi_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -128,6 +130,7 @@ class TestFsckPartition:
         )
 
 
+@pytest.mark.usefixtures("x86_host")
 class TestCheckHostTools:
     def test_missing_core_tool_raises(self) -> None:
         import ltvm_pkg.image_export as ie
@@ -219,6 +222,75 @@ class TestCheckHostTools:
         ):
             with pytest.raises(RuntimeError, match="grub-efi-amd64-bin"):
                 ie._check_host_tools()
+
+
+class TestArm64Host:
+    """No distro packages GRUB's i386-pc modules for an arm64 host."""
+
+    @pytest.fixture(autouse=True)
+    def _arm64(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        import platform
+
+        import ltvm_pkg.image_export as ie
+
+        monkeypatch.setattr(platform, "machine", lambda: "aarch64")
+        # The module's autouse fixture gives every test the modules.
+        monkeypatch.setattr(ie, "GRUB_EFI_DIR", tmp_path / "nope")
+        monkeypatch.setattr(ie.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    def test_not_packaged(self) -> None:
+        import ltvm_pkg.image_export as ie
+
+        assert not ie.x86_grub_packaged()
+
+    def test_export_names_the_host(self, tmp_path: Path) -> None:
+        import ltvm_pkg.image_export as ie
+
+        with (
+            patch.object(ie, "GRUB_EFI_DIR", tmp_path / "nope"),
+            pytest.raises(RuntimeError, match="needs an x86_64 host"),
+        ):
+            ie._check_host_tools("qcow2")
+
+    def test_install_does_not_ask_apt_for_them(self) -> None:
+        from ltvm_pkg import host_setup
+
+        host = MagicMock(pkg_mgr="apt")
+        with patch.object(host_setup, "_pkg_install") as pkg_install:
+            host_setup._check_grub_efi_modules(host)
+        pkg_install.assert_not_called()
+
+    def test_doctor_does_not_count_them(self) -> None:
+        from ltvm_pkg import vm_commands
+
+        with (
+            patch.object(vm_commands, "is_macos", return_value=False),
+            # dpkg is there; every export tool is missing.
+            patch(
+                "shutil.which",
+                side_effect=lambda n: "/usr/bin/dpkg" if n == "dpkg" else None,
+            ),
+        ):
+            assert vm_commands._check_export_tools() == []
+
+    def test_el_host_too(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import ltvm_pkg.image_export as ie
+
+        # EL installs the x86_64-efi modules on aarch64 too.
+        monkeypatch.setattr(ie, "GRUB_EFI_DIR", Path("/"))
+        assert not ie.x86_grub_packaged()
+        with pytest.raises(RuntimeError, match="needs an x86_64 host"):
+            ie._check_host_tools("qcow2")
+
+    def test_x86_hosts_still_packaged(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import platform
+
+        import ltvm_pkg.image_export as ie
+
+        monkeypatch.setattr(platform, "machine", lambda: "x86_64")
+        assert ie.x86_grub_packaged()
 
 
 class TestImageSize:
@@ -446,6 +518,7 @@ class TestCliWiring:
         assert rc == cli.EXIT_ERROR
 
 
+@pytest.mark.usefixtures("x86_host")
 class TestDoctorFlagsMissingExportTools:
     """`ltvm doctor` surfaces missing export deps so users aren't
     surprised at export time."""
@@ -547,6 +620,7 @@ def _which_until_installed(missing: str, state: dict):
     return which
 
 
+@pytest.mark.usefixtures("x86_host")
 class TestHostSetupDeps:
     """check_prerequisites now declares parted + grub as deps."""
 
@@ -703,6 +777,7 @@ class TestGceSizing:
         assert ie._round_up_gib_mb(521) == 1024
 
 
+@pytest.mark.usefixtures("x86_host")
 class TestGnuTarCheck:
     def test_missing_tar_raises(self) -> None:
         import ltvm_pkg.image_export as ie
@@ -1248,6 +1323,7 @@ class TestGceCliWiring:
         assert seen["out"].name == "bootable-5.14-rhel9.7-1.el9.qcow2"
 
 
+@pytest.mark.usefixtures("x86_host")
 class TestHostToolsAreFormatSpecific:
     """Only the qcow2 path runs qemu-img: raw moves the file, gce tars
     it.  Demanding qemu-utils for those is an install-for-nothing."""

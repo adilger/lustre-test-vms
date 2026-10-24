@@ -3054,13 +3054,14 @@ def _check_export_tools() -> list[str]:
     there whatever is installed, and `ltvm install` does not try to
     provide these.  Counting them made doctor exit non-zero forever on
     every Mac; cmd_doctor prints a note instead, the way it skips the
-    other Linux-only checks.
+    other Linux-only checks.  Nothing either on a host that is not x86,
+    which has no package for GRUB's i386-pc modules.
     """
     import shutil as _shutil
 
     from ltvm_pkg import image_export
 
-    if is_macos():
+    if is_macos() or not image_export.x86_grub_packaged():
         return []
 
     warnings: list[str] = []
@@ -3651,6 +3652,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     if is_macos():
         print("note: `ltvm target export` needs a Linux host; not checked")
+    else:
+        from ltvm_pkg import image_export
+
+        if not image_export.x86_grub_packaged():
+            print(f"note: {image_export.X86_GRUB_NOTE}; not checked")
     for line in _check_export_tools():
         print(line)
         issues += 1
