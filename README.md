@@ -87,6 +87,39 @@ ltvm create co1-single --kernel 5.14-rhel9.5   # no sudo once installed
 ltvm llmount co1-single                 # mount Lustre inside the VM
 ```
 
+## Uninstalling
+
+```bash
+./ltvm uninstall --dry-run     # what it would remove; changes nothing
+./ltvm uninstall               # NO sudo, on Linux too -- prompts internally
+```
+
+`ltvm uninstall` takes off the host what `ltvm install` put there: it
+destroys the VMs, stops and removes the bridge and dnsmasq (systemd units
+on Linux, LaunchDaemons on macOS) with their iptables and ufw/firewalld
+rules, ltvm's files in `/etc`, `/opt/qemu`, `/opt/qemu-vms` and the
+`ltvm` group, tab completion, the agent skill links, ltvm's config and
+state, and last the `ltvm` launcher.  Run it as yourself: the podman
+store, artifacts and crash dumps are yours, so it refuses to run under
+`sudo` and elevates only the steps that need root.
+
+It asks about the things that hold your data, and keeps each unless you
+say otherwise:
+
+| What | Delete | Keep |
+|---|---|---|
+| `artifacts/` and `~/.cache/ltvm` | `--delete-artifacts` | `--keep-artifacts` |
+| `~/ltvm-crashes` | `--delete-crashes` | `--keep-crashes` |
+| the podman machine (macOS), and everything in it | `--delete-podman-machine` | `--keep-podman-machine` |
+| ltvm's podman images and volumes | `--delete-podman-images` | `--keep-podman-images` |
+
+`--yes` asks nothing and keeps what no `--delete-*` names; without a
+terminal, `--yes` is required.  A step that fails is reported and the
+rest still run, so running it again finishes the job.  Packages ltvm
+installed (Homebrew formulae, distro packages), the kvm group, a setuid
+`qemu-bridge-helper` and the checkout itself stay; it lists them at the
+end.
+
 ## Target OS support
 
 Fetchable = a prebuilt release exists (`ltvm target fetch <target>`).
@@ -177,6 +210,7 @@ Top-level:
 
 ```
 ltvm install                    One-time host setup (sudo)
+ltvm uninstall                  Undo install (no sudo; asks first)
 ltvm update                     git fast-forward ltvm itself
 ltvm build      <action> ...    Build artifacts (see below)
 ltvm target     <action> ...    Target OS management (see below)

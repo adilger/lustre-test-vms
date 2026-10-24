@@ -233,6 +233,7 @@ try:
         cmd_target_show,
         cmd_targets,
         cmd_telemetry,
+        cmd_uninstall,
         cmd_update,
         cmd_validate,
         cmd_vm_set,
@@ -636,6 +637,46 @@ def build_parser() -> argparse.ArgumentParser:
         "192.168.x when something else already uses it)",
     )
     sp.set_defaults(func=cmd_setup)
+
+    # -- uninstall (undo install) --
+    sp = sub.add_parser(
+        "uninstall",
+        parents=[common],
+        help="Remove what `ltvm install` set up on this host (asks first)",
+    )
+    for dest, flag, what in (
+        ("artifacts", "artifacts", "the built and fetched artifacts"),
+        ("crashes", "crashes", "the crash dumps in ~/ltvm-crashes"),
+        ("podman_machine", "podman-machine", "the podman machine (macOS)"),
+        ("podman_images", "podman-images", "ltvm's podman images and volumes"),
+    ):
+        g = sp.add_mutually_exclusive_group()
+        g.add_argument(
+            f"--delete-{flag}",
+            dest=dest,
+            action="store_const",
+            const=True,
+            help=f"Delete {what} without asking",
+        )
+        g.add_argument(
+            f"--keep-{flag}",
+            dest=dest,
+            action="store_const",
+            const=False,
+            help=f"Keep {what} without asking",
+        )
+    sp.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="Ask nothing: keep whatever no --delete-* names",
+    )
+    sp.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be removed; change nothing",
+    )
+    sp.set_defaults(func=cmd_uninstall)
 
     # -- update --
     sp = sub.add_parser(
@@ -2928,7 +2969,8 @@ def main() -> int:
 
     # Daily self-update nag (interactive TTYs only, skipped for
     # --json, and skipped entirely for `install` to avoid recursing
-    # during the install that just wrote our baked version).  See
+    # during the install that just wrote our baked version, and for
+    # `uninstall`, which is about to delete the check's state).  See
     # ltvm_pkg/update_check.py for the full state machine.
     #
     # `completion` is skipped for a different reason: the documented way
@@ -2936,7 +2978,7 @@ def main() -> int:
     # it runs once per new terminal.  A nag there would print into every
     # shell the user opens, and the check's state file would be written
     # by however many shells start at once.
-    if args.command not in ("install", "completion"):
+    if args.command not in ("install", "uninstall", "completion"):
         try:
             from ltvm_pkg.update_check import maybe_check_for_updates
 
@@ -2951,14 +2993,15 @@ def main() -> int:
     result: int = args.func(args)
 
     # Note what ran, then send if a week is up.  Skipped for `install`
-    # (still in flight) and for `telemetry` itself (the detached sender
+    # (still in flight), for `uninstall` (which just removed the state
+    # this would recreate) and for `telemetry` itself (the detached sender
     # runs `ltvm telemetry send`, which would otherwise spawn another).
     # Runs after the command so it can never delay it, and swallows
     # everything: telemetry must not be able to fail a build.
     # `completion` is excluded for the same reason as above: it runs
     # from shell rc files, and counting one invocation per terminal
     # opened would drown out every command a human actually ran.
-    if args.command not in ("install", "telemetry", "completion"):
+    if args.command not in ("install", "uninstall", "telemetry", "completion"):
         try:
             from ltvm_pkg.telemetry import maybe_send, record
 
