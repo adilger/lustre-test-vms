@@ -1064,11 +1064,9 @@ class TestInstall:
             patch.object(host_setup, "VM_DIR", tmp_path / "vm"),
             patch.object(host_setup, "_sudo_prime"),
             patch.object(host_setup, "_sudo_run", side_effect=sudo),
-            patch.object(host_setup, "_launchd_loaded", return_value=False),
+            # The install's own check, then _launchd_replace's.
             patch.object(
-                host_setup,
-                "_run_quiet",
-                return_value=MagicMock(returncode=0 if loaded else 1),
+                host_setup, "_launchd_loaded", side_effect=[loaded, False]
             ),
         ):
             host_setup.install_dnsmasq_reload_macos()

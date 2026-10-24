@@ -238,9 +238,11 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
         survey = host_uninstall.survey()
     except Exception as e:  # noqa: BLE001
         return _error(f"uninstall: {e}", use_json)
-    if survey.claimed:
+    try:
+        host_uninstall.check(survey)
+    except host_uninstall.Refused as e:
         return _error(
-            "VMs another session is using:\n  " + "\n  ".join(survey.claimed),
+            str(e),
             use_json,
             hint="Release them (ltvm release <vm>) or wait for that session.",
         )
@@ -278,10 +280,8 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
         print("\n".join(host_uninstall.describe(survey, choices)))
         print()
         for attr, question in host_uninstall.questions(survey):
-            if attr == "podman_images" and host_uninstall.machine_goes(
-                survey, choices
-            ):
-                continue  # they go with the machine
+            if host_uninstall.goes_with_machine(attr, survey, choices):
+                continue
             if getattr(choices, attr) is None:
                 setattr(choices, attr, _ask(question))
         if not _ask(host_uninstall.confirmation(survey, choices)):

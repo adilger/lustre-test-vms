@@ -386,6 +386,11 @@ def machine_goes(s: Survey, c: Choices) -> bool:
     return s.podman_machine is not None and bool(c.podman_machine)
 
 
+def goes_with_machine(attr: str, s: Survey, c: Choices) -> bool:
+    """Is *attr* a question a yes to deleting the machine answers?"""
+    return attr == "podman_images" and machine_goes(s, c)
+
+
 def confirmation(s: Survey, c: Choices) -> str:
     """The last question, naming what a yes deletes and what it keeps."""
     labels = {
@@ -397,8 +402,8 @@ def confirmation(s: Survey, c: Choices) -> str:
     delete: list[str] = []
     keep: list[str] = []
     for attr, _ in questions(s):
-        if attr == "podman_images" and machine_goes(s, c):
-            continue  # they go with the machine
+        if goes_with_machine(attr, s, c):
+            continue
         (delete if getattr(c, attr) else keep).append(labels[attr])
     q = "Remove the ltvm setup listed above"
     if delete:
@@ -514,6 +519,15 @@ def _rm(*paths: Path) -> list[str]:
     if present:
         sudo_run(["rm", "-f", *present], quiet=True)
     return present
+
+
+def _rmdir_if_empty(d: Path) -> list[str]:
+    """``sudo rmdir`` *d*, a directory install made, when nothing else
+    put files in it; ``[str(d)]`` when it went."""
+    if d.is_dir() and not d.is_symlink() and not any(d.iterdir()):
+        sudo_run(["rmdir", str(d)], quiet=True)
+        return [str(d)]
+    return []
 
 
 def _rm_tree(path: Path) -> bool:
@@ -677,12 +691,7 @@ def _macos_files() -> str | None:
         host_setup.DNSMASQ_PID_PATH,
         DNSMASQ_RELOAD_SCRIPT,
     )
-    # install makes the script's directory; a directory something else
-    # put files in stays.
-    d = DNSMASQ_RELOAD_SCRIPT.parent
-    if d.is_dir() and not d.is_symlink() and not any(d.iterdir()):
-        sudo_run(["rmdir", str(d)], quiet=True)
-        removed.append(str(d))
+    removed += _rmdir_if_empty(DNSMASQ_RELOAD_SCRIPT.parent)
     for d in MACOS_LOG_DIRS:
         if _rm_tree(d):
             removed.append(str(d))
@@ -706,9 +715,7 @@ def _macos_socket_dir() -> str | None:
     sock = host_setup.socket_vmnet_socket_path()
     removed = _rm(sock)
     for d in (sock.parent, sock.parent.parent):  # var/run, then var
-        if d.is_dir() and not d.is_symlink() and not any(d.iterdir()):
-            sudo_run(["rmdir", str(d)], quiet=True)
-            removed.append(str(d))
+        removed += _rmdir_if_empty(d)
     return " ".join(removed) or None
 
 
@@ -809,10 +816,7 @@ def _linux_files() -> str | None:
         SUDOERS_FRAGMENT,
         DK_FILTER,
     )
-    etc_ltvm = host_setup.LTVM_DNSMASQ_CONF.parent
-    if etc_ltvm.is_dir() and not any(etc_ltvm.iterdir()):
-        _quiet(["rmdir", str(etc_ltvm)])
-        removed.append(str(etc_ltvm))
+    removed += _rmdir_if_empty(host_setup.LTVM_DNSMASQ_CONF.parent)
     return " ".join(removed) or None
 
 
@@ -836,8 +840,7 @@ def _linux_bridge_acl() -> str | None:
 def _linux_selinux() -> str | None:
     if not which("semanage"):
         return None
-    hosts_dir = VM_DIR / "hosts.d"
-    spec = re.sub(r"([.^$*+?()\[\]{}|\\])", r"\\\1", str(hosts_dir)) + "(/.*)?"
+    spec = host_setup.hosts_dir_fcontext_spec(VM_DIR / "hosts.d")
     if _quiet(["semanage", "fcontext", "-d", spec]).returncode:
         return None
     return f"fcontext {spec}"
@@ -1008,12 +1011,17 @@ def kept(s: Survey, c: Choices) -> list[Step]:
     return out
 
 
-def run(s: Survey, c: Choices, use_json: bool = False) -> list[Step]:
-    """Remove everything, step by step; one failure does not stop the rest."""
+def check(s: Survey) -> None:
+    """Raise Refused when uninstall cannot go ahead on this host."""
     if s.claimed:
         raise Refused(
             "VMs another session is using:\n  " + "\n  ".join(s.claimed)
         )
+
+
+def run(s: Survey, c: Choices, use_json: bool = False) -> list[Step]:
+    """Remove everything, step by step; one failure does not stop the rest."""
+    check(s)
     report: list[Step] = []
     stopped = False
     for name, fn in steps(s, c, use_json):

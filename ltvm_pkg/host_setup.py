@@ -841,6 +841,21 @@ def _launchd_loaded(label: str) -> bool:
     return r.returncode == 0
 
 
+# install(1) owner arguments for a macOS file only root may change.
+_ROOT_WHEEL = ("-o", "root", "-g", "wheel")
+
+
+def _sudo_install_text(text: str, dest: Path, mode: str, *args: str) -> None:
+    """Write *text* to root-owned *dest* with `sudo install -m MODE ARGS`."""
+    with tempfile.NamedTemporaryFile(mode="w", delete=False) as tf:
+        tf.write(text)
+        tmp = tf.name
+    try:
+        _sudo_run(["install", "-m", mode, *args, tmp, str(dest)])
+    finally:
+        Path(tmp).unlink(missing_ok=True)
+
+
 def _launchd_replace(label: str, plist: Path, wait: float = 15.0) -> None:
     """Load *plist* as system job *label*, unloading the old one first.
 
@@ -900,33 +915,15 @@ def install_socket_vmnet_launchd_macos(force: bool = False) -> None:
 
     if needs_write:
         _sudo_prime(f"Installing {SOCKET_VMNET_PLIST_PATH} requires root")
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".plist", delete=False
-        ) as tf:
-            tf.write(desired)
-            tmp_path = tf.name
-        try:
-            _sudo_run(["mkdir", "-p", "/var/log/socket_vmnet"])
-            # The socket_vmnet brew package doesn't create its var/run dir,
-            # but the daemon binds its Unix socket there -- without this
-            # mkdir the plist boots, fails ENOENT on bind(), and respawns
-            # forever ("ERROR| socket_bindlisten: No such file or directory").
-            _sudo_run(["mkdir", "-p", str(socket_vmnet_socket_path().parent)])
-            _sudo_run(
-                [
-                    "install",
-                    "-m",
-                    "0644",
-                    "-o",
-                    "root",
-                    "-g",
-                    "wheel",
-                    tmp_path,
-                    str(SOCKET_VMNET_PLIST_PATH),
-                ]
-            )
-        finally:
-            Path(tmp_path).unlink(missing_ok=True)
+        _sudo_run(["mkdir", "-p", "/var/log/socket_vmnet"])
+        # The socket_vmnet brew package doesn't create its var/run dir,
+        # but the daemon binds its Unix socket there -- without this
+        # mkdir the plist boots, fails ENOENT on bind(), and respawns
+        # forever ("ERROR| socket_bindlisten: No such file or directory").
+        _sudo_run(["mkdir", "-p", str(socket_vmnet_socket_path().parent)])
+        _sudo_install_text(
+            desired, SOCKET_VMNET_PLIST_PATH, "0644", *_ROOT_WHEEL
+        )
         log.info("Installed %s", SOCKET_VMNET_PLIST_PATH)
         _launchd_replace(SOCKET_VMNET_PLIST_LABEL, SOCKET_VMNET_PLIST_PATH)
         log.info("Loaded %s", SOCKET_VMNET_PLIST_LABEL)
@@ -1008,27 +1005,9 @@ def install_dnsmasq_macos(force: bool = False) -> None:
     if cur_conf != desired_conf or force:
         _sudo_prime(f"Installing {DNSMASQ_CONF_PATH} requires root")
         _sudo_run(["mkdir", "-p", str(DNSMASQ_CONF_PATH.parent)])
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".conf", delete=False
-        ) as tf:
-            tf.write(desired_conf)
-            tmp_conf = tf.name
-        try:
-            _sudo_run(
-                [
-                    "install",
-                    "-m",
-                    "0644",
-                    "-o",
-                    "root",
-                    "-g",
-                    "wheel",
-                    tmp_conf,
-                    str(DNSMASQ_CONF_PATH),
-                ]
-            )
-        finally:
-            Path(tmp_conf).unlink(missing_ok=True)
+        _sudo_install_text(
+            desired_conf, DNSMASQ_CONF_PATH, "0644", *_ROOT_WHEEL
+        )
         log.info("Installed %s", DNSMASQ_CONF_PATH)
         needs_reload = True
 
@@ -1041,27 +1020,9 @@ def install_dnsmasq_macos(force: bool = False) -> None:
     if cur_plist != desired_plist or force:
         _sudo_prime(f"Installing {DNSMASQ_PLIST_PATH} requires root")
         _sudo_run(["mkdir", "-p", "/var/log/ltvm-dnsmasq"])
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".plist", delete=False
-        ) as tf:
-            tf.write(desired_plist)
-            tmp_plist = tf.name
-        try:
-            _sudo_run(
-                [
-                    "install",
-                    "-m",
-                    "0644",
-                    "-o",
-                    "root",
-                    "-g",
-                    "wheel",
-                    tmp_plist,
-                    str(DNSMASQ_PLIST_PATH),
-                ]
-            )
-        finally:
-            Path(tmp_plist).unlink(missing_ok=True)
+        _sudo_install_text(
+            desired_plist, DNSMASQ_PLIST_PATH, "0644", *_ROOT_WHEEL
+        )
         log.info("Installed %s", DNSMASQ_PLIST_PATH)
         # A fresh start reads the new conf too: no reload after it.
         _launchd_replace(DNSMASQ_PLIST_LABEL, DNSMASQ_PLIST_PATH)
@@ -1106,34 +1067,20 @@ def install_dnsmasq_reload_macos(force: bool = False) -> None:
         and rootless.root_only(script.parent)
     )
     plist_ok = rootless.read_or_empty(path) == desired
-    loaded = (
-        _run_quiet(
-            ["launchctl", "print", f"system/{label}"], check=False
-        ).returncode
-        == 0
-    )
+    loaded = _launchd_loaded(label)
     if script_ok and plist_ok and loaded and not force:
         log.info("%s already loaded", label)
         return
     _sudo_prime(f"Installing {path} requires root")
-    root = ["-o", "root", "-g", "wheel"]
-
-    def put(text: str, dest: Path, mode: str) -> None:
-        with tempfile.NamedTemporaryFile(mode="w", delete=False) as tf:
-            tf.write(text)
-            tmp = tf.name
-        try:
-            _sudo_run(["install", "-m", mode, *root, tmp, str(dest)])
-        finally:
-            Path(tmp).unlink(missing_ok=True)
-
     if force or not script_ok:
-        _sudo_run(["install", "-d", "-m", "0755", *root, str(script.parent)])
-        put(script_text, script, "0755")
+        _sudo_run(
+            ["install", "-d", "-m", "0755", *_ROOT_WHEEL, str(script.parent)]
+        )
+        _sudo_install_text(script_text, script, "0755", *_ROOT_WHEEL)
     # launchd runs the script afresh each time: a new script alone needs
     # no reload.
     if force or not plist_ok or not loaded:
-        put(desired, path, "0644")
+        _sudo_install_text(desired, path, "0644", *_ROOT_WHEEL)
         _launchd_replace(label, path)
         log.info("Loaded %s", label)
 
@@ -2148,6 +2095,12 @@ def _selinux_enabled() -> bool:
     )
 
 
+def hosts_dir_fcontext_spec(hosts_dir: Path) -> str:
+    """The `semanage fcontext` spec install labels *hosts_dir* with."""
+    spec = re.sub(r"([.^$*+?()\[\]{}|\\])", r"\\\1", str(hosts_dir))
+    return spec + "(/.*)?"
+
+
 def _label_hosts_dir(hosts_dir: Path) -> None:
     """Let dnsmasq watch *hosts_dir* under SELinux.
 
@@ -2156,8 +2109,7 @@ def _label_hosts_dir(hosts_dir: Path) -> None:
     dnsmasq's own "failed to create inotify ... Permission denied", and
     no VM published there ever resolves.  dnsmasq_etc_t it may watch.
     """
-    spec = re.sub(r"([.^$*+?()\[\]{}|\\])", r"\\\1", str(hosts_dir))
-    spec += "(/.*)?"
+    spec = hosts_dir_fcontext_spec(hosts_dir)
     if shutil.which("semanage"):
         r = _run_quiet(
             ["semanage", "fcontext", "-a", "-t", "dnsmasq_etc_t", spec],
@@ -3276,16 +3228,7 @@ def _install_ltvm_launcher(link: Path, repo_ltvm: Path) -> bool:
     if not _ltvm_launcher_needs_write(link, repo_ltvm):
         return False
 
-    desired = _desired_ltvm_launcher(repo_ltvm)
-    with tempfile.NamedTemporaryFile(
-        mode="w", prefix="ltvm-launcher.", delete=False
-    ) as tf:
-        tf.write(desired)
-        tmp_path = tf.name
-    try:
-        _sudo_run(["install", "-m", "0755", tmp_path, str(link)])
-    finally:
-        Path(tmp_path).unlink(missing_ok=True)
+    _sudo_install_text(_desired_ltvm_launcher(repo_ltvm), link, "0755")
     log.info("ltvm launcher installed to %s -> %s", link, sys.executable)
     return True
 
