@@ -47,6 +47,11 @@ DNSMASQ_RELOAD_LABEL = "io.github.ltvm.dnsmasq-reload"
 DNSMASQ_RELOAD_PLIST = Path(
     f"/Library/LaunchDaemons/{DNSMASQ_RELOAD_LABEL}.plist"
 )
+# The program it runs.  Root runs it, so it lives where only root can
+# write, all the way up: /usr/local is the user's on an Intel Homebrew.
+DNSMASQ_RELOAD_SCRIPT = Path(
+    "/Library/Application Support/ltvm/ltvm-dnsmasq-reload"
+)
 
 HELPER_CANDIDATES = (
     Path("/usr/lib/qemu/qemu-bridge-helper"),
@@ -189,6 +194,45 @@ def _macos_readiness(r: Readiness) -> None:
         r.problems.append(
             f"{DNSMASQ_RELOAD_PLIST} is missing -- VM names would not resolve"
         )
+    # A plist from before the script runs launchctl itself.
+    elif str(DNSMASQ_RELOAD_SCRIPT) in read_or_empty(DNSMASQ_RELOAD_PLIST):
+        if not os.access(DNSMASQ_RELOAD_SCRIPT, os.X_OK):
+            r.problems.append(
+                f"{DNSMASQ_RELOAD_SCRIPT} is missing or not executable -- "
+                "VM names would not resolve; `ltvm install` puts it back"
+            )
+        elif not (
+            root_only(DNSMASQ_RELOAD_SCRIPT)
+            and root_only(DNSMASQ_RELOAD_SCRIPT.parent)
+        ):
+            r.problems.append(
+                f"{DNSMASQ_RELOAD_SCRIPT}, which root runs, is not root's "
+                "alone -- `ltvm install` makes it so"
+            )
+
+
+def read_or_empty(path: Path) -> str:
+    """The text of *path*, or "" when it cannot be read."""
+    try:
+        return path.read_text()
+    except OSError:
+        return ""
+
+
+def root_only(path: Path) -> bool:
+    """True when *path* is root's, not a symlink, and only root can write it.
+
+    The test for what a root job runs, and the directory it is in.
+    """
+    try:
+        st = path.lstat()
+    except OSError:
+        return False
+    return (
+        not stat.S_ISLNK(st.st_mode)
+        and st.st_uid == 0
+        and not st.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+    )
 
 
 def ready() -> bool:

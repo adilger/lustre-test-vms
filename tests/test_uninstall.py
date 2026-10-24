@@ -132,6 +132,11 @@ def host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeSudo:
         "DNSMASQ_RELOAD_PLIST",
         root / "Library/LaunchDaemons/reload.plist",
     )
+    m(
+        rootless,
+        "DNSMASQ_RELOAD_SCRIPT",
+        root / "Library/Application Support/ltvm/ltvm-dnsmasq-reload",
+    )
     m(rootless, "BRIDGE_ACL", root / "etc/qemu/bridge.conf")
     m(rootless, "HOSTS_DIR", vm_dir / "hosts.d")
     m(rootless, "hosts_entries", _HOSTS_ENTRIES)
@@ -428,6 +433,7 @@ def test_describe_marks_each_choice() -> None:
 def _macos_host(host: FakeSudo) -> None:
     for p in (
         rootless.DNSMASQ_RELOAD_PLIST,
+        rootless.DNSMASQ_RELOAD_SCRIPT,
         host_setup.DNSMASQ_PLIST_PATH,
         host_setup.SOCKET_VMNET_PLIST_PATH,
         host_setup.DNSMASQ_CONF_PATH,
@@ -472,6 +478,8 @@ def test_macos_removes_what_install_made(
     assert not host_setup.DNSMASQ_PLIST_PATH.exists()
     assert not host_setup.SOCKET_VMNET_PLIST_PATH.exists()
     assert not rootless.DNSMASQ_RELOAD_PLIST.exists()
+    # The job's program and the directory install made for it.
+    assert not rootless.DNSMASQ_RELOAD_SCRIPT.parent.exists()
     assert not host_setup.DNSMASQ_CONF_PATH.exists()
     assert not host_uninstall.MACOS_LOG_DIRS[0].exists()
     assert not host_uninstall.QEMU_PREFIX.exists()
@@ -928,6 +936,23 @@ def test_socket_dir_in_the_keg_goes(
     assert not (keg / "var").exists()
     assert not sock.exists()
     assert (keg / "bin" / "socket_vmnet").exists()
+
+
+def test_reload_script_dir_with_other_files_stays(host: FakeSudo) -> None:
+    script = _touch(rootless.DNSMASQ_RELOAD_SCRIPT)
+    other = _touch(script.parent / "keep")
+    host_uninstall._macos_files()
+    assert not script.exists()
+    assert other.exists()
+    assert not host.ran("rmdir")
+
+
+def test_host_installed_before_the_reload_script(host: FakeSudo) -> None:
+    """An older install ran launchctl directly: no script, no directory."""
+    _touch(host_setup.DNSMASQ_CONF_PATH)
+    removed = host_uninstall._macos_files() or ""
+    assert str(rootless.DNSMASQ_RELOAD_SCRIPT) not in removed
+    assert not host.ran("rmdir")
 
 
 def test_socket_dir_with_other_files_stays(

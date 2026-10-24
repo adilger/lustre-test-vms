@@ -1081,52 +1081,61 @@ def install_dnsmasq_reload_macos(force: bool = False) -> None:
 
     dnsmasq runs as root, so a user registering a VM cannot signal it,
     and Homebrew's build has no inotify to notice the new file itself.
-    launchd watches the directory and sends the SIGHUP; the job runs a
-    fixed command and reads nothing a user wrote.
+    launchd watches the directory and runs a root-owned script that
+    sends the SIGHUP; the job runs a fixed command and reads nothing a
+    user wrote.  The script has a name of its own so that Login Items
+    shows ltvm-dnsmasq-reload, not launchctl.
     """
     from ltvm_pkg import rootless
 
     path = rootless.DNSMASQ_RELOAD_PLIST
     label = rootless.DNSMASQ_RELOAD_LABEL
+    script = rootless.DNSMASQ_RELOAD_SCRIPT
+    script_text = (HOST_CONFIG_DIR / script.name).read_text()
     desired = (
         (HOST_CONFIG_DIR / f"{label}.plist")
         .read_text()
         .replace("@HOSTS_DIR@", str(VM_DIR / "hosts.d"))
+        .replace("@RELOAD_SCRIPT@", str(script))
     )
-    cur = path.read_text() if path.exists() else ""
+    # Root runs the script: the text alone is not enough, nobody else may
+    # be able to change it.
+    script_ok = (
+        rootless.read_or_empty(script) == script_text
+        and rootless.root_only(script)
+        and rootless.root_only(script.parent)
+    )
+    plist_ok = rootless.read_or_empty(path) == desired
     loaded = (
         _run_quiet(
             ["launchctl", "print", f"system/{label}"], check=False
         ).returncode
         == 0
     )
-    if cur == desired and loaded and not force:
+    if script_ok and plist_ok and loaded and not force:
         log.info("%s already loaded", label)
         return
     _sudo_prime(f"Installing {path} requires root")
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".plist", delete=False
-    ) as tf:
-        tf.write(desired)
-        tmp = tf.name
-    try:
-        _sudo_run(
-            [
-                "install",
-                "-m",
-                "0644",
-                "-o",
-                "root",
-                "-g",
-                "wheel",
-                tmp,
-                str(path),
-            ]
-        )
-    finally:
-        Path(tmp).unlink(missing_ok=True)
-    _launchd_replace(label, path)
-    log.info("Loaded %s", label)
+    root = ["-o", "root", "-g", "wheel"]
+
+    def put(text: str, dest: Path, mode: str) -> None:
+        with tempfile.NamedTemporaryFile(mode="w", delete=False) as tf:
+            tf.write(text)
+            tmp = tf.name
+        try:
+            _sudo_run(["install", "-m", mode, *root, tmp, str(dest)])
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
+    if force or not script_ok:
+        _sudo_run(["install", "-d", "-m", "0755", *root, str(script.parent)])
+        put(script_text, script, "0755")
+    # launchd runs the script afresh each time: a new script alone needs
+    # no reload.
+    if force or not plist_ok or not loaded:
+        put(desired, path, "0644")
+        _launchd_replace(label, path)
+        log.info("Loaded %s", label)
 
 
 def _setup_shared_vm_dirs_macos() -> None:

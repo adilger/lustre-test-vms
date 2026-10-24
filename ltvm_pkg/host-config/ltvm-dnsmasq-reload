@@ -1,0 +1,8 @@
+#!/bin/sh
+# Send SIGHUP to ltvm's dnsmasq, so that it reads hosts.d again.
+#
+# The io.github.ltvm.dnsmasq-reload LaunchDaemon runs this when a file
+# in hosts.d comes or goes.  It is a file and not a launchctl command
+# line in the plist, because Login Items names a job by its program:
+# this shows as ltvm-dnsmasq-reload, not as launchctl.
+exec /bin/launchctl kill SIGHUP system/io.github.ltvm.dnsmasq

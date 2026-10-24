@@ -322,7 +322,8 @@ def describe(s: Survey, c: Choices) -> list[str]:
     if s.macos:
         lines.append(
             "  the socket_vmnet and dnsmasq LaunchDaemons, their "
-            "config, pid, log and socket files"
+            "config, pid, log and socket files, and the dnsmasq reload "
+            "script"
         )
         lines.append(f"  the QEMU links in {QEMU_PREFIX}")
         lines.append(f"  the e2fsprogs links in {IMAGE_TOOLS_DIR}")
@@ -669,7 +670,19 @@ def _macos_daemons() -> str | None:
 
 
 def _macos_files() -> str | None:
-    removed = _rm(host_setup.DNSMASQ_CONF_PATH, host_setup.DNSMASQ_PID_PATH)
+    from .rootless import DNSMASQ_RELOAD_SCRIPT
+
+    removed = _rm(
+        host_setup.DNSMASQ_CONF_PATH,
+        host_setup.DNSMASQ_PID_PATH,
+        DNSMASQ_RELOAD_SCRIPT,
+    )
+    # install makes the script's directory; a directory something else
+    # put files in stays.
+    d = DNSMASQ_RELOAD_SCRIPT.parent
+    if d.is_dir() and not d.is_symlink() and not any(d.iterdir()):
+        sudo_run(["rmdir", str(d)], quiet=True)
+        removed.append(str(d))
     for d in MACOS_LOG_DIRS:
         if _rm_tree(d):
             removed.append(str(d))
