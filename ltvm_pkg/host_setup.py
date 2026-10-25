@@ -745,6 +745,17 @@ def _system_qemu_package(host: HostInfo, arch: str) -> str:
     return "qemu-system-arm" if arch == "aarch64" else "qemu-system-x86"
 
 
+def _pkg_available(host: HostInfo, pkg: str) -> bool:
+    """Can the host's package manager install *pkg*?
+
+    EL has no QEMU package for a foreign arch, even with EPEL.
+    """
+    if host.pkg_mgr != "dnf":
+        return True
+    r = _run(["dnf", "-q", "list", "--available", pkg], check=False, quiet=True)
+    return r.returncode == 0
+
+
 def _brew_qemu_prefix() -> Path | None:
     """Return the Homebrew prefix for the qemu package, or None."""
     brew = shutil.which("brew")
@@ -1844,11 +1855,14 @@ def install_qemu(host: HostInfo, force: bool = False) -> None:
         QEMU_PREFIX.mkdir(parents=True, exist_ok=True)
         (QEMU_PREFIX / "bin").mkdir(exist_ok=True)
         sys_cross = _find_system_qemu(cross)
-        if not sys_cross:
+        pkg = _system_qemu_package(host, cross)
+        if not sys_cross and not _pkg_available(host, pkg):
+            log.info("No %s package here: no %s targets", pkg, cross)
+        elif not sys_cross:
             log.info(
                 "Installing qemu-system-%s for cross-arch support...", cross
             )
-            _pkg_install(host, _system_qemu_package(host, cross))
+            _pkg_install(host, pkg)
             sys_cross = _find_system_qemu(cross)
         tools = {
             f"qemu-system-{native}": sys_qemu,

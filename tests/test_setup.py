@@ -1711,7 +1711,9 @@ class TestInstallQemuOnArm64:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         pkg_mgr: str = "apt",
+        available: int = 0,
     ) -> tuple[list[str], Path]:
+        """*available* is the rc of `dnf list --available`."""
         import ltvm_pkg.host_setup as hs
 
         prefix = tmp_path / "qemu"
@@ -1743,7 +1745,7 @@ class TestInstallQemuOnArm64:
         )
         monkeypatch.setattr(hs, "_pkg_install", pkg_install)
         monkeypatch.setattr(
-            hs, "_run", lambda *a, **kw: MagicMock(returncode=0)
+            hs, "_run", lambda *a, **kw: MagicMock(returncode=available)
         )
         monkeypatch.setattr(
             hs,
@@ -1776,6 +1778,13 @@ class TestInstallQemuOnArm64:
         assert (bin_dir / "qemu-system-aarch64").readlink() == Path(
             "/usr/libexec/qemu-kvm"
         )
+
+    def test_el_has_no_cross_arch_package(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        installed, bin_dir = self._install(tmp_path, monkeypatch, "dnf", 1)
+        assert installed == ["qemu-kvm"]
+        assert not (bin_dir / "qemu-system-x86_64").exists()
 
     def test_verify_needs_only_the_aarch64_qemu(
         self,
