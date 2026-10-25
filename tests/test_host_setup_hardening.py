@@ -119,6 +119,10 @@ class TestQemuAssetVerification:
 
 
 class TestPrerequisitesReportFailure:
+    @pytest.fixture(autouse=True)
+    def _no_epel(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(host_setup, "_enable_epel", lambda host: None)
+
     def _host(self) -> MagicMock:
         h = MagicMock()
         h.pkg_mgr = "dnf"

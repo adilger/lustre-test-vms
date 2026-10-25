@@ -291,6 +291,12 @@ class TestCheckPrerequisites:
 
         monkeypatch.setattr(hs, "_check_grub_efi_modules", lambda host: None)
 
+    @pytest.fixture(autouse=True)
+    def _no_epel(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import ltvm_pkg.host_setup as hs
+
+        monkeypatch.setattr(hs, "_enable_epel", lambda host: None)
+
     def _make_host(self, pkg_mgr: str) -> HostInfo:
         host = HostInfo.__new__(HostInfo)
         host.id = "rocky"
@@ -345,6 +351,38 @@ class TestCheckPrerequisites:
         assert args[0] is host
         assert "curl" in args
         assert "tar" in args
+
+    @pytest.mark.parametrize("pkg_mgr", ["dnf", "apt"])
+    def test_epel_before_the_install_on_dnf(self, pkg_mgr: str) -> None:
+        """fakeroot is only in EPEL, so EPEL comes first on EL."""
+        host = self._make_host(pkg_mgr)
+        state: dict = {}
+        calls = MagicMock()
+        calls.install.side_effect = lambda *a, **k: state.update(installed=True)
+        with (
+            patch(
+                "shutil.which",
+                side_effect=self._which_installed_after({"fakeroot"}, state),
+            ),
+            patch("ltvm_pkg.host_setup._enable_epel", calls.epel),
+            patch("ltvm_pkg.host_setup._pkg_install", calls.install),
+        ):
+            check_prerequisites(host)
+        names = [c[0] for c in calls.mock_calls]
+        if pkg_mgr == "dnf":
+            assert names == ["epel", "install"]
+        else:
+            assert names == ["install"]
+
+    def test_no_epel_when_nothing_is_missing(self) -> None:
+        host = self._make_host("dnf")
+        with (
+            patch("shutil.which", return_value="/usr/bin/cmd"),
+            patch("ltvm_pkg.host_setup._enable_epel") as epel,
+            patch("ltvm_pkg.host_setup._pkg_install"),
+        ):
+            check_prerequisites(host)
+        epel.assert_not_called()
 
     def test_iproute_pkg_name_dnf(self) -> None:
         """dnf host uses 'iproute' for the 'ip' command."""

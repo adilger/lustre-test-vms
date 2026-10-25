@@ -685,6 +685,7 @@ class TestHostSetupDeps:
                 "which",
                 side_effect=_which_until_installed("grub2-install", state),
             ),
+            patch.object(host_setup, "_enable_epel"),
             patch.object(host_setup, "_pkg_install") as install,
         ):
             install.side_effect = lambda *a, **k: state.update(installed=True)

@@ -270,6 +270,43 @@ def _pkg_install(
 # ------------------------------------------------------------------
 
 
+def _enable_epel(host: HostInfo) -> None:
+    """Enable EPEL and the repo its packages depend on.
+
+    EPEL has fakeroot, which check_prerequisites() needs, and the QEMU
+    build deps.  A host that has them enabled already gets no change.
+    """
+    _run(["dnf", "install", "-y", "epel-release"], check=False)
+    # The repo providing extra build deps (glib2-devel, pixman-devel,
+    # etc.) has different names per EL major version:
+    #   EL8  -> "powertools" (or "PowerTools" on early 8.x releases)
+    #   EL9+ -> "crb"
+    # See beads issue lustre_test_vms_v2-xr3. We code defensively:
+    # try the expected name for the detected EL major first, then
+    # fall back to the other known spellings so this works on any
+    # Rocky/RHEL/Alma 8/9/10 host without needing an EL8 test rig.
+    el_major = host.version.split(".", 1)[0] if host.version else ""
+    if el_major == "8":
+        crb_candidates = ["powertools", "PowerTools", "crb"]
+    else:
+        crb_candidates = ["crb", "powertools", "PowerTools"]
+    for repo_name in crb_candidates:
+        r = _run(
+            ["dnf", "config-manager", "--set-enabled", repo_name],
+            check=False,
+            quiet=True,
+        )
+        if r.returncode == 0:
+            log.info("Enabled repo %s", repo_name)
+            break
+    else:
+        log.warning(
+            "Could not enable CRB/PowerTools repo; tried %s. "
+            "Packages from EPEL may fail to install.",
+            ", ".join(crb_candidates),
+        )
+
+
 def _check_grub_efi_modules(host: HostInfo) -> None:
     """GRUB's x86_64-efi modules, which `target export` builds the ESP
     loader from.  A directory rather than a command, so not in
@@ -331,6 +368,8 @@ def check_prerequisites(host: HostInfo) -> None:
         if not shutil.which(cmd):
             missing.append(pkg)
     if missing:
+        if host.pkg_mgr == "dnf":
+            _enable_epel(host)
         log.info("Installing missing prerequisites: %s", " ".join(missing))
         _pkg_install(host, *missing)
         # Re-check.  _pkg_install only warns on failure, and nothing
@@ -1852,35 +1891,7 @@ def install_qemu(host: HostInfo, force: bool = False) -> None:
     # Build from source
     log.info("Installing QEMU build dependencies...")
     if host.pkg_mgr == "dnf":
-        _run(["dnf", "install", "-y", "epel-release"])
-        # The repo providing extra build deps (glib2-devel, pixman-devel,
-        # etc.) has different names per EL major version:
-        #   EL8  -> "powertools" (or "PowerTools" on early 8.x releases)
-        #   EL9+ -> "crb"
-        # See beads issue lustre_test_vms_v2-xr3. We code defensively:
-        # try the expected name for the detected EL major first, then
-        # fall back to the other known spellings so this works on any
-        # Rocky/RHEL/Alma 8/9/10 host without needing an EL8 test rig.
-        el_major = host.version.split(".", 1)[0] if host.version else ""
-        if el_major == "8":
-            crb_candidates = ["powertools", "PowerTools", "crb"]
-        else:
-            crb_candidates = ["crb", "powertools", "PowerTools"]
-        for repo_name in crb_candidates:
-            r = _run(
-                ["dnf", "config-manager", "--set-enabled", repo_name],
-                check=False,
-                quiet=True,
-            )
-            if r.returncode == 0:
-                log.info("Enabled repo %s", repo_name)
-                break
-        else:
-            log.warning(
-                "Could not enable CRB/PowerTools repo; tried %s. "
-                "Build deps may fail to install.",
-                ", ".join(crb_candidates),
-            )
+        _enable_epel(host)
         _pkg_install(
             host,
             "gcc",
