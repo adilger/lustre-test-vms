@@ -47,9 +47,7 @@ def ufw_conf(tmp_path: Path):
     conf = tmp_path / "ufw.conf"
     with (
         patch.object(fw, "UFW_CONF", conf),
-        patch(
-            "ltvm_pkg.host_firewall.shutil.which", return_value="/usr/sbin/x"
-        ),
+        patch("ltvm_pkg.host_firewall.which", return_value="/usr/sbin/x"),
     ):
         yield conf
 

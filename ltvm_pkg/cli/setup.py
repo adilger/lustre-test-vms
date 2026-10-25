@@ -245,6 +245,12 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
             hint="Release them (ltvm release <vm>) or wait for that session.",
         )
 
+    if args.yes:
+        # What a real --yes run does, so that --dry-run shows it too.
+        for attr in ("artifacts", "crashes", "podman_machine", "podman_images"):
+            if getattr(choices, attr) is None:
+                setattr(choices, attr, False)
+
     if args.dry_run:
         if use_json:
             _output(
@@ -272,7 +278,9 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
         print("\n".join(host_uninstall.describe(survey, choices)))
         print()
         for attr, question in host_uninstall.questions(survey):
-            if attr == "podman_images" and choices.podman_machine:
+            if attr == "podman_images" and host_uninstall.machine_goes(
+                survey, choices
+            ):
                 continue  # they go with the machine
             if getattr(choices, attr) is None:
                 setattr(choices, attr, _ask(question))

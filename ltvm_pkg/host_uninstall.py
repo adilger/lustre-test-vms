@@ -34,6 +34,7 @@ import contextlib
 import grp
 import logging
 import os
+import pwd
 import re
 import shutil
 import subprocess
@@ -45,7 +46,7 @@ from pathlib import Path
 
 from . import host_setup, rootless
 from .host_setup import QEMU_PREFIX, VM_DIR
-from .priv import atomic_write, sudo_run
+from .priv import atomic_write, sudo_run, which
 
 log = logging.getLogger("ltvm")
 
@@ -66,6 +67,12 @@ MACOS_LOG_DIRS = (Path("/var/log/ltvm-dnsmasq"), Path("/var/log/socket_vmnet"))
 # LTVM_QEMU_PREFIX is removed only when it passes _removable_tree().
 _DEFAULT_VM_DIR = Path("/opt/qemu-vms")
 _DEFAULT_QEMU_PREFIX = Path("/opt/qemu")
+# With the users' homes, what _removable_tree() never lets those go.
+_PROTECTED_DIRS = (
+    "/bin", "/sbin", "/usr/bin", "/usr/sbin", "/usr/local/bin",
+    "/usr/local/sbin", "/opt/homebrew/bin", "/opt/local/bin", "/etc",
+    "/var/lib", "/var/log", "/Applications", "/Library", "/System",
+)  # fmt: skip
 
 # What a launcher written by host_setup._render_ltvm_launcher looks like.
 _LAUNCHER_RE = re.compile(r"^exec '[^']+' '[^']+/ltvm' \"\$@\"$", re.MULTILINE)
@@ -159,13 +166,22 @@ def artifact_dirs() -> list[Path]:
     return [p for p in (ARTIFACTS_DIR, cache_dir()) if p.is_dir()]
 
 
+def _protected_dirs() -> list[Path]:
+    """Directories uninstall never removes, nor any directory above one."""
+    homes = {_user_home()}
+    homes.update(Path(pw.pw_dir) for pw in pwd.getpwall())
+    paths = [Path(p) for p in _PROTECTED_DIRS] + sorted(homes)
+    return [p.resolve() for p in paths if p.is_absolute()]
+
+
 def _removable_tree(path: Path, default: Path) -> bool:
     """May uninstall `rm -rf` *path*, a directory install made?
 
     The default location always may.  One moved by an environment
-    variable may when it is a real directory at least two levels deep,
-    and not the home directory or anything above it -- so a stray
-    ``LTVM_VM_DIR=/usr/local`` cannot take /usr/local with it.
+    variable may when it is a real directory at least two levels deep
+    that is not a home directory, a system directory or anything above
+    one -- so a stray ``LTVM_VM_DIR=/usr/local`` cannot take /usr/local
+    with it.
     """
     if path == default:
         return not path.is_symlink()
@@ -174,8 +190,12 @@ def _removable_tree(path: Path, default: Path) -> bool:
     resolved = path.resolve()
     if len(resolved.parts) < 3:
         return False
-    home = _user_home().resolve()
-    return resolved != home and resolved not in home.parents
+    # A home the password database does not list (LDAP).
+    if resolved.parent in (Path("/home"), Path("/Users")):
+        return False
+    return not any(
+        resolved == p or resolved in p.parents for p in _protected_dirs()
+    )
 
 
 # ------------------------------------------------------------------
@@ -223,9 +243,10 @@ def _survey_podman(s: Survey) -> None:
         target = host_setup._default_or_first(
             [m for m in machines if m.get("VMType") != "libkrun"]
         ) or host_setup._default_or_first(machines)
-        if target is not None:
-            s.podman_machine = target.get("Name") or "podman-machine-default"
-            s.podman_machine_running = bool(target.get("Running"))
+        if target is None:
+            return  # No machine, so no images to check either.
+        s.podman_machine = target.get("Name") or "podman-machine-default"
+        s.podman_machine_running = bool(target.get("Running"))
         if not s.podman_machine_running:
             s.podman_checked = False
             return
@@ -359,6 +380,11 @@ def _join(items: list[str]) -> str:
     return ", ".join(items[:-1]) + " and " + items[-1]
 
 
+def machine_goes(s: Survey, c: Choices) -> bool:
+    """Is a podman machine there, and to be deleted?  Not on Linux."""
+    return s.podman_machine is not None and bool(c.podman_machine)
+
+
 def confirmation(s: Survey, c: Choices) -> str:
     """The last question, naming what a yes deletes and what it keeps."""
     labels = {
@@ -370,7 +396,7 @@ def confirmation(s: Survey, c: Choices) -> str:
     delete: list[str] = []
     keep: list[str] = []
     for attr, _ in questions(s):
-        if attr == "podman_images" and c.podman_machine:
+        if attr == "podman_images" and machine_goes(s, c):
             continue  # they go with the machine
         (delete if getattr(c, attr) else keep).append(labels[attr])
     q = "Remove the ltvm setup listed above"
@@ -421,7 +447,7 @@ def left_in_place(s: Survey, c: Choices | None = None) -> list[str]:
     if s.macos:
         # Removing podman would strand a podman machine the user kept.
         keep_podman = s.podman_machine is not None and not (
-            c is not None and c.podman_machine
+            c is not None and machine_goes(s, c)
         )
         out: list[str] = []
         formulae = _brew_formulae(keep_podman)
@@ -458,10 +484,17 @@ def left_in_place(s: Survey, c: Choices | None = None) -> list[str]:
 
 
 def _is_ltvm_launcher(path: Path) -> bool:
+    """Did install put *path* there?  A wrapper, or the symlink to a
+    checkout's ltvm that installs before the wrapper made."""
     try:
-        return not path.is_symlink() and bool(
-            _LAUNCHER_RE.search(path.read_text())
-        )
+        if path.is_symlink():
+            target = Path(os.readlink(path))
+            if not target.is_absolute():
+                target = path.parent / target
+            return target.name == "ltvm" and (
+                not target.exists() or (target.parent / "ltvm_pkg").is_dir()
+            )
+        return bool(_LAUNCHER_RE.search(path.read_text()))
     except (OSError, UnicodeDecodeError):
         return False
 
@@ -571,7 +604,7 @@ def _forget_stray_names(s: Survey) -> str | None:
 def _remove_podman_images(s: Survey, c: Choices) -> str | None:
     if not (s.podman_tags or s.podman_volumes) or not c.podman_images:
         return None
-    if c.podman_machine:
+    if machine_goes(s, c):
         return "went with the podman machine"
     kept: list[str] = []
     for tag in s.podman_tags:
@@ -621,10 +654,17 @@ def _macos_daemons() -> str | None:
         ),
     ]
     done: list[str] = []
+    stuck: list[str] = []
     for label, plist in jobs:
-        unloaded = _bootout(label)
+        try:
+            unloaded = _bootout(label)
+        except RuntimeError as e:
+            stuck.append(str(e))  # its plist stays, for launchd to use
+            continue
         if _rm(plist) or unloaded:
             done.append(label)
+    if stuck:
+        raise RuntimeError("; ".join(stuck))
     return " ".join(done) or None
 
 
@@ -700,15 +740,12 @@ def _linux_services(s: Survey) -> str | None:
             done.append(unit)
     if _rm(host_setup.LTVM_DNSMASQ_UNIT_PATH, BRIDGE_UNIT_PATH):
         _quiet(["systemctl", "daemon-reload"])
-    if (
-        shutil.which("ip")
-        and not _quiet(["ip", "link", "show", "fcbr0"]).returncode
-    ):
+    if which("ip") and not _quiet(["ip", "link", "show", "fcbr0"]).returncode:
         _quiet(["ip", "link", "del", "fcbr0"])
         done.append("fcbr0")
     # ExecStop leaves the iptables rules; -C before each -D, as the
     # unit's own -C before -A, and again in case one was added twice.
-    if shutil.which("iptables") and s.subnet:
+    if which("iptables") and s.subnet:
         for rule in _iptables_rules(s.subnet):
             check = [a if a != "-D" else "-C" for a in rule]
             while not _quiet(["iptables", *check]).returncode:
@@ -722,22 +759,32 @@ def _linux_services(s: Survey) -> str | None:
 def _linux_firewall() -> str | None:
     from . import host_firewall
 
-    kind = host_firewall.active()
-    if kind is None:
-        return None
-    failed = host_firewall.untrust_bridge()
+    done: list[str] = []
+    failed: list[str] = []
+    for kind in host_firewall.installed():
+        changed, bad = host_firewall.untrust_bridge(kind)
+        if changed:
+            done.append(kind)
+        failed += bad
     if failed:
         raise RuntimeError("; ".join(failed))
-    return kind
+    return " ".join(done) or None
 
 
 def _linux_host_dnsmasq() -> str | None:
-    """Give the host's own dnsmasq fcbr0 back, as it was."""
-    if not _rm(host_setup.HOST_DNSMASQ_EXCEPT):
+    """Give the host's own dnsmasq fcbr0 back, as it was.
+
+    An older ltvm wrote its own config into the host's instance, which
+    `install --network` takes out again; a host never reinstalled has it.
+    """
+    removed = _rm(
+        host_setup.HOST_DNSMASQ_EXCEPT, host_setup.LEGACY_DNSMASQ_CONF
+    )
+    if not removed:
         return None
     # try-restart: only a running dnsmasq.service rereads its drop-ins.
     _quiet(["systemctl", "try-restart", "dnsmasq.service"])
-    return str(host_setup.HOST_DNSMASQ_EXCEPT)
+    return " ".join(removed)
 
 
 def _linux_files() -> str | None:
@@ -774,7 +821,7 @@ def _linux_bridge_acl() -> str | None:
 
 
 def _linux_selinux() -> str | None:
-    if not shutil.which("semanage"):
+    if not which("semanage"):
         return None
     hosts_dir = VM_DIR / "hosts.d"
     spec = re.sub(r"([.^$*+?()\[\]{}|\\])", r"\\\1", str(hosts_dir)) + "(/.*)?"
@@ -865,16 +912,17 @@ def _user_state() -> str | None:
         removed.append(str(cfg))
     state = state_dir()
     if state.is_dir():
-        for entry in state.iterdir():
-            if entry.name == "suite":
-                continue
+        gone = [e for e in state.iterdir() if e.name != "suite"]
+        for entry in gone:
             if entry.is_dir() and not entry.is_symlink():
                 _user_rm_tree(entry)
             else:
                 entry.unlink()
         if not any(state.iterdir()):
             state.rmdir()
-        removed.append(str(state))
+            removed.append(str(state))
+        else:
+            removed.extend(str(e) for e in gone)
     return " ".join(removed) or None
 
 
@@ -940,7 +988,7 @@ def kept(s: Survey, c: Choices) -> list[Step]:
     if s.podman_machine is not None and not c.podman_machine:
         out.append(Step("podman machine", KEPT, s.podman_machine))
     if (s.podman_tags or s.podman_volumes) and not (
-        c.podman_images or c.podman_machine
+        c.podman_images or machine_goes(s, c)
     ):
         n = len(s.podman_tags) + len(s.podman_volumes)
         out.append(Step("podman images", KEPT, f"{n} images and volumes"))

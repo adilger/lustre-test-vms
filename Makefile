@@ -61,6 +61,16 @@ install:
 
 # Undo `make install`: everything ltvm install set up on this host.
 # No sudo -- ltvm uninstall elevates only the steps that need it, and
-# asks before deleting artifacts, crash dumps or podman state.
+# asks before deleting artifacts, crash dumps or podman state.  When
+# ./ltvm does not run (python3 older than 3.10), the launcher on PATH,
+# which pins its own Python, does it.  When neither runs, the launcher
+# still comes off PATH.
 uninstall:
-	./ltvm uninstall
+	@if ./ltvm --version >/dev/null 2>&1; then \
+		./ltvm uninstall; \
+	elif ltvm --version >/dev/null 2>&1; then \
+		ltvm uninstall; \
+	else \
+		echo "ltvm does not run: removing only its launcher" >&2; \
+		sudo rm -f /usr/local/bin/ltvm /usr/local/bin/dk-filter; \
+	fi

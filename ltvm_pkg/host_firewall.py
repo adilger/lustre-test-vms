@@ -18,10 +18,11 @@ from __future__ import annotations
 
 import logging
 import os
-import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
+
+from .priv import which
 
 log = logging.getLogger("ltvm")
 
@@ -57,15 +58,25 @@ def _ufw_enabled() -> bool:
     return False
 
 
+def installed() -> list[str]:
+    """The firewall managers on this host, running or not."""
+    return [k for k, tool in _TOOLS if which(tool)]
+
+
+_TOOLS = (("firewalld", "firewall-cmd"), ("ufw", "ufw"))
+
+
+def _firewalld_running() -> bool:
+    return (
+        _run(["systemctl", "is-active", "--quiet", "firewalld"]).returncode == 0
+    )
+
+
 def active() -> str | None:
     """``"firewalld"``, ``"ufw"``, or None when neither is running."""
-    if (
-        shutil.which("firewall-cmd")
-        and _run(["systemctl", "is-active", "--quiet", "firewalld"]).returncode
-        == 0
-    ):
+    if which("firewall-cmd") and _firewalld_running():
         return "firewalld"
-    if shutil.which("ufw") and _ufw_enabled():
+    if which("ufw") and _ufw_enabled():
         return "ufw"
     return None
 
@@ -128,45 +139,49 @@ def _ufw_delete(rule: tuple[str, ...]) -> list[str]:
     return ["ufw", "delete", *rule]
 
 
-def untrust_bridge() -> list[str]:
-    """Undo trust_bridge(); the commands that failed, if any.
+def untrust_bridge(kind: str) -> tuple[bool, list[str]]:
+    """Undo trust_bridge() in firewall *kind*, running or not: whether
+    anything was there, and the commands that failed.
 
-    Runs as the user, elevating each command: `ltvm uninstall` is not run
-    under sudo.  A rule that is already gone is not a failure.
+    A stopped firewall keeps its saved rules and applies them when it
+    starts again, so they go too: ufw deletes from them while disabled,
+    and firewall-offline-cmd edits a stopped firewalld's.  Runs as the
+    user, elevating each command: `ltvm uninstall` is not run under sudo.
+    A rule that is already gone is not a failure.
     """
     from .priv import sudo_run
 
+    changed = False
     failed: list[str] = []
-    kind = active()
     if kind == "ufw":
         for rule in UFW_RULES:
             cmd = _ufw_delete(rule)
             r = sudo_run(cmd, check=False, quiet=True)
             out = f"{r.stdout or ''}{r.stderr or ''}"
-            if r.returncode != 0 and "non-existent" not in out:
+            if r.returncode == 0:
+                changed = True
+            elif "non-existent" not in out:
                 failed.append(" ".join(cmd))
-        log.info("ufw: removed the rules for %s", BRIDGE)
     elif kind == "firewalld":
-        r = sudo_run(
-            ["firewall-cmd", f"--get-zone-of-interface={BRIDGE}"],
-            check=False,
-            quiet=True,
+        # Runtime and permanent each on their own: by now fcbr0 is
+        # deleted, and its runtime binding may be gone with it.
+        tools = (
+            [["firewall-cmd"], ["firewall-cmd", "--permanent"]]
+            if _firewalld_running()
+            else [["firewall-offline-cmd"]]
         )
-        if (r.stdout or "").strip() != FIREWALLD_ZONE:
-            return failed
-        for extra in ([], ["--permanent"]):
-            cmd = [
-                "firewall-cmd",
-                *extra,
-                f"--zone={FIREWALLD_ZONE}",
-                f"--remove-interface={BRIDGE}",
-            ]
+        for tool in tools:
+            zone = [*tool, f"--zone={FIREWALLD_ZONE}"]
+            query = [*zone, f"--query-interface={BRIDGE}"]
+            if sudo_run(query, check=False, quiet=True).returncode != 0:
+                continue
+            changed = True
+            cmd = [*zone, f"--remove-interface={BRIDGE}"]
             if sudo_run(cmd, check=False, quiet=True).returncode != 0:
                 failed.append(" ".join(cmd))
-        log.info(
-            "firewalld: took %s out of the %s zone", BRIDGE, FIREWALLD_ZONE
-        )
-    return failed
+    if changed:
+        log.info("%s: removed the rules for %s", kind, BRIDGE)
+    return changed, failed
 
 
 def status() -> dict[str, Any]:
