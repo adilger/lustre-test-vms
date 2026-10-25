@@ -27,6 +27,7 @@ from ltvm_pkg.host_setup import (
     setup_ssh,
     verify,
 )
+from tests.host_marks import x86_host  # noqa: F401
 
 
 @pytest.fixture(autouse=True)
@@ -288,7 +289,13 @@ class TestCheckPrerequisites:
         """GRUB's EFI modules are a directory on the host, not a tool."""
         import ltvm_pkg.host_setup as hs
 
-        monkeypatch.setattr(hs, "_check_grub_efi_modules", lambda host: None)
+        monkeypatch.setattr(hs, "_check_grub_modules", lambda host: None)
+
+    @pytest.fixture(autouse=True)
+    def _no_epel(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import ltvm_pkg.host_setup as hs
+
+        monkeypatch.setattr(hs, "_enable_epel", lambda host: None)
 
     def _make_host(self, pkg_mgr: str) -> HostInfo:
         host = HostInfo.__new__(HostInfo)
@@ -344,6 +351,38 @@ class TestCheckPrerequisites:
         assert args[0] is host
         assert "curl" in args
         assert "tar" in args
+
+    @pytest.mark.parametrize("pkg_mgr", ["dnf", "apt"])
+    def test_epel_before_the_install_on_dnf(self, pkg_mgr: str) -> None:
+        """fakeroot is only in EPEL, so EPEL comes first on EL."""
+        host = self._make_host(pkg_mgr)
+        state: dict = {}
+        calls = MagicMock()
+        calls.install.side_effect = lambda *a, **k: state.update(installed=True)
+        with (
+            patch(
+                "shutil.which",
+                side_effect=self._which_installed_after({"fakeroot"}, state),
+            ),
+            patch("ltvm_pkg.host_setup._enable_epel", calls.epel),
+            patch("ltvm_pkg.host_setup._pkg_install", calls.install),
+        ):
+            check_prerequisites(host)
+        names = [c[0] for c in calls.mock_calls]
+        if pkg_mgr == "dnf":
+            assert names == ["epel", "install"]
+        else:
+            assert names == ["install"]
+
+    def test_no_epel_when_nothing_is_missing(self) -> None:
+        host = self._make_host("dnf")
+        with (
+            patch("shutil.which", return_value="/usr/bin/cmd"),
+            patch("ltvm_pkg.host_setup._enable_epel") as epel,
+            patch("ltvm_pkg.host_setup._pkg_install"),
+        ):
+            check_prerequisites(host)
+        epel.assert_not_called()
 
     def test_iproute_pkg_name_dnf(self) -> None:
         """dnf host uses 'iproute' for the 'ip' command."""
@@ -736,6 +775,7 @@ def _failing_result() -> dict:
     return r
 
 
+@pytest.mark.usefixtures("x86_host")
 class TestPrintVerify:
     def test_all_ok_message(self, capsys: pytest.CaptureFixture) -> None:
         """Prints 'All checks passed.' when all_ok=True."""
@@ -1661,3 +1701,103 @@ class TestVerifyReportsNat:
         del result["nat"]
         print_verify(result)
         assert "All checks passed." in capsys.readouterr().out
+
+
+class TestInstallQemuOnArm64:
+    """An aarch64 host runs aarch64 guests under KVM; x86_64 is cross-arch."""
+
+    def _install(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        pkg_mgr: str = "apt",
+        available: int = 0,
+    ) -> tuple[list[str], Path]:
+        """*available* is the rc of `dnf list --available`."""
+        import ltvm_pkg.host_setup as hs
+
+        prefix = tmp_path / "qemu"
+        installed: list[str] = []
+        have: dict[str, str] = {}
+        provides = {
+            "qemu-system-arm": ("aarch64", "/usr/bin/qemu-system-aarch64"),
+            "qemu-kvm": ("aarch64", "/usr/libexec/qemu-kvm"),
+            "qemu-system-x86": ("x86_64", "/usr/bin/qemu-system-x86_64"),
+            "qemu-system-x86_64": ("x86_64", "/usr/bin/qemu-system-x86_64"),
+        }
+
+        def pkg_install(host: Any, *pkgs: str, **kw: Any) -> None:
+            for pkg in pkgs:
+                installed.append(pkg)
+                arch, path = provides[pkg]
+                have[arch] = path
+
+        monkeypatch.setattr(platform, "machine", lambda: "aarch64")
+        monkeypatch.setattr(hs, "QEMU_PREFIX", prefix)
+        monkeypatch.setattr(
+            hs, "_qemu_installed_version", lambda arch="x86_64": None
+        )
+        monkeypatch.setattr(
+            hs, "_system_qemu_has_virt", lambda: have.get("aarch64")
+        )
+        monkeypatch.setattr(
+            hs, "_system_qemu_has_microvm", lambda: have.get("x86_64")
+        )
+        monkeypatch.setattr(hs, "_pkg_install", pkg_install)
+        monkeypatch.setattr(
+            hs, "_run", lambda *a, **kw: MagicMock(returncode=available)
+        )
+        monkeypatch.setattr(
+            hs,
+            "_run_quiet",
+            lambda *a, **kw: MagicMock(stdout="QEMU emulator version 7.2.22"),
+        )
+        monkeypatch.setattr(hs, "_install_qemu_path_profile", lambda: None)
+        monkeypatch.setattr(hs, "_fetch_prebuilt_qemu", lambda host: False)
+        monkeypatch.setattr(hs.shutil, "which", lambda name: None)
+        hs.install_qemu(MagicMock(pkg_mgr=pkg_mgr))
+        return installed, prefix / "bin"
+
+    def test_apt_installs_aarch64_first(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        installed, bin_dir = self._install(tmp_path, monkeypatch)
+        assert installed == ["qemu-system-arm", "qemu-system-x86"]
+        assert (bin_dir / "qemu-system-aarch64").readlink() == Path(
+            "/usr/bin/qemu-system-aarch64"
+        )
+        assert (bin_dir / "qemu-system-x86_64").readlink() == Path(
+            "/usr/bin/qemu-system-x86_64"
+        )
+
+    def test_dnf_takes_qemu_kvm_for_the_host_arch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        installed, bin_dir = self._install(tmp_path, monkeypatch, "dnf")
+        assert installed == ["qemu-kvm", "qemu-system-x86_64"]
+        assert (bin_dir / "qemu-system-aarch64").readlink() == Path(
+            "/usr/libexec/qemu-kvm"
+        )
+
+    def test_el_has_no_cross_arch_package(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        installed, bin_dir = self._install(tmp_path, monkeypatch, "dnf", 1)
+        assert installed == ["qemu-kvm"]
+        assert not (bin_dir / "qemu-system-x86_64").exists()
+
+    def test_verify_needs_only_the_aarch64_qemu(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from ltvm_pkg.host_setup import print_verify
+
+        monkeypatch.setattr(platform, "machine", lambda: "aarch64")
+        r = _all_ok_result()
+        r["qemu"]["installed"] = False
+        r["qemu_aarch64"] = {"installed": True, "version": "7.2.22"}
+        print_verify(r)
+        out = capsys.readouterr().out
+        assert "WARNING: QEMU" not in out
+        assert "QEMU x86_64: not installed (optional" in out

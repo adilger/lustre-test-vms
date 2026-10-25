@@ -24,6 +24,7 @@ import pytest
 
 from ltvm_pkg import vm_commands
 from ltvm_pkg.vm_state import MARKER, VMInfo
+from tests.host_marks import x86_host  # noqa: F401
 
 
 @pytest.fixture
@@ -348,19 +349,33 @@ class TestDoctorOrphanTaps:
 # ── missing export tools ──────────────────────────────────
 
 
+@pytest.mark.usefixtures("x86_host")
 class TestCheckExportTools:
     """Direct test of the _check_export_tools helper so its decisions
     are pinned independently of the surrounding doctor plumbing."""
 
     @pytest.fixture(autouse=True)
     def _linux_host(self, tmp_path: Path) -> Iterator[None]:
-        """A Linux host whose GRUB UEFI modules are present, so each
-        test sees only the tool it takes away -- on any build host."""
+        """A Linux host whose GRUB modules are present, so each test
+        sees only the tool it takes away -- on any build host."""
         with (
             patch("ltvm_pkg.vm_commands.is_macos", return_value=False),
             patch("ltvm_pkg.image_export.GRUB_EFI_DIR", tmp_path),
+            patch("ltvm_pkg.image_export.GRUB_PC_DIR", tmp_path),
         ):
             yield
+
+    def test_bios_modules_missing(self, tmp_path: Path) -> None:
+        """EL's grub2-tools has grub2-install but not the modules."""
+        with (
+            patch("ltvm_pkg.image_export.GRUB_PC_DIR", tmp_path / "nope"),
+            patch("shutil.which", return_value="/usr/bin/x"),
+        ):
+            warnings = vm_commands._check_export_tools()
+        assert warnings == [
+            f"missing GRUB BIOS modules: {tmp_path / 'nope'} "
+            "(needed by `ltvm target export`)"
+        ]
 
     def test_nothing_is_an_issue_on_macos(self) -> None:
         """Export needs losetup and mount, so on a Mac it cannot run

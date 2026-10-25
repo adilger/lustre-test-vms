@@ -270,34 +270,77 @@ def _pkg_install(
 # ------------------------------------------------------------------
 
 
-def _check_grub_efi_modules(host: HostInfo) -> None:
-    """GRUB's x86_64-efi modules, which `target export` builds the ESP
-    loader from.  A directory rather than a command, so not in
-    check_prerequisites' table.
+def _enable_epel(host: HostInfo) -> None:
+    """Enable EPEL and the repo its packages depend on.
+
+    EPEL has fakeroot, which check_prerequisites() needs, and the QEMU
+    build deps.  A host that has them enabled already gets no change.
+    """
+    _run(["dnf", "install", "-y", "epel-release"], check=False)
+    # The repo providing extra build deps (glib2-devel, pixman-devel,
+    # etc.) has different names per EL major version:
+    #   EL8  -> "powertools" (or "PowerTools" on early 8.x releases)
+    #   EL9+ -> "crb"
+    # See beads issue lustre_test_vms_v2-xr3. We code defensively:
+    # try the expected name for the detected EL major first, then
+    # fall back to the other known spellings so this works on any
+    # Rocky/RHEL/Alma 8/9/10 host without needing an EL8 test rig.
+    el_major = host.version.split(".", 1)[0] if host.version else ""
+    if el_major == "8":
+        crb_candidates = ["powertools", "PowerTools", "crb"]
+    else:
+        crb_candidates = ["crb", "powertools", "PowerTools"]
+    for repo_name in crb_candidates:
+        r = _run(
+            ["dnf", "config-manager", "--set-enabled", repo_name],
+            check=False,
+            quiet=True,
+        )
+        if r.returncode == 0:
+            log.info("Enabled repo %s", repo_name)
+            break
+    else:
+        log.warning(
+            "Could not enable CRB/PowerTools repo; tried %s. "
+            "Packages from EPEL may fail to install.",
+            ", ".join(crb_candidates),
+        )
+
+
+def _check_grub_modules(host: HostInfo) -> None:
+    """GRUB's i386-pc and x86_64-efi modules, which `target export`
+    installs the BIOS loader and builds the ESP loader from.  Directories
+    rather than commands, so not in check_prerequisites' table.
 
     Without recommends: on Debian they pull in grub-efi-amd64-signed and
     with it a whole EFI bootloader stack the host does not boot from.
     """
     from ltvm_pkg import image_export
 
-    if image_export.GRUB_EFI_DIR.is_dir():
+    missing = [m for m in image_export.grub_module_dirs() if not m[1].is_dir()]
+    if not missing:
         return
-    pkg = (
-        "grub-efi-amd64-bin"
-        if host.pkg_mgr == "apt"
-        else "grub2-efi-x64-modules"
-    )
-    log.info("Installing %s (GRUB UEFI modules for target export)...", pkg)
-    _pkg_install(host, pkg, no_recommends=True)
-    if not image_export.GRUB_EFI_DIR.is_dir():
-        log.warning(
-            "%s did not install; `ltvm target export` will fail until it does",
-            pkg,
+    if not image_export.x86_grub_packaged():
+        log.info("%s", image_export.X86_GRUB_NOTE)
+        return
+    for kind, d, apt, dnf in missing:
+        pkg = apt if host.pkg_mgr == "apt" else dnf
+        log.info(
+            "Installing %s (GRUB %s modules for target export)...", pkg, kind
         )
+        _pkg_install(host, pkg, no_recommends=True)
+        if not d.is_dir():
+            log.warning(
+                "%s did not install; `ltvm target export` will fail until "
+                "it does",
+                pkg,
+            )
 
 
 def check_prerequisites(host: HostInfo) -> None:
     """Verify and install basic prerequisites."""
+    from ltvm_pkg import image_export
+
     needed = {
         "curl": "curl",
         "tar": "tar",
@@ -313,18 +356,21 @@ def check_prerequisites(host: HostInfo) -> None:
         # Needed by `ltvm target export` (bootable-disk packaging).
         "parted": "parted",
         "mkfs.vfat": "dosfstools",
-        ("grub-install" if host.pkg_mgr == "apt" else "grub2-install"): (
-            "grub-pc-bin" if host.pkg_mgr == "apt" else "grub2-pc"
-        ),
         ("grub-mkimage" if host.pkg_mgr == "apt" else "grub2-mkimage"): (
             "grub-common" if host.pkg_mgr == "apt" else "grub2-tools"
         ),
     }
+    if image_export.x86_grub_packaged():
+        needed["grub-install" if host.pkg_mgr == "apt" else "grub2-install"] = (
+            "grub-pc-bin" if host.pkg_mgr == "apt" else "grub2-pc"
+        )
     missing = []
     for cmd, pkg in needed.items():
         if not shutil.which(cmd):
             missing.append(pkg)
     if missing:
+        if host.pkg_mgr == "dnf":
+            _enable_epel(host)
         log.info("Installing missing prerequisites: %s", " ".join(missing))
         _pkg_install(host, *missing)
         # Re-check.  _pkg_install only warns on failure, and nothing
@@ -348,7 +394,7 @@ def check_prerequisites(host: HostInfo) -> None:
                 "  Install them by hand and re-run `ltvm install`."
             )
 
-    _check_grub_efi_modules(host)
+    _check_grub_modules(host)
 
     if not shutil.which("podman"):
         log.info("Installing podman (needed for container/image builds)...")
@@ -664,7 +710,50 @@ def _system_qemu_has_microvm() -> str | None:
 
 def _system_qemu_has_virt() -> str | None:
     """Check if the system-packaged QEMU aarch64 has virt machine support."""
-    return _system_qemu_has_machine(("qemu-system-aarch64",), "virt")
+    binaries: tuple[str, ...] = ("qemu-system-aarch64",)
+    if _host_qemu_arch() == "aarch64":
+        # EL's qemu-kvm is the host's own arch.  Not asked on x86_64,
+        # where "virt" could match text in its machine list.
+        binaries += ("/usr/libexec/qemu-kvm",)
+    return _system_qemu_has_machine(binaries, "virt")
+
+
+def _host_qemu_arch() -> str:
+    """The guest arch this host's KVM runs: aarch64 on an arm64 host,
+    x86_64 on any other.  The other arch is emulated (TCG)."""
+    return "aarch64" if platform.machine() in ("aarch64", "arm64") else "x86_64"
+
+
+# The machine type ltvm boots each guest arch on.
+_QEMU_MACHINE = {"x86_64": "microvm", "aarch64": "virt"}
+
+
+def _find_system_qemu(arch: str) -> str | None:
+    """A system QEMU that boots *arch* guests on ltvm's machine type."""
+    if arch == "aarch64":
+        return _system_qemu_has_virt()
+    return _system_qemu_has_microvm()
+
+
+def _system_qemu_package(host: HostInfo, arch: str) -> str:
+    """The package with the system QEMU for *arch* guests."""
+    if host.pkg_mgr == "dnf":
+        # qemu-kvm is the host's own arch only.
+        if arch == _host_qemu_arch():
+            return "qemu-kvm"
+        return f"qemu-system-{arch}"
+    return "qemu-system-arm" if arch == "aarch64" else "qemu-system-x86"
+
+
+def _pkg_available(host: HostInfo, pkg: str) -> bool:
+    """Can the host's package manager install *pkg*?
+
+    EL has no QEMU package for a foreign arch, even with EPEL.
+    """
+    if host.pkg_mgr != "dnf":
+        return True
+    r = _run(["dnf", "-q", "list", "--available", pkg], check=False, quiet=True)
+    return r.returncode == 0
 
 
 def _brew_qemu_prefix() -> Path | None:
@@ -1692,60 +1781,69 @@ def install_image_tools_macos(force: bool = False) -> None:
 
 
 def install_qemu(host: HostInfo, force: bool = False) -> None:
-    """Install QEMU with microvm support.
+    """Install QEMU for the host's own arch, and the other for cross-arch.
 
-    Tries the system package first (fast).  Falls back to building
-    from source only if the packaged QEMU lacks microvm support.
+    The host's arch is the one KVM runs: x86_64 guests need microvm,
+    aarch64 ones virt.  Tries the system package first (fast).  Falls
+    back to building from source only if the packaged QEMU lacks it.
     """
-    existing = _qemu_installed_version()
+    native = _host_qemu_arch()
+    cross = "x86_64" if native == "aarch64" else "aarch64"
+    existing = _qemu_installed_version(native)
     if existing and not force:
         log.info("QEMU %s already installed", existing)
         return
 
-    # Step 1: check if a system QEMU already has microvm
-    sys_qemu = _system_qemu_has_microvm()
+    # Step 1: check if a system QEMU for the host's arch is there
+    sys_qemu = _find_system_qemu(native)
 
     # Step 2: if not, try installing the system package
     if not sys_qemu and not force:
         log.info("Installing system QEMU package...")
-        if host.pkg_mgr == "dnf":
-            _pkg_install(host, "qemu-kvm")
-        elif host.pkg_mgr == "apt":
+        if host.pkg_mgr == "apt":
             _run(["apt-get", "update", "-qq"])
-            _pkg_install(host, "qemu-system-x86")
-        sys_qemu = _system_qemu_has_microvm()
+        _pkg_install(host, _system_qemu_package(host, native))
+        sys_qemu = _find_system_qemu(native)
 
-    # Step 3: if system QEMU has microvm, symlink it
+    # Step 3: if the system QEMU has the machine type, symlink it, and
+    # the other arch's for cross-arch targets.
     if sys_qemu and not force:
         QEMU_PREFIX.mkdir(parents=True, exist_ok=True)
         (QEMU_PREFIX / "bin").mkdir(exist_ok=True)
-        for tool in ("qemu-system-x86_64", "qemu-system-aarch64", "qemu-img"):
-            sys_tool = shutil.which(tool)
+        sys_cross = _find_system_qemu(cross)
+        pkg = _system_qemu_package(host, cross)
+        if not sys_cross and not _pkg_available(host, pkg):
+            log.info("No %s package here: no %s targets", pkg, cross)
+        elif not sys_cross:
+            log.info(
+                "Installing qemu-system-%s for cross-arch support...", cross
+            )
+            _pkg_install(host, pkg)
+            sys_cross = _find_system_qemu(cross)
+        tools = {
+            f"qemu-system-{native}": sys_qemu,
+            f"qemu-system-{cross}": sys_cross,
+            "qemu-img": shutil.which("qemu-img"),
+        }
+        for tool, sys_tool in tools.items():
             if sys_tool:
                 link = QEMU_PREFIX / "bin" / tool
                 link.unlink(missing_ok=True)
                 link.symlink_to(sys_tool)
-        # Also try to install aarch64 system package if not already present
-        if not _system_qemu_has_virt():
-            log.info("Installing qemu-system-aarch64 for cross-arch support...")
-            if host.pkg_mgr == "dnf":
-                _pkg_install(host, "qemu-system-aarch64")
-            elif host.pkg_mgr == "apt":
-                _pkg_install(host, "qemu-system-arm")
-            sys_aarch64 = _system_qemu_has_virt()
-            if sys_aarch64:
-                link = QEMU_PREFIX / "bin" / "qemu-system-aarch64"
-                link.unlink(missing_ok=True)
-                link.symlink_to(sys_aarch64)
         ver_r = _run_quiet([sys_qemu, "--version"], check=False)
         ver_m = re.search(r"version (\d+\.\d+\.\d+)", ver_r.stdout)
         ver = ver_m.group(1) if ver_m else "unknown"
-        log.info("Using system QEMU %s (%s) -- has microvm", ver, sys_qemu)
+        log.info(
+            "Using system QEMU %s (%s) -- has %s",
+            ver,
+            sys_qemu,
+            _QEMU_MACHINE[native],
+        )
         _install_qemu_path_profile()
         return
 
-    # Step 4: try pre-built QEMU binary from GitHub
-    if _fetch_prebuilt_qemu(host):
+    # Step 4: try pre-built QEMU binary from GitHub (x86_64 builds only)
+    if native == "x86_64" and _fetch_prebuilt_qemu(host):
         _install_qemu_path_profile()
         return
 
@@ -1764,35 +1862,7 @@ def install_qemu(host: HostInfo, force: bool = False) -> None:
     # Build from source
     log.info("Installing QEMU build dependencies...")
     if host.pkg_mgr == "dnf":
-        _run(["dnf", "install", "-y", "epel-release"])
-        # The repo providing extra build deps (glib2-devel, pixman-devel,
-        # etc.) has different names per EL major version:
-        #   EL8  -> "powertools" (or "PowerTools" on early 8.x releases)
-        #   EL9+ -> "crb"
-        # See beads issue lustre_test_vms_v2-xr3. We code defensively:
-        # try the expected name for the detected EL major first, then
-        # fall back to the other known spellings so this works on any
-        # Rocky/RHEL/Alma 8/9/10 host without needing an EL8 test rig.
-        el_major = host.version.split(".", 1)[0] if host.version else ""
-        if el_major == "8":
-            crb_candidates = ["powertools", "PowerTools", "crb"]
-        else:
-            crb_candidates = ["crb", "powertools", "PowerTools"]
-        for repo_name in crb_candidates:
-            r = _run(
-                ["dnf", "config-manager", "--set-enabled", repo_name],
-                check=False,
-                quiet=True,
-            )
-            if r.returncode == 0:
-                log.info("Enabled repo %s", repo_name)
-                break
-        else:
-            log.warning(
-                "Could not enable CRB/PowerTools repo; tried %s. "
-                "Build deps may fail to install.",
-                ", ".join(crb_candidates),
-            )
+        _enable_epel(host)
         _pkg_install(
             host,
             "gcc",
@@ -2829,8 +2899,10 @@ def verify(subnet: str = DEFAULT_SUBNET) -> dict[str, Any]:
     }
 
     # Overall
+    # Only the host's own arch is required; the other is cross-arch.
+    native_qemu = "qemu" if _host_qemu_arch() == "x86_64" else "qemu_aarch64"
     checks = [
-        results["qemu"]["installed"],
+        results[native_qemu]["installed"],
         results["kvm"]["available"],
         results["bridge"]["up"],
         results["dnsmasq"]["running"],
@@ -2893,17 +2965,16 @@ def print_verify(results: dict[str, Any]) -> None:
     def fail(msg: str) -> None:
         print(f"  WARNING: {msg}")
 
-    q = results["qemu"]
-    if q["installed"]:
-        ok(f"QEMU x86_64: {q['version']} at {q['path']}")
-    else:
-        fail("QEMU x86_64: not installed")
-
-    qa = results.get("qemu_aarch64", {})
-    if qa.get("installed"):
-        ok(f"QEMU aarch64: {qa['version']}")
-    else:
-        ok("QEMU aarch64: not installed (optional, for cross-arch targets)")
+    native = _host_qemu_arch()
+    for arch, key in (("x86_64", "qemu"), ("aarch64", "qemu_aarch64")):
+        q = results.get(key, {})
+        if q.get("installed"):
+            where = f" at {q['path']}" if q.get("path") else ""
+            ok(f"QEMU {arch}: {q['version']}{where}")
+        elif arch == native:
+            fail(f"QEMU {arch}: not installed")
+        else:
+            ok(f"QEMU {arch}: not installed (optional, for cross-arch targets)")
 
     kvm = results["kvm"]
     if kvm.get("note"):
