@@ -27,6 +27,7 @@ from __future__ import annotations
 import errno
 import logging
 import os
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -42,6 +43,16 @@ _sudo_refused = False
 
 class SudoUnavailable(RuntimeError):
     """sudo would not grant root to this user."""
+
+
+# sudo's secure_path has these; a normal user's PATH on Debian does not.
+_SBIN_DIRS = ("/usr/local/sbin", "/usr/sbin", "/sbin")
+
+
+def which(cmd: str) -> str | None:
+    """shutil.which() that also finds the tools sudo_run() will find."""
+    path = os.pathsep.join([os.environ.get("PATH", os.defpath), *_SBIN_DIRS])
+    return shutil.which(cmd, path=path)
 
 
 def _run(
@@ -235,8 +246,13 @@ def ensure_dir(path: Path, *, noninteractive: bool = False) -> None:
     before the VM got its IP.  Made under sudo, the directory is
     root-owned 0755 as `ltvm install` would have left it.
     """
-    if path.is_dir():
-        return
+    try:
+        if path.is_dir():
+            return
+    except PermissionError:
+        # A parent this user cannot search, such as /root: before 3.13
+        # pathlib re-raises EACCES.  The mkdir fails too, and goes to sudo.
+        pass
     try:
         path.mkdir(parents=True, exist_ok=True)
     except PermissionError:

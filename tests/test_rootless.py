@@ -177,15 +177,22 @@ class TestMacosReadiness:
         sock.touch()
         plist = tmp_path / "reload.plist"
         plist.touch()
+        script = tmp_path / "ltvm" / "ltvm-dnsmasq-reload"
         with (
             patch.object(rootless, "shared_dirs", return_value=tuple(dirs)),
             patch.object(rootless.platform, "system", return_value="Darwin"),
             patch.object(rootless, "DNSMASQ_RELOAD_PLIST", plist),
+            patch.object(rootless, "DNSMASQ_RELOAD_SCRIPT", script),
             patch.object(
                 host_setup, "socket_vmnet_socket_path", return_value=sock
             ),
         ):
-            yield {"sock": sock, "plist": plist, "sockets": dirs[2]}
+            yield {
+                "sock": sock,
+                "plist": plist,
+                "script": script,
+                "sockets": dirs[2],
+            }
         for d in dirs:
             d.chmod(0o755)
 
@@ -206,6 +213,49 @@ class TestMacosReadiness:
         host["plist"].unlink()
         r = rootless.readiness()
         assert "VM names would not resolve" in r.problems[0]
+
+    def _names_script(self, host: dict[str, Path]) -> Path:
+        script = host["script"]
+        host["plist"].write_text(f"<string>{script}</string>")
+        return script
+
+    def test_missing_reload_script(self, host: dict[str, Path]) -> None:
+        script = self._names_script(host)
+        r = rootless.readiness()
+        assert r.problems == [
+            f"{script} is missing or not executable -- VM names would "
+            "not resolve; `ltvm install` puts it back"
+        ]
+
+    def test_reload_script_the_user_can_write(
+        self, host: dict[str, Path]
+    ) -> None:
+        script = self._names_script(host)
+        script.parent.mkdir()
+        script.write_text("#!/bin/sh\n")
+        script.chmod(0o755)
+        r = rootless.readiness()
+        # tmp_path is the user's, not root's.
+        assert "is not root's alone" in r.problems[0]
+        with patch.object(rootless, "root_only", return_value=True):
+            assert rootless.readiness().ok
+
+    def test_plist_from_before_the_script(self, host: dict[str, Path]) -> None:
+        host["plist"].write_text(
+            "<string>/bin/launchctl</string><string>kill</string>"
+        )
+        assert rootless.readiness().ok
+
+    def test_root_only(self, tmp_path: Path) -> None:
+        f = tmp_path / "f"
+        f.touch()
+        link = tmp_path / "l"
+        link.symlink_to(f)
+        assert not rootless.root_only(tmp_path / "missing")
+        assert not rootless.root_only(link)
+        assert rootless.root_only(Path("/bin/sh"))
+        if os.geteuid() != 0:
+            assert not rootless.root_only(f)
 
     @pytest.mark.skipif(os.geteuid() == 0, reason="root can write anything")
     def test_unwritable_dir(self, host: dict[str, Path]) -> None:
@@ -924,15 +974,17 @@ class TestInstall:
 
     def test_macos_reload_job_watches_hosts_d(self, tmp_path: Path) -> None:
         plist = tmp_path / "reload.plist"
-        installed: list[str] = []
+        script = tmp_path / "ltvm" / "ltvm-dnsmasq-reload"
+        installed: dict[str, tuple[str, str]] = {}
 
         def sudo(cmd: list[str], **_kw: Any) -> MagicMock:
-            if cmd[0] == "install":
-                installed.append(Path(cmd[-2]).read_text())
+            if cmd[0] == "install" and "-d" not in cmd:
+                installed[cmd[-1]] = (cmd[2], Path(cmd[-2]).read_text())
             return MagicMock(returncode=0)
 
         with (
             patch.object(rootless, "DNSMASQ_RELOAD_PLIST", plist),
+            patch.object(rootless, "DNSMASQ_RELOAD_SCRIPT", script),
             patch.object(host_setup, "VM_DIR", tmp_path / "vm"),
             patch.object(host_setup, "_sudo_prime"),
             patch.object(host_setup, "_sudo_run", side_effect=sudo) as run,
@@ -941,13 +993,119 @@ class TestInstall:
             ),
         ):
             host_setup.install_dnsmasq_reload_macos()
-        text = installed[0]
+        mode, text = installed[str(plist)]
+        assert mode == "0644"
         assert f"<string>{tmp_path / 'vm' / 'hosts.d'}</string>" in text
-        assert "<string>system/io.github.ltvm.dnsmasq</string>" in text
+        # Login Items names the job by its program: the script, not
+        # launchctl.
+        assert f"<string>{script}</string>" in text
+        assert "launchctl" not in text
         assert "@" not in text
+        mode, body = installed[str(script)]
+        assert mode == "0755"
+        assert "system/io.github.ltvm.dnsmasq" in body
+        assert [
+            "install",
+            "-d",
+            "-m",
+            "0755",
+            "-o",
+            "root",
+            "-g",
+            "wheel",
+            str(script.parent),
+        ] in [c.args[0] for c in run.mock_calls]
         assert ["launchctl", "bootstrap", "system", str(plist)] in [
             c.args[0] for c in run.mock_calls
         ]
+
+    def _reinstall(
+        self,
+        tmp_path: Path,
+        *,
+        script_text: str | None = None,
+        root_only: bool = True,
+        loaded: bool = True,
+        script_is_dir: bool = False,
+    ) -> list[list[str]]:
+        """Install over a current one; the elevated commands it ran.
+
+        The plist on disk is the one install writes.  *script_text*
+        replaces the script's; *root_only* is what the owner and mode
+        check says.
+        """
+        plist = tmp_path / "reload.plist"
+        script = tmp_path / "ltvm" / "ltvm-dnsmasq-reload"
+        script.parent.mkdir()
+        hosts = tmp_path / "vm" / "hosts.d"
+        cfg = host_setup.HOST_CONFIG_DIR
+        plist.write_text(
+            (cfg / f"{rootless.DNSMASQ_RELOAD_LABEL}.plist")
+            .read_text()
+            .replace("@HOSTS_DIR@", str(hosts))
+            .replace("@RELOAD_SCRIPT@", str(script))
+        )
+        if script_text is None:
+            script_text = (cfg / script.name).read_text()
+        if script_is_dir:
+            script.mkdir()  # read_text raises
+        else:
+            script.write_text(script_text)
+        cmds: list[list[str]] = []
+
+        def sudo(cmd: list[str], **_kw: Any) -> MagicMock:
+            cmds.append(cmd)
+            return MagicMock(returncode=0)
+
+        with (
+            patch.object(rootless, "DNSMASQ_RELOAD_PLIST", plist),
+            patch.object(rootless, "DNSMASQ_RELOAD_SCRIPT", script),
+            patch.object(rootless, "root_only", return_value=root_only),
+            patch.object(host_setup, "VM_DIR", tmp_path / "vm"),
+            patch.object(host_setup, "_sudo_prime"),
+            patch.object(host_setup, "_sudo_run", side_effect=sudo),
+            # The install's own check, then _launchd_replace's.
+            patch.object(
+                host_setup, "_launchd_loaded", side_effect=[loaded, False]
+            ),
+        ):
+            host_setup.install_dnsmasq_reload_macos()
+        return cmds
+
+    def test_macos_reload_job_current_is_left(self, tmp_path: Path) -> None:
+        assert self._reinstall(tmp_path) == []
+
+    def test_macos_reload_script_not_roots_alone_is_put_back(
+        self, tmp_path: Path
+    ) -> None:
+        """The text matches, but someone else could change what root runs."""
+        cmds = self._reinstall(tmp_path, root_only=False)
+        dest = str(tmp_path / "ltvm" / "ltvm-dnsmasq-reload")
+        assert [c for c in cmds if c[0] == "install" and c[-1] == dest]
+        assert ["install", "-d", "-m", "0755", "-o", "root", "-g", "wheel",
+                str(tmp_path / "ltvm")] in cmds  # fmt: skip
+        # launchd runs the script afresh: no reload for it.
+        assert not [c for c in cmds if c[0] == "launchctl"]
+
+    def test_macos_reload_new_script_alone_needs_no_reload(
+        self, tmp_path: Path
+    ) -> None:
+        cmds = self._reinstall(tmp_path, script_text="#!/bin/sh\nold\n")
+        assert [c for c in cmds if c[0] == "install"]
+        assert not [c for c in cmds if c[0] == "launchctl"]
+
+    def test_macos_reload_unloaded_job_is_loaded(self, tmp_path: Path) -> None:
+        cmds = self._reinstall(tmp_path, loaded=False)
+        assert cmds[-1][:3] == ["launchctl", "bootstrap", "system"]
+        # The script was current: only the plist went in.
+        assert len([c for c in cmds if c[0] == "install"]) == 1
+
+    def test_macos_reload_unreadable_script_is_put_back(
+        self, tmp_path: Path
+    ) -> None:
+        cmds = self._reinstall(tmp_path, script_is_dir=True)
+        dest = str(tmp_path / "ltvm" / "ltvm-dnsmasq-reload")
+        assert [c for c in cmds if c[0] == "install" and c[-1] == dest]
 
     def test_socket_vmnet_found_without_running_brew(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

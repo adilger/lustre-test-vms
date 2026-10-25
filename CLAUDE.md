@@ -864,8 +864,11 @@ Homebrew's dnsmasq has no inotify for `hostsdir=`, so it reads
 `hosts.d/` as `addn-hosts=`, and the `io.github.ltvm.dnsmasq-reload`
 LaunchDaemon, with `WatchPaths` on the directory, runs `launchctl kill
 SIGHUP` on the dnsmasq job when a file comes or goes.  It runs a fixed
-command and reads nothing a user wrote.  macOS caps `setgroups()` at 16
-groups, so dropping from root there goes through `initgroups()`.
+command and reads nothing a user wrote.  The command is a root-owned
+script, `/Library/Application Support/ltvm/ltvm-dnsmasq-reload`, so that
+Login Items names the job `ltvm-dnsmasq-reload` and not `launchctl`.
+macOS caps `setgroups()` at 16 groups, so dropping from root there goes
+through `initgroups()`.
 
 *Classic* (no bridge helper, or the user is not in the group): only
 `update`, `cluster create` and `cluster destroy` need the whole command

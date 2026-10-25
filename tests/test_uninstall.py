@@ -123,6 +123,7 @@ def host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeSudo:
         ("LTVM_DNSMASQ_CONF", "etc/ltvm/dnsmasq.conf"),
         ("LTVM_DNSMASQ_PID", "run/ltvm-dnsmasq.pid"),
         ("HOST_DNSMASQ_EXCEPT", "etc/dnsmasq.d/ltvm-fcbr0.conf"),
+        ("LEGACY_DNSMASQ_CONF", "etc/dnsmasq.d/qemu-vms.conf"),
         ("_PODMAN_PROVIDER_CONF", "home/containers.conf.d/ltvm.conf"),
     ):
         m(host_setup, name, root / rel)
@@ -130,6 +131,11 @@ def host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeSudo:
         rootless,
         "DNSMASQ_RELOAD_PLIST",
         root / "Library/LaunchDaemons/reload.plist",
+    )
+    m(
+        rootless,
+        "DNSMASQ_RELOAD_SCRIPT",
+        root / "Library/Application Support/ltvm/ltvm-dnsmasq-reload",
     )
     m(rootless, "BRIDGE_ACL", root / "etc/qemu/bridge.conf")
     m(rootless, "HOSTS_DIR", vm_dir / "hosts.d")
@@ -152,13 +158,13 @@ def host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeSudo:
     m(host_uninstall.subprocess, "run", no_subprocess)
     m(host_uninstall, "_launchd_loaded", lambda label: False)
     m(host_uninstall, "_group_exists", lambda name: True)
-    m(host_uninstall.shutil, "which", lambda name: None)
+    m(host_uninstall.shutil, "which", lambda name, **kw: None)
     m(host_setup, "_systemctl_ok", lambda *a: False)
     m(
         "ltvm_pkg.skills.uninstall_skills",
         lambda repo, home=None: {"removed": {}},
     )
-    m(host_firewall, "active", lambda: None)
+    m(host_firewall, "installed", lambda: [])
     m(host_setup, "_brew_socket_vmnet_prefix", lambda: None)
     monkeypatch.delenv("LTVM_VMNET_SOCKET", raising=False)
     return sudo
@@ -200,38 +206,64 @@ def test_ufw_delete_puts_delete_after_route() -> None:
 
 
 def test_untrust_bridge_ufw_tolerates_missing_rules(host: FakeSudo) -> None:
-    host.answer(
-        ("ufw", "delete"), rc=1, out="Could not delete non-existent rule"
-    )
-    with patch.object(host_firewall, "active", return_value="ufw"):
-        assert host_firewall.untrust_bridge() == []
+    for prefix in (("ufw", "delete"), ("ufw", "route", "delete")):
+        host.answer(prefix, rc=1, out="Could not delete non-existent rule")
+    assert host_firewall.untrust_bridge("ufw") == (False, [])
     assert sum(c[0] == "ufw" for c in host.calls) == len(
         host_firewall.UFW_RULES
     )
 
 
 def test_untrust_bridge_firewalld_only_when_trusted(host: FakeSudo) -> None:
-    host.answer(
-        ("firewall-cmd", "--get-zone-of-interface=fcbr0"), out="public\n"
-    )
-    with patch.object(host_firewall, "active", return_value="firewalld"):
-        assert host_firewall.untrust_bridge() == []
-    assert not host.ran("firewall-cmd", "--zone=trusted")
+    for extra in ((), ("--permanent",)):
+        host.answer(
+            ("firewall-cmd", *extra, "--zone=trusted",
+             "--query-interface=fcbr0"),
+            rc=1,
+        )  # fmt: skip
+    with patch.object(host_firewall, "_firewalld_running", return_value=True):
+        assert host_firewall.untrust_bridge("firewalld") == (False, [])
+    assert not any("--remove-interface=fcbr0" in c for c in host.calls)
 
+    # fcbr0 is gone, so only the permanent binding is left.
     host.answer(
-        ("firewall-cmd", "--get-zone-of-interface=fcbr0"), out="trusted\n"
-    )
-    with patch.object(host_firewall, "active", return_value="firewalld"):
-        host_firewall.untrust_bridge()
-    assert host.ran(
-        "firewall-cmd", "--zone=trusted", "--remove-interface=fcbr0"
-    )
+        ("firewall-cmd", "--permanent", "--zone=trusted",
+         "--query-interface=fcbr0"),
+    )  # fmt: skip
+    with patch.object(host_firewall, "_firewalld_running", return_value=True):
+        assert host_firewall.untrust_bridge("firewalld") == (True, [])
     assert host.ran(
         "firewall-cmd",
         "--permanent",
         "--zone=trusted",
         "--remove-interface=fcbr0",
     )
+    assert not host.ran(
+        "firewall-cmd", "--zone=trusted", "--remove-interface=fcbr0"
+    )
+
+
+def test_untrust_bridge_stopped_firewalld_edits_saved_config(
+    host: FakeSudo,
+) -> None:
+    with patch.object(host_firewall, "_firewalld_running", return_value=False):
+        assert host_firewall.untrust_bridge("firewalld") == (True, [])
+    assert host.ran(
+        "firewall-offline-cmd", "--zone=trusted", "--remove-interface=fcbr0"
+    )
+    assert not host.ran("firewall-cmd")
+
+
+def test_linux_firewall_undoes_every_installed_firewall(
+    host: FakeSudo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ufw is disabled and firewalld stopped: their saved rules still go."""
+    monkeypatch.setattr(
+        host_firewall, "installed", lambda: ["firewalld", "ufw"]
+    )
+    monkeypatch.setattr(host_firewall, "_firewalld_running", lambda: False)
+    assert host_uninstall._linux_firewall() == "firewalld ufw"
+    assert host.ran("ufw", "delete", "allow", "in", "on", "fcbr0")
 
 
 # ------------------------------------------------------------------
@@ -255,6 +287,21 @@ def test_removable_tree_refuses_dangerous_overrides(
     link = tmp_path / "link"
     link.symlink_to(custom)
     assert not host_uninstall._removable_tree(link, default)
+    assert not host_uninstall._removable_tree(Path("/usr/local"), default)
+    assert not host_uninstall._removable_tree(Path("/etc"), default)
+
+
+def test_removable_tree_refuses_other_homes(
+    host: FakeSudo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    other = tmp_path / "homes" / "bob"
+    (other / "vms").mkdir(parents=True)
+    pw = type("pw", (), {"pw_dir": str(other)})
+    monkeypatch.setattr(host_uninstall.pwd, "getpwall", lambda: [pw])
+    default = Path("/opt/qemu-vms")
+    assert not host_uninstall._removable_tree(other, default)
+    assert not host_uninstall._removable_tree(other.parent, default)
+    assert host_uninstall._removable_tree(other / "vms", default)
 
 
 def test_moved_vm_dir_that_is_unsafe_is_left(
@@ -274,6 +321,24 @@ def test_launcher_removed_only_when_ltvm_wrote_it(host: FakeSudo) -> None:
     assert host_uninstall._is_ltvm_launcher(launcher)
     launcher.write_text("#!/bin/sh\necho someone else's ltvm\n")
     assert not host_uninstall._is_ltvm_launcher(launcher)
+
+
+def test_launcher_symlink_from_older_install_is_ltvms(
+    host: FakeSudo, tmp_path: Path
+) -> None:
+    checkout = tmp_path / "checkout"
+    (checkout / "ltvm_pkg").mkdir(parents=True)
+    _touch(checkout / "ltvm")
+    link = host_uninstall.LAUNCHER
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(checkout / "ltvm")
+    assert host_uninstall._is_ltvm_launcher(link)
+    # The checkout is gone: the dangling link is still ours.
+    shutil.rmtree(checkout)
+    assert host_uninstall._is_ltvm_launcher(link)
+    link.unlink()
+    link.symlink_to(_touch(tmp_path / "other" / "ltvm"))
+    assert not host_uninstall._is_ltvm_launcher(link)
 
 
 # ------------------------------------------------------------------
@@ -299,6 +364,47 @@ def test_survey_reads_without_sudo(host: FakeSudo) -> None:
     assert s.subnet == "192.168.200"
     assert s.crashes == host_uninstall.crash_dir()
     assert host.calls == []
+
+
+def test_survey_without_podman_machine_is_checked(
+    host: FakeSudo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        host_uninstall.shutil, "which", lambda name, **kw: "/bin/" + name
+    )
+    monkeypatch.setattr(host_setup, "_podman_machine_list_macos", lambda: [])
+    s = host_uninstall.survey(macos=True)
+    assert s.podman_machine is None
+    assert s.podman_checked
+    assert not any(
+        "not checked" in ln for ln in host_uninstall.describe(s, Choices())
+    )
+
+
+def test_which_finds_sbin_tools_off_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ltvm_pkg import priv
+
+    tool = _touch(tmp_path / "sbin" / "iptables")
+    tool.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+    monkeypatch.setattr(priv, "_SBIN_DIRS", (str(tool.parent),))
+    assert priv.which("iptables") == str(tool)
+
+
+def test_ensure_dir_goes_to_sudo_when_parent_is_unsearchable(
+    host: FakeSudo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ltvm_pkg import priv
+
+    def denied(self: Path, *a: Any, **kw: Any) -> bool:
+        raise PermissionError(13, "Permission denied", str(self))
+
+    monkeypatch.setattr(priv.Path, "is_dir", denied)
+    monkeypatch.setattr(priv.Path, "mkdir", denied)
+    priv.ensure_dir(Path("/root/.ssh"))
+    assert host.ran("mkdir", "-p", "/root/.ssh")
 
 
 def test_questions_only_for_what_is_there() -> None:
@@ -327,6 +433,7 @@ def test_describe_marks_each_choice() -> None:
 def _macos_host(host: FakeSudo) -> None:
     for p in (
         rootless.DNSMASQ_RELOAD_PLIST,
+        rootless.DNSMASQ_RELOAD_SCRIPT,
         host_setup.DNSMASQ_PLIST_PATH,
         host_setup.SOCKET_VMNET_PLIST_PATH,
         host_setup.DNSMASQ_CONF_PATH,
@@ -371,6 +478,8 @@ def test_macos_removes_what_install_made(
     assert not host_setup.DNSMASQ_PLIST_PATH.exists()
     assert not host_setup.SOCKET_VMNET_PLIST_PATH.exists()
     assert not rootless.DNSMASQ_RELOAD_PLIST.exists()
+    # The job's program and the directory install made for it.
+    assert not rootless.DNSMASQ_RELOAD_SCRIPT.parent.exists()
     assert not host_setup.DNSMASQ_CONF_PATH.exists()
     assert not host_uninstall.MACOS_LOG_DIRS[0].exists()
     assert not host_uninstall.QEMU_PREFIX.exists()
@@ -397,6 +506,7 @@ def test_linux_removes_what_install_made(
         host_uninstall.SUDOERS_FRAGMENT,
         host_uninstall.DK_FILTER,
         host_setup.HOST_DNSMASQ_EXCEPT,
+        host_setup.LEGACY_DNSMASQ_CONF,
     ):
         _touch(p)
     _touch(rootless.BRIDGE_ACL, "allow virbr0\nallow fcbr0\n")
@@ -428,7 +538,7 @@ def test_linux_removes_what_install_made(
     )
     monkeypatch.setattr(host_setup, "_systemctl_ok", lambda *a: True)
     monkeypatch.setattr(
-        host_uninstall.shutil, "which", lambda n: f"/usr/sbin/{n}"
+        host_uninstall.shutil, "which", lambda n, **kw: f"/usr/sbin/{n}"
     )
     monkeypatch.setattr(host_uninstall.os, "geteuid", lambda: 1000)
 
@@ -441,6 +551,7 @@ def test_linux_removes_what_install_made(
     assert host.ran("systemctl", "try-restart", "dnsmasq.service")
     assert not present, "an iptables rule was left"
     assert not host_uninstall.SUDOERS_FRAGMENT.exists()
+    assert not host_setup.LEGACY_DNSMASQ_CONF.exists()
     assert not host_setup.LTVM_DNSMASQ_CONF.parent.exists()
     assert written[rootless.BRIDGE_ACL] == ("allow virbr0\n", 0o644)
     assert written[host_uninstall.ROOT_SSH_CONFIG] == (
@@ -509,6 +620,48 @@ def _data(host: FakeSudo) -> Survey:
     art = _touch(Path(tc.ARTIFACTS_DIR) / "rocky9" / "meta.json").parents[1]
     crashes = _touch(host_uninstall.crash_dir() / "vmcore").parent
     return Survey(macos=True, artifacts=[art], crashes=crashes)
+
+
+def test_linux_has_no_machine_to_take_the_images(
+    host: FakeSudo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ran: list[list[str]] = []
+
+    def run(cmd: list[str], **kw: Any) -> Any:
+        ran.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(host_uninstall.subprocess, "run", run)
+    s = Survey(macos=False, podman_tags=["ltvm-build-rocky9"])
+    c = Choices(podman_machine=True, podman_images=True)
+    host_uninstall._remove_podman_images(s, c)
+    assert ["podman", "rmi", "ltvm-build-rocky9"] in ran
+    kept = host_uninstall.kept(
+        s, Choices(podman_machine=True, podman_images=False)
+    )
+    assert [k.name for k in kept] == ["podman images"]
+    assert "podman images" in host_uninstall.confirmation(
+        s, Choices(podman_machine=True, podman_images=False)
+    )
+
+
+def test_a_stuck_launchd_job_does_not_keep_the_others(
+    host: FakeSudo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ltvm_pkg.rootless import DNSMASQ_RELOAD_LABEL
+
+    def bootout(label: str) -> bool:
+        if label == DNSMASQ_RELOAD_LABEL:
+            raise RuntimeError(f"launchd still has {label} loaded")
+        return True
+
+    monkeypatch.setattr(host_uninstall, "_bootout", bootout)
+    reload_plist = _touch(rootless.DNSMASQ_RELOAD_PLIST)
+    dnsmasq_plist = _touch(host_setup.DNSMASQ_PLIST_PATH)
+    with pytest.raises(RuntimeError, match=DNSMASQ_RELOAD_LABEL):
+        host_uninstall._macos_daemons()
+    assert reload_plist.exists()
+    assert not dnsmasq_plist.exists()
 
 
 def test_kept_by_default(host: FakeSudo) -> None:
@@ -592,10 +745,16 @@ def test_user_state_keeps_suite_results(host: FakeSudo) -> None:
     results = _touch(
         host_uninstall.state_dir() / "suite" / "r1" / "results.yml"
     )
-    host_uninstall._user_state()
+    telemetry = host_uninstall.state_dir() / "telemetry.json"
+    detail = host_uninstall._user_state()
     assert not host_uninstall.config_dir().exists()
-    assert not (host_uninstall.state_dir() / "telemetry.json").exists()
+    assert not telemetry.exists()
     assert results.exists()
+    assert detail is not None
+    assert str(telemetry) in detail.split()
+    assert str(host_uninstall.state_dir()) not in detail.split()
+    # Only the results are left: nothing more to report.
+    assert host_uninstall._user_state() is None
 
 
 # ------------------------------------------------------------------
@@ -668,6 +827,18 @@ def test_cli_dry_run_changes_nothing(
     assert host.calls == []
     assert host_uninstall.VM_DIR.exists()
     assert "ltvm uninstall will remove" in capsys.readouterr().out
+
+
+def test_cli_dry_run_with_yes_shows_what_yes_keeps(
+    host: FakeSudo, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from ltvm_pkg.cli import setup
+
+    _touch(host_uninstall.crash_dir() / "vmcore")
+    assert setup.cmd_uninstall(_args(dry_run=True, yes=True)) == 0
+    out = capsys.readouterr().out
+    assert "[keep] crash dumps" in out
+    assert "[ask]" not in out
 
 
 def test_cli_without_a_terminal_needs_yes(
@@ -765,6 +936,23 @@ def test_socket_dir_in_the_keg_goes(
     assert not (keg / "var").exists()
     assert not sock.exists()
     assert (keg / "bin" / "socket_vmnet").exists()
+
+
+def test_reload_script_dir_with_other_files_stays(host: FakeSudo) -> None:
+    script = _touch(rootless.DNSMASQ_RELOAD_SCRIPT)
+    other = _touch(script.parent / "keep")
+    host_uninstall._macos_files()
+    assert not script.exists()
+    assert other.exists()
+    assert not host.ran("rmdir")
+
+
+def test_host_installed_before_the_reload_script(host: FakeSudo) -> None:
+    """An older install ran launchctl directly: no script, no directory."""
+    _touch(host_setup.DNSMASQ_CONF_PATH)
+    removed = host_uninstall._macos_files() or ""
+    assert str(rootless.DNSMASQ_RELOAD_SCRIPT) not in removed
+    assert not host.ran("rmdir")
 
 
 def test_socket_dir_with_other_files_stays(
