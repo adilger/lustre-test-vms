@@ -289,7 +289,7 @@ class TestCheckPrerequisites:
         """GRUB's EFI modules are a directory on the host, not a tool."""
         import ltvm_pkg.host_setup as hs
 
-        monkeypatch.setattr(hs, "_check_grub_efi_modules", lambda host: None)
+        monkeypatch.setattr(hs, "_check_grub_modules", lambda host: None)
 
     @pytest.fixture(autouse=True)
     def _no_epel(self, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -60,6 +60,17 @@ _ROOT_START_MIB = _ESP_MIB[1]
 # Where Debian's grub-efi-amd64-bin and RHEL's grub2-efi-x64-modules
 # both put GRUB's UEFI modules.
 GRUB_EFI_DIR = Path("/usr/lib/grub/x86_64-efi")
+# And where grub-pc-bin and grub2-pc-modules put its BIOS modules.
+# EL's grub2-tools has grub2-install without them.
+GRUB_PC_DIR = Path("/usr/lib/grub/i386-pc")
+
+
+def grub_module_dirs() -> list[tuple[str, Path, str, str]]:
+    """The GRUB modules export needs: (kind, dir, apt pkg, dnf pkg)."""
+    return [
+        ("BIOS", GRUB_PC_DIR, "grub-pc-bin", "grub2-pc-modules"),
+        ("UEFI", GRUB_EFI_DIR, "grub-efi-amd64-bin", "grub2-efi-x64-modules"),
+    ]
 
 
 def x86_grub_packaged() -> bool:
@@ -201,12 +212,12 @@ def _check_host_tools(image_format: str = "qcow2") -> dict[str, str]:
     mkimage = _which_or_die(
         ["grub2-mkimage", "grub-mkimage"], "grub2-tools / grub-common"
     )
-    if not GRUB_EFI_DIR.is_dir():
-        raise RuntimeError(
-            f"no GRUB UEFI modules at {GRUB_EFI_DIR} -- install "
-            f"grub2-efi-x64-modules (RHEL) or grub-efi-amd64-bin "
-            f"(Debian/Ubuntu)"
-        )
+    for kind, d, apt, dnf in grub_module_dirs():
+        if not d.is_dir():
+            raise RuntimeError(
+                f"no GRUB {kind} modules at {d} -- install "
+                f"{dnf} (RHEL) or {apt} (Debian/Ubuntu)"
+            )
     return {"grub_install": grub, "grub_mkimage": mkimage}
 
 

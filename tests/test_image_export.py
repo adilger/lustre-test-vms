@@ -14,10 +14,11 @@ from tests.host_marks import x86_host  # noqa: F401
 
 @pytest.fixture(autouse=True)
 def _grub_efi_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The host-tool checks look for GRUB's x86_64-efi modules."""
+    """The host-tool checks look for GRUB's module directories."""
     import ltvm_pkg.image_export as ie
 
     monkeypatch.setattr(ie, "GRUB_EFI_DIR", tmp_path)
+    monkeypatch.setattr(ie, "GRUB_PC_DIR", tmp_path)
 
 
 # What _check_host_tools returns on a Debian-family host.
@@ -257,7 +258,7 @@ class TestArm64Host:
 
         host = MagicMock(pkg_mgr="apt")
         with patch.object(host_setup, "_pkg_install") as pkg_install:
-            host_setup._check_grub_efi_modules(host)
+            host_setup._check_grub_modules(host)
         pkg_install.assert_not_called()
 
     def test_doctor_does_not_count_them(self) -> None:
@@ -711,8 +712,38 @@ class TestHostSetupDeps:
             patch.object(ie, "GRUB_EFI_DIR", tmp_path / "nope"),
             patch.object(host_setup, "_pkg_install") as install,
         ):
-            host_setup._check_grub_efi_modules(host)
+            host_setup._check_grub_modules(host)
         install.assert_called_once_with(host, pkg, no_recommends=True)
+
+    @pytest.mark.parametrize(
+        "pkg_mgr,pkg",
+        [("apt", "grub-pc-bin"), ("dnf", "grub2-pc-modules")],
+    )
+    def test_bios_modules_installed(
+        self, tmp_path: Path, pkg_mgr: str, pkg: str
+    ) -> None:
+        """grub2-install is there on EL without the i386-pc modules."""
+        import ltvm_pkg.image_export as ie
+        from ltvm_pkg import host_setup
+
+        host = MagicMock()
+        host.pkg_mgr = pkg_mgr
+        with (
+            patch.object(ie, "GRUB_PC_DIR", tmp_path / "nope"),
+            patch.object(host_setup, "_pkg_install") as install,
+        ):
+            host_setup._check_grub_modules(host)
+        install.assert_called_once_with(host, pkg, no_recommends=True)
+
+    def test_export_names_missing_bios_modules(self, tmp_path: Path) -> None:
+        import ltvm_pkg.image_export as ie
+
+        with (
+            patch.object(ie, "GRUB_PC_DIR", tmp_path / "nope"),
+            patch.object(ie.shutil, "which", lambda n: f"/usr/bin/{n}"),
+            pytest.raises(RuntimeError, match="no GRUB BIOS modules"),
+        ):
+            ie._check_host_tools("qcow2")
 
     def test_efi_modules_present_installs_nothing(self, tmp_path: Path) -> None:
         import ltvm_pkg.image_export as ie
@@ -724,7 +755,7 @@ class TestHostSetupDeps:
             patch.object(ie, "GRUB_EFI_DIR", tmp_path),
             patch.object(host_setup, "_pkg_install") as install,
         ):
-            host_setup._check_grub_efi_modules(host)
+            host_setup._check_grub_modules(host)
         install.assert_not_called()
 
 

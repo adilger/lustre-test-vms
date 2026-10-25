@@ -3079,11 +3079,12 @@ def _check_export_tools() -> list[str]:
                 f"missing host tool: {'/'.join(pair)} "
                 "(needed by `ltvm target export`)"
             )
-    if not image_export.GRUB_EFI_DIR.is_dir():
-        warnings.append(
-            f"missing GRUB UEFI modules: {image_export.GRUB_EFI_DIR} "
-            "(needed by `ltvm target export`)"
-        )
+    for kind, d, _, _ in image_export.grub_module_dirs():
+        if not d.is_dir():
+            warnings.append(
+                f"missing GRUB {kind} modules: {d} "
+                "(needed by `ltvm target export`)"
+            )
     return warnings
 
 

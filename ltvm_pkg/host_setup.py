@@ -307,33 +307,34 @@ def _enable_epel(host: HostInfo) -> None:
         )
 
 
-def _check_grub_efi_modules(host: HostInfo) -> None:
-    """GRUB's x86_64-efi modules, which `target export` builds the ESP
-    loader from.  A directory rather than a command, so not in
-    check_prerequisites' table.
+def _check_grub_modules(host: HostInfo) -> None:
+    """GRUB's i386-pc and x86_64-efi modules, which `target export`
+    installs the BIOS loader and builds the ESP loader from.  Directories
+    rather than commands, so not in check_prerequisites' table.
 
     Without recommends: on Debian they pull in grub-efi-amd64-signed and
     with it a whole EFI bootloader stack the host does not boot from.
     """
     from ltvm_pkg import image_export
 
-    if image_export.GRUB_EFI_DIR.is_dir():
+    missing = [m for m in image_export.grub_module_dirs() if not m[1].is_dir()]
+    if not missing:
         return
     if not image_export.x86_grub_packaged():
         log.info("%s", image_export.X86_GRUB_NOTE)
         return
-    pkg = (
-        "grub-efi-amd64-bin"
-        if host.pkg_mgr == "apt"
-        else "grub2-efi-x64-modules"
-    )
-    log.info("Installing %s (GRUB UEFI modules for target export)...", pkg)
-    _pkg_install(host, pkg, no_recommends=True)
-    if not image_export.GRUB_EFI_DIR.is_dir():
-        log.warning(
-            "%s did not install; `ltvm target export` will fail until it does",
-            pkg,
+    for kind, d, apt, dnf in missing:
+        pkg = apt if host.pkg_mgr == "apt" else dnf
+        log.info(
+            "Installing %s (GRUB %s modules for target export)...", pkg, kind
         )
+        _pkg_install(host, pkg, no_recommends=True)
+        if not d.is_dir():
+            log.warning(
+                "%s did not install; `ltvm target export` will fail until "
+                "it does",
+                pkg,
+            )
 
 
 def check_prerequisites(host: HostInfo) -> None:
@@ -393,7 +394,7 @@ def check_prerequisites(host: HostInfo) -> None:
                 "  Install them by hand and re-run `ltvm install`."
             )
 
-    _check_grub_efi_modules(host)
+    _check_grub_modules(host)
 
     if not shutil.which("podman"):
         log.info("Installing podman (needed for container/image builds)...")
