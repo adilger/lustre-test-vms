@@ -198,6 +198,134 @@ def _link_skills(use_json: bool) -> None:
 
 
 # ------------------------------------------------------------------
+# Subcommand: uninstall
+# ------------------------------------------------------------------
+
+
+def _ask(question: str) -> bool:
+    """A yes/no question whose answer, unless yes, is no."""
+    try:
+        answer = input(f"{question} [y/N] ")
+    except EOFError:
+        return False
+    return answer.strip().lower() in ("y", "yes")
+
+
+def cmd_uninstall(args: argparse.Namespace) -> int:
+    """Undo `ltvm install`, asking about what holds the user's data."""
+    import sys
+
+    from ltvm_pkg import host_uninstall, priv
+
+    use_json = args.json
+    sudo_user = os.environ.get("SUDO_USER")
+    if os.geteuid() == 0 and sudo_user and sudo_user != "root":
+        return _error(
+            "Do not run `ltvm uninstall` under sudo: the podman store, "
+            "skills, artifacts and crash dumps it removes are yours, not "
+            "root's.  Run it as yourself; it asks for sudo only for the "
+            "steps that need it.",
+            use_json,
+        )
+
+    choices = host_uninstall.Choices(
+        artifacts=args.artifacts,
+        crashes=args.crashes,
+        podman_machine=args.podman_machine,
+        podman_images=args.podman_images,
+    )
+    try:
+        survey = host_uninstall.survey()
+    except Exception as e:  # noqa: BLE001
+        return _error(f"uninstall: {e}", use_json)
+    if survey.claimed:
+        return _error(
+            "VMs another session is using:\n  " + "\n  ".join(survey.claimed),
+            use_json,
+            hint="Release them (ltvm release <vm>) or wait for that session.",
+        )
+
+    if args.dry_run:
+        if use_json:
+            _output(
+                {
+                    "dry_run": True,
+                    "plan": host_uninstall.describe(survey, choices),
+                    "left_in_place": host_uninstall.left_in_place(
+                        survey, choices
+                    ),
+                },
+                True,
+            )
+        else:
+            print("\n".join(host_uninstall.describe(survey, choices)))
+        return EXIT_OK
+
+    if not args.yes:
+        if use_json or not sys.stdin.isatty():
+            return _error(
+                "ltvm uninstall asks before it removes anything",
+                use_json,
+                hint="Pass --yes, with --delete-*/--keep-* for anything "
+                "that should not be kept.",
+            )
+        print("\n".join(host_uninstall.describe(survey, choices)))
+        print()
+        for attr, question in host_uninstall.questions(survey):
+            if attr == "podman_images" and choices.podman_machine:
+                continue  # they go with the machine
+            if getattr(choices, attr) is None:
+                setattr(choices, attr, _ask(question))
+        if not _ask(host_uninstall.confirmation(survey, choices)):
+            print("Nothing removed.")
+            return EXIT_OK
+    for attr in ("artifacts", "crashes", "podman_machine", "podman_images"):
+        if getattr(choices, attr) is None:
+            setattr(choices, attr, False)
+
+    if not use_json:
+        try:
+            priv.sudo_prime("Uninstalling ltvm needs root for its system files")
+        except priv.SudoUnavailable as e:
+            return _error(str(e), use_json)
+
+    report = host_uninstall.run(survey, choices, use_json)
+    left = host_uninstall.left_in_place(survey, choices)
+    failed = [
+        r
+        for r in report
+        if r.status in (host_uninstall.FAILED, host_uninstall.SKIPPED)
+    ]
+    if use_json:
+        _output(
+            {
+                "ok": not failed,
+                "steps": [r.as_dict() for r in report],
+                "left_in_place": left,
+            },
+            True,
+        )
+    else:
+        for r in report:
+            if r.status == host_uninstall.KEPT:
+                print(f"Kept {r.name}: {r.detail}")
+            elif r.status == host_uninstall.FAILED:
+                print(f"FAILED {r.name}: {r.detail}")
+            elif r.status == host_uninstall.SKIPPED:
+                print(f"Skipped {r.name}: {r.detail}")
+        print("Left in place:")
+        for line in left:
+            print(f"  {line}")
+        print(
+            "ltvm uninstalled."
+            if not failed
+            else "ltvm uninstall finished with failures (above); run it again "
+            "after fixing them."
+        )
+    return EXIT_ERROR if failed else EXIT_OK
+
+
+# ------------------------------------------------------------------
 # Subcommand: skills
 # ------------------------------------------------------------------
 

@@ -121,6 +121,54 @@ def trust_bridge() -> None:
         log.info("firewalld: put %s in the %s zone", BRIDGE, FIREWALLD_ZONE)
 
 
+def _ufw_delete(rule: tuple[str, ...]) -> list[str]:
+    """The ufw command that deletes *rule*: ``delete`` goes after ``route``."""
+    if rule[0] == "route":
+        return ["ufw", "route", "delete", *rule[1:]]
+    return ["ufw", "delete", *rule]
+
+
+def untrust_bridge() -> list[str]:
+    """Undo trust_bridge(); the commands that failed, if any.
+
+    Runs as the user, elevating each command: `ltvm uninstall` is not run
+    under sudo.  A rule that is already gone is not a failure.
+    """
+    from .priv import sudo_run
+
+    failed: list[str] = []
+    kind = active()
+    if kind == "ufw":
+        for rule in UFW_RULES:
+            cmd = _ufw_delete(rule)
+            r = sudo_run(cmd, check=False, quiet=True)
+            out = f"{r.stdout or ''}{r.stderr or ''}"
+            if r.returncode != 0 and "non-existent" not in out:
+                failed.append(" ".join(cmd))
+        log.info("ufw: removed the rules for %s", BRIDGE)
+    elif kind == "firewalld":
+        r = sudo_run(
+            ["firewall-cmd", f"--get-zone-of-interface={BRIDGE}"],
+            check=False,
+            quiet=True,
+        )
+        if (r.stdout or "").strip() != FIREWALLD_ZONE:
+            return failed
+        for extra in ([], ["--permanent"]):
+            cmd = [
+                "firewall-cmd",
+                *extra,
+                f"--zone={FIREWALLD_ZONE}",
+                f"--remove-interface={BRIDGE}",
+            ]
+            if sudo_run(cmd, check=False, quiet=True).returncode != 0:
+                failed.append(" ".join(cmd))
+        log.info(
+            "firewalld: took %s out of the %s zone", BRIDGE, FIREWALLD_ZONE
+        )
+    return failed
+
+
 def status() -> dict[str, Any]:
     """For ``install --verify``.  ``trusted`` is None when it cannot be
     read as this user (ufw lists its rules only to root)."""

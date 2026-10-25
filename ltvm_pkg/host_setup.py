@@ -2640,6 +2640,46 @@ def install_scripts(host: HostInfo) -> None:
 SSH_BLOCK_MARKER = "# lustre-test-vms"
 
 
+def strip_ssh_block(text: str) -> str:
+    """*text* without the stanza setup_ssh() appends, if it is there."""
+    # Strip from the marker to the end of ltvm's own stanza --
+    # its `Host <subnet>.*` line plus the indented options under
+    # it -- and no further.
+    #
+    # This used to stop skipping only at a blank line, and the
+    # block setup_ssh appends ends with "    User root\n" and no
+    # blank line after it.  So anything a user had added *below*
+    # ltvm's stanza, with no intervening blank line, was skipped
+    # to EOF and silently deleted from /root/.ssh/config on any
+    # `ltvm install --subnet <other>`.
+    lines = text.splitlines(keepends=True)
+    out = []
+    skip = False
+    seen_host = False
+    for line in lines:
+        if SSH_BLOCK_MARKER in line:
+            skip = True
+            seen_host = False
+            continue
+        if not skip:
+            out.append(line)
+            continue
+        stripped = line.strip()
+        if stripped == "":
+            skip = False
+            continue
+        if line[:1].isspace():
+            continue  # an indented option of ltvm's stanza
+        if not seen_host and stripped.startswith("Host "):
+            seen_host = True
+            continue  # ltvm's own Host line
+        # A second unindented directive: somebody else's stanza
+        # starts here, and it is not ours to remove.
+        skip = False
+        out.append(line)
+    return "".join(out)
+
+
 def setup_ssh(subnet: str = DEFAULT_SUBNET) -> None:
     """Configure host SSH for fast VM access."""
     log.info("Configuring SSH for fast VM access")
@@ -2656,42 +2696,7 @@ def setup_ssh(subnet: str = DEFAULT_SUBNET) -> None:
                 return
             # Subnet changed -- strip old block
             log.info("Updating SSH config for new subnet")
-            # Strip from the marker to the end of ltvm's own stanza --
-            # its `Host <subnet>.*` line plus the indented options under
-            # it -- and no further.
-            #
-            # This used to stop skipping only at a blank line, and the
-            # block appended below ends with "    User root\n" and no
-            # blank line after it.  So anything a user had added *below*
-            # ltvm's stanza, with no intervening blank line, was skipped
-            # to EOF and silently deleted from /root/.ssh/config on any
-            # `ltvm install --subnet <other>`.
-            lines = text.splitlines(keepends=True)
-            out = []
-            skip = False
-            seen_host = False
-            for line in lines:
-                if SSH_BLOCK_MARKER in line:
-                    skip = True
-                    seen_host = False
-                    continue
-                if not skip:
-                    out.append(line)
-                    continue
-                stripped = line.strip()
-                if stripped == "":
-                    skip = False
-                    continue
-                if line[:1].isspace():
-                    continue  # an indented option of ltvm's stanza
-                if not seen_host and stripped.startswith("Host "):
-                    seen_host = True
-                    continue  # ltvm's own Host line
-                # A second unindented directive: somebody else's stanza
-                # starts here, and it is not ours to remove.
-                skip = False
-                out.append(line)
-            text = "".join(out)
+            text = strip_ssh_block(text)
             config.write_text(text)
 
     block = f"""

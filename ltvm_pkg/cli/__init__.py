@@ -142,6 +142,7 @@ from ltvm_pkg.cli.setup import (  # noqa: E402
     cmd_doctor,
     cmd_setup,
     cmd_skills,
+    cmd_uninstall,
     cmd_update,
 )
 from ltvm_pkg.cli.suite import (  # noqa: E402
@@ -269,6 +270,7 @@ __all__ = [
     "cmd_restore",
     "cmd_setup",
     "cmd_skills",
+    "cmd_uninstall",
     "cmd_snapshot",
     "cmd_status",
     "cmd_suite_collect",

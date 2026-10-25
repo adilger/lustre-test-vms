@@ -22,6 +22,12 @@ On macOS run `./ltvm install` *without* sudo: it refuses to run
 as root there (Homebrew will not) and elevates only the steps
 that need it -- see "Running on macOS" in README.md.
 
+`./ltvm uninstall` is the inverse, on both platforms run *without* sudo
+(`ltvm_pkg/host_uninstall.py`).  It keeps artifacts, crash dumps and the
+podman machine and images unless told otherwise (`--delete-*`), and
+`--dry-run` shows the plan without sudo.  A new install step needs its
+inverse there, next to the installer's own constants.
+
 Ask: **"Where is your Lustre source checkout?"**  The usage
 guidance an agent needs is the `ltvm` skill, which `ltvm
 install` links into their skill directories -- there is

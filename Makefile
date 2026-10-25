@@ -59,11 +59,8 @@ hooks:
 install:
 	sudo ./ltvm install
 
-# Remove ltvm from PATH and clean up installed files.
-# Completion first, while ltvm is still runnable: it knows all the
-# per-shell paths it may have written to, which a literal rm here
-# would have to duplicate.  Tolerated if it fails (leading `-`) so a
-# broken checkout cannot block removing the launcher.
+# Undo `make install`: everything ltvm install set up on this host.
+# No sudo -- ltvm uninstall elevates only the steps that need it, and
+# asks before deleting artifacts, crash dumps or podman state.
 uninstall:
-	-sudo ./ltvm completion --uninstall
-	sudo rm -f /usr/local/bin/ltvm /usr/local/bin/dk-filter
+	./ltvm uninstall
