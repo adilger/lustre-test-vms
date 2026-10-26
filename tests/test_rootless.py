@@ -253,7 +253,8 @@ class TestMacosReadiness:
         link.symlink_to(f)
         assert not rootless.root_only(tmp_path / "missing")
         assert not rootless.root_only(link)
-        assert rootless.root_only(Path("/bin/sh"))
+        # /bin/sh is a link to dash on Debian and Ubuntu.
+        assert rootless.root_only(Path("/bin/sh").resolve())
         if os.geteuid() != 0:
             assert not rootless.root_only(f)
 
