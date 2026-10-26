@@ -499,6 +499,11 @@ and exits non-zero on any failure; `status` flags a node that rebooted
 during the run (a crash: look in `/var/crash`).  One suite at a time per
 VM or cluster; `run` refuses a second.
 
+A suite that passes ends unmounted, on ldiskfs and ZFS alike: auster
+mounted Lustre, so it cleans up after a clean run (a failed one is
+usually left mounted).  For ad-hoc checks afterwards, `ltvm llmount <vm>`
+(`ltvm cluster llmount <cluster>`) mounts it again, reformatted.
+
 Collected logs go to `./ltvm-suite/<target>/<run-id>/` under the
 directory you run from; `run` and `collect` print the full path, and
 `status` shows `collected to <dir>` once a run has been collected.
