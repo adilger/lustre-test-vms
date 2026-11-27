@@ -127,6 +127,41 @@ targets:
     status: working
     zfs:
       version: 2.4.0
+  rocky9-kasan:
+    # rocky9 with a memory-debugging kernel: KASAN, UBSAN and SLUB
+    # debugging report use-after-free, out-of-bounds and slab poison or
+    # redzone damage as it happens, where a stock kernel shows a later
+    # oops, LBUG or LASSERT, if anything.  For fuzzing and for chasing
+    # memory corruption.  KASAN's shadow takes an eighth of guest RAM
+    # and slows the kernel down a few times, so give its VMs more memory
+    # (--mem 6144).  Same as rocky9 otherwise, and its files are copies
+    # of rocky9's.
+    container_image: quay.io/rockylinux/rockylinux:9
+    kernels:
+      available:
+      - 5.14-rhel9.7
+      config:
+        CONFIG_XEN_PVH: y
+        CONFIG_KASAN: y
+        CONFIG_KASAN_GENERIC: y
+        CONFIG_KASAN_OUTLINE: y
+        CONFIG_KASAN_VMALLOC: y
+        CONFIG_UBSAN: y
+        CONFIG_UBSAN_BOUNDS: y
+        CONFIG_UBSAN_SHIFT: y
+        CONFIG_SLUB_DEBUG: y
+        CONFIG_DEBUG_KERNEL: y
+        CONFIG_DEBUG_LIST: y
+        CONFIG_STACKTRACE: y
+      default: 5.14-rhel9.7
+    lustre:
+      mode: server_ldiskfs
+    os_name: rocky
+    os_version: "9.7"
+    srpm_url: https://dl.rockylinux.org/pub/rocky/9/BaseOS/source/tree/Packages/k
+    status: working
+    zfs:
+      version: 2.4.0
   rocky10:
     configure_args:
     - --enable-gss=yes
